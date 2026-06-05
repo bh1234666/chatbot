@@ -1,0 +1,107 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# venv
+.venv/
+venv/
+env/
+
+# 配置 / 密钥
+.env
+.env.local
+.env.*.local
+
+# 数据库 / 数据
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+data/
+chatbot.db*
+
+# 工作区 / 缓存
+data/workspaces/
+.dream_cache/
+
+# 日志 / debug
+*.log
+logs/
+debug_logs/
+tmp_guard_debug/
+
+# 测试 / 工具产物
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.benchmarks/
+.coverage
+htmlcov/
+output/
+stress_tools/runs/
+
+# 历史 / 备份 / 清理
+backups/
+del/
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# 第三方运行时(独立部署,不入仓)
+mineru/
+ominvioce/
+umi-ocr/
+mingw64/
+napcat/
+claude-code-main/
+
+# 人设私有内容(只允许 environment.md 通过快照脚本输出)
+personas/*.md
+!personas/environment.md
+personas/*.wav
+personas/*.mp3
+
+# 用户素材
+5月雅思/
+电子231工程管理/
+
+# 根目录临时调试脚本
+/_debug*.py
+/_test_*.py
+/_check_*.py
+/_final_verification.py
+/_monitor_tests.py
+/_trace_copy.py
+/_write_*.py
+
+# 根目录会话遗留报告
+/HANDOFF.md
+/CACHE_HIT_RATE_HANDOFF_*.md
+/code_fixes_and_optimization_report.md
+/final_*.md
+/interim_*.md
+/test_session_status.md
+/verification_criteria.md
+/plan.md
+/app.zip
+
+# docs 下的 session-specific 报告
+docs/cache_report_*.md
+docs/cache_convergence_*.md
+docs/stability_longtest_*.md
+docs/DEBUG_SUMMARY_*.md
+
+# 编辑器 / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 公开快照导出目录(以防被设置在内部)
+/dist/public-snapshot/

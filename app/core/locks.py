@@ -1,0 +1,456 @@
+"""
+Per-user 互斥锁 + abort 信号管理。
+
+约束（2026-05-01 改造，从 per-group 锁 → per-user 锁）：
+  - 同一 (archive_id, group_id, user_id) 同时只能有一个对话流程在执行。
+  - 同一群里**不同用户**的请求可以并行——别人的请求对当前用户不重要,
+    后续存入记忆即可。
+  - per-user 串行保证单用户对话连续性；同 user 第二条消息发起时:
+    * 若上次任务还在跑：返回 GroupBusyError,触发 abort 信号
+    * 不阻塞别的用户
+
+旧版 per-group 锁的问题：
+  trace ea1a8826 的 RL 训练任务跑了 13 分钟,期间整个群所有用户都被阻塞。
+  per-user 改造后,同群其他用户的请求可立即进入流水线,只是看到的记忆/
+  群文件是任务起始时的快照（共享冷/KB/group_files 索引,不会丢信息,只是
+  不会看到当前还没结束的 in-flight 内容）。
+
+abort 信号设计（修旧 Bug 27 的窗口期）：
+  旧版用一个 asyncio.Event,Round 2 catch 完 abort 后 Round 3 启动前
+  abort_event.clear()——清的瞬间若有第二个 abort 到达会被丢失。
+  现版用单调递增的 abort generation:
+    - 每次 signal_abort 把 _abort_gen 加 1
+    - 调用方进 Round 3 前记下 round3_start_gen
+    - Round 3 流式时检查 current_gen > round3_start_gen
+  这样 Round 2 阶段的 abort 信号只对 Round 2 生效,不会污染 Round 3;
+  Round 3 流式时新到的 abort 信号会被独立识别。
+
+acquire/release 不是 context manager 是因为 SSE 流场景下需要：
+  1. acquire 同步发生在 SSE 流建立之前（HTTP 409 直接返回）
+  2. release 在 SSE 流结束时（generator finally 中）
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import Optional
+
+
+class GroupBusyError(Exception):
+    """同 (archive, group, user) 已有其他任务在执行。"""
+
+    def __init__(
+        self,
+        archive_id: str,
+        group_id: str,
+        user_id: str,
+        holder_trace: Optional[str],
+    ):
+        self.archive_id = archive_id
+        self.group_id = group_id
+        self.user_id = user_id
+        self.holder_trace = holder_trace
+        msg = (
+            f"user is busy: archive_id={archive_id} group_id={group_id} "
+            f"user_id={user_id} active_trace_id={holder_trace}"
+        )
+        super().__init__(msg)
+
+
+class _AbortChannel:
+    """
+    封装一对 (group, user) 的 abort 状态。
+
+    用单调递增 generation 号代替单一 asyncio.Event,以解决"Round 2 abort
+    信号污染 Round 3"的窗口期问题。
+
+    用法（orchestrator 侧）：
+      ch = guard.get_abort_channel(archive, group, user)
+      r2_start = ch.gen
+      ... Round 2 ...
+      if ch.gen > r2_start: handle_abort()
+      r3_start = ch.gen          # 进 Round 3 前 snapshot 一次,屏蔽 R2 期间的旧信号
+      ... Round 3 ...
+      if ch.gen > r3_start: handle_abort()
+    """
+
+    __slots__ = ("_gen", "_event")
+
+    def __init__(self) -> None:
+        self._gen: int = 0
+        # 兼容旧 API：Event 仍然存在（is_set / wait / clear 都可以用），
+        # 但调用方应优先用 gen 比较。Event 在 signal 时 set,Round 进入时
+        # snapshot gen 后由调用方决定要不要 clear。
+        self._event: asyncio.Event = asyncio.Event()
+
+    @property
+    def gen(self) -> int:
+        return self._gen
+
+    @property
+    def event(self) -> asyncio.Event:
+        return self._event
+
+    def signal(self) -> int:
+        self._gen += 1
+        self._event.set()
+        return self._gen
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def clear(self) -> None:
+        """兼容旧代码：把 Event 状态清掉。注意不会回退 gen。"""
+        self._event.clear()
+
+
+class GroupGuard:
+    """
+    Per-user 互斥锁。键 = (archive_id, group_id, user_id)。
+    """
+
+    def __init__(self) -> None:
+        # 持锁映射：key → (trace_id, user_name) of holder
+        # 存 user_name 是为了让"群内其他成员当前正在交互"提示有可读名字,
+        # 而不是只能给出 user_id(QQ 号)。
+        self._active: dict[tuple[str, str, str], tuple[str, str]] = {}
+        self._lock = asyncio.Lock()
+        # 每条 (archive, group, user) 自己的 abort 通道
+        self._abort_channels: dict[tuple[str, str, str], _AbortChannel] = {}
+        # 2026-05-11 F5 修: stop_mode 之前写成类属性会导致所有 GroupGuard
+        # 实例共享(虽然当前是 singleton 没事,但模式不对、将来加测试就爆)。
+        # 改成实例属性。
+        self._stop_mode: dict[tuple[str, str, str], float] = {}
+        # 2026-05-11 E1: 同消息重发自动清 stop_mode 用的 last-message 缓存。
+        # 同样写成实例属性,避免 F5 的反例(类属性共享)。
+        self._last_user_message: dict[tuple[str, str, str], str] = {}
+        # 2026-05-21: 已被 Round2.5 abort 总结合并回答过的打断消息指纹。
+        # 病因(实测 trace c647979 / 13cedd4e 10:38): 用户打断时的新消息有两条路径
+        # 并行 —— (a) 经 /interrupt_message 入队, 被 Round2.5 合并进 abort 总结一次性
+        # 回答; (b) 同一条消息又作为新 /chat 请求进来, 命中 stop_mode → 强制 easy →
+        # 发出**第二条**回复。maybe_clear_stop_mode_on_repeat 只认\"续作意图/相似\",
+        # 认不出\"这条刚被合并答过\"。这里登记已合并消息指纹, 让后续 /chat 在 stop_mode
+        # 入口识别并跳过, 避免双回复。存 list[(fingerprint, ts_monotonic)], 120s TTL。
+        self._abort_injected_msgs: dict[tuple[str, str, str], list[tuple[str, float]]] = {}
+        # 2026-05-25: 当前处理阶段追踪。bridge 据此决定 abort 是否安全:
+        # round3 时 abort 会打断人设流式回复 → 用户收不到任何文字,所以 bridge
+        # 在 round3 期间只排队不 abort。stage 值: "" / "round1" / "round2" / "round3"。
+        self._stages: dict[tuple[str, str, str], str] = {}
+
+    async def acquire(
+        self, archive_id: str, group_id: str, user_id: str, trace_id: str,
+        *, user_name: str = "",
+    ) -> None:
+        """获取锁。失败立即抛 GroupBusyError，绝不等待。
+
+        user_name: 该 user 的人类可读名(QQ 昵称),会暴露给同群其他用户的
+          system prompt"群内其他成员当前仍在交互"提示。空字符串 fallback 到 user_id。
+        """
+        key = (archive_id, group_id, user_id)
+        async with self._lock:
+            holder = self._active.get(key)
+            if holder is not None:
+                raise GroupBusyError(archive_id, group_id, user_id, holder[0])
+            self._active[key] = (trace_id, user_name or user_id)
+
+    def get_abort_channel(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> _AbortChannel:
+        """获取/创建该 (archive, group, user) 的 abort 通道。"""
+        key = (archive_id, group_id, user_id)
+        ch = self._abort_channels.get(key)
+        if ch is None:
+            ch = _AbortChannel()
+            self._abort_channels[key] = ch
+        return ch
+
+    # ── 兼容旧 API ──
+    def get_abort_event(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> asyncio.Event:
+        """旧接口：拿底层 Event。新代码请用 get_abort_channel。"""
+        return self.get_abort_channel(archive_id, group_id, user_id).event
+
+    async def signal_abort(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> bool:
+        """
+        发送打断信号给指定 (archive, group, user) 的活跃任务。
+        返回是否成功（该 user 确实有活跃任务且不在 round3 保护期）。
+        round3 是人设流式回复阶段,abort 会导致用户收不到任何文字,
+        所以拒绝打断——bridge 应只排队等 round3 自然结束。
+        """
+        key = (archive_id, group_id, user_id)
+        async with self._lock:
+            if key not in self._active:
+                return False
+            if self._stages.get(key) == "round3":
+                return False
+            ch = self._abort_channels.get(key)
+            if ch is None:
+                ch = _AbortChannel()
+                self._abort_channels[key] = ch
+            ch.signal()
+            return True
+
+    async def release(
+        self, archive_id: str, group_id: str, user_id: str, trace_id: str,
+    ) -> bool:
+        """
+        释放锁。仅释放属于本次 trace_id 的锁（防止误释放其他持有者的锁）。
+        同时清理关联的 abort 通道和 stage。
+        返回是否成功释放。
+        """
+        key = (archive_id, group_id, user_id)
+        async with self._lock:
+            holder = self._active.get(key)
+            if holder is not None and holder[0] == trace_id:
+                self._active.pop(key, None)
+                self._abort_channels.pop(key, None)
+                self._stages.pop(key, None)
+                return True
+            return False
+
+    async def is_busy(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> bool:
+        async with self._lock:
+            return (archive_id, group_id, user_id) in self._active
+
+    async def active_holders(self) -> dict[tuple[str, str, str], str]:
+        """运营/调试：返回当前所有持锁的 trace_id(向后兼容,不含 user_name)。"""
+        async with self._lock:
+            return {k: v[0] for k, v in self._active.items()}
+
+    # ── 2026-05-25: stage 追踪,供 bridge 判断 abort 安全性 ──
+    # round3 是人设流式回复阶段,此时 abort 会让用户收不到任何文字。
+    # bridge 在 round3 期间只排队不 abort,等 round3 自然结束后 while 循环
+    # 会自动消费队列里的下一条消息。
+
+    def set_stage(
+        self, archive_id: str, group_id: str, user_id: str, stage: str,
+    ) -> None:
+        """设置当前处理阶段。stage: "" / "round1" / "round2" / "round3" """
+        self._stages[(archive_id, group_id, user_id)] = stage
+
+    def get_stage(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> str:
+        """查询当前处理阶段。无锁(单字符读安全)。"""
+        return self._stages.get((archive_id, group_id, user_id), "")
+
+    def clear_stage(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> None:
+        """清除阶段标记(orchestrator 结束时调,或 release 自动清)。"""
+        self._stages.pop((archive_id, group_id, user_id), None)
+
+    async def in_flight_users_in_group(
+        self, archive_id: str, group_id: str,
+        *, exclude_user_id: str | None = None,
+    ) -> list[tuple[str, str]]:
+        """
+        列出某群当前正在跑任务的 (user_id, user_name) 列表。
+
+        per-user 并行下用于给"刚开始的请求"注入"其他成员仍在交互"提示。
+        exclude_user_id: 通常传调用方自己的 user_id,排除自己。
+        """
+        async with self._lock:
+            out: list[tuple[str, str]] = []
+            for key, val in self._active.items():
+                if key[0] != archive_id or key[1] != group_id:
+                    continue
+                uid = key[2]
+                if exclude_user_id is not None and uid == exclude_user_id:
+                    continue
+                _trace, uname = val
+                out.append((uid, uname))
+            return out
+
+    # ── 2026-05-04 Bug #12 修复:user-level 持久 stop_mode ──
+    # _AbortChannel 是 per-(archive, group, user, trace),release() 时连带删除。
+    # 用户在新 trace 里说"停"无法 abort 自己刚刚 release 的旧 trace。但用户的
+    # 心智模型是"停=停掉之前所有未完成的事 + 我接下来一段时间不想看你做新工作"。
+    # 解决:加一个独立的 user-level stop_mode_until 时间戳。release abort_channel
+    # 时不影响它。后续 N 秒内该 user 的新请求看到 stop_mode 仍激活,可被 orchestrator
+    # 当作"不该做新工作,只该汇报状态"的信号。
+    #
+    # 用法:
+    #   guard.enter_stop_mode(archive, group, user, duration=20.0)
+    #     # napcat 收到 stop 命令时调,默认 20s 短窗口
+    #   guard.is_in_stop_mode(archive, group, user) -> bool
+    #     # orchestrator 进 Round 2 前查,True 时强制走 easy + 简短交代
+    # 注: _stop_mode 已移至 __init__ 作为实例属性 (2026-05-11 F5 修)。
+
+    def enter_stop_mode(
+        self, archive_id: str, group_id: str, user_id: str,
+        *, duration_sec: float = 20.0,
+    ) -> None:
+        """标记该 user 在 N 秒内进入 stop 模式。无锁(简单 dict,read 不加锁也安全)。"""
+        import time as _time
+        self._stop_mode[(archive_id, group_id, user_id)] = _time.monotonic() + duration_sec
+
+    def is_in_stop_mode(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> bool:
+        """查询该 user 是否仍在 stop 模式。过期自动清理。"""
+        import time as _time
+        key = (archive_id, group_id, user_id)
+        until = self._stop_mode.get(key)
+        if until is None:
+            return False
+        if _time.monotonic() >= until:
+            self._stop_mode.pop(key, None)
+            return False
+        return True
+
+    def clear_stop_mode(
+        self, archive_id: str, group_id: str, user_id: str,
+    ) -> None:
+        """显式清掉 stop 模式(orchestrator 检测到非 stop 类消息时可调,可选)。"""
+        self._stop_mode.pop((archive_id, group_id, user_id), None)
+
+    # ── 2026-05-21: Round2.5 已合并打断消息的去重兜底 ──
+    @staticmethod
+    def _abort_msg_fingerprint(message: str) -> str:
+        """把打断消息归一化成指纹(去前后空白 + 小写 + 折叠内部空白)。
+
+        用于匹配\"同一条消息\"的两条路径(interrupt_message 队列 vs 新 /chat 请求),
+        无需逐字符全等(前端/桥接可能加 @ 前缀或微调空白)。
+        """
+        s = (message or "").strip().lower()
+        return " ".join(s.split())
+
+    def mark_abort_injected(
+        self, archive_id: str, group_id: str, user_id: str, messages: "list[str]",
+    ) -> None:
+        """登记已被 Round2.5 abort 总结合并回答的打断消息(供后续 /chat 跳过)。"""
+        if not messages:
+            return
+        import time as _time
+        key = (archive_id, group_id, user_id)
+        now = _time.monotonic()
+        bucket = self._abort_injected_msgs.setdefault(key, [])
+        # 顺带清理过期项(120s TTL),避免无界增长
+        bucket[:] = [(fp, ts) for fp, ts in bucket if now - ts <= 120.0]
+        for m in messages:
+            fp = self._abort_msg_fingerprint(m)
+            if fp and not any(fp == _fp for _fp, _ in bucket):
+                bucket.append((fp, now))
+
+    def consume_abort_injected(
+        self, archive_id: str, group_id: str, user_id: str, message: str,
+    ) -> bool:
+        """若 message 已被 Round2.5 合并回答过 → 消费该指纹并返回 True(本轮应跳过)。
+
+        消费式(命中即移除),保证只跳过一次;过期(>120s)的登记自动失效。
+        """
+        key = (archive_id, group_id, user_id)
+        bucket = self._abort_injected_msgs.get(key)
+        if not bucket:
+            return False
+        import time as _time
+        now = _time.monotonic()
+        fp = self._abort_msg_fingerprint(message)
+        if not fp:
+            return False
+        hit = False
+        kept: list[tuple[str, float]] = []
+        for _fp, ts in bucket:
+            if now - ts > 120.0:
+                continue
+            if not hit and _fp == fp:
+                hit = True  # 命中即消费(不放回 kept)
+                continue
+            kept.append((_fp, ts))
+        if kept:
+            self._abort_injected_msgs[key] = kept
+        else:
+            self._abort_injected_msgs.pop(key, None)
+        return hit
+
+
+    # 2026-05-11 E1 新增: stop_mode 内同消息重发自动清窗口。
+    #
+    # 场景: 用户发送任务 A → 主线程刚启动就被 user abort → stop_mode 20s 激活。
+    # 几秒后用户重发同一条 A 想"重启" → 当前会被强制走 easy 路径(只用 lite + 跳
+    # Round 2)回一句敷衍话术,任务没真正开始执行。
+    # 修法: 记录每个 user 最后一条 message(`_last_user_message` 在 __init__ 创建),
+    # 新消息进来时若 stop_mode 内且和上次 message 字符级 Jaccard > 0.7 (或精确相等),
+    # 视为"用户想重新触发",清掉 stop_mode。
+
+    def record_user_message(
+        self, archive_id: str, group_id: str, user_id: str, message: str,
+    ) -> None:
+        """orchestrator 入口处记录每个 user 最近一条 message。"""
+        self._last_user_message[(archive_id, group_id, user_id)] = message[:1000]
+
+    def maybe_clear_stop_mode_on_repeat(
+        self, archive_id: str, group_id: str, user_id: str, current_message: str,
+    ) -> bool:
+        """
+        若在 stop_mode 窗口内 AND 当前消息与上次消息高度相似 → 清 stop_mode 返回 True。
+        相似度: 字符 trigram Jaccard >= 0.7,或两段都很短时直接精确比较。
+
+        2026-05-12 P37 扩展: 续作意图词("重试"/"继续"/"再来"/"接着" 等)即使内容不同
+        也清 stop_mode。病因(实测 17:57 trace): 用户 abort 后发"重试",和上次消息
+        "重新跑一次图及论文的生成" Jaccard 远 < 0.7, 不清 → 强制 easy → round2.skip
+        → 0 helper spawn → 直接答复用户(没真做任何事)。
+        """
+        if not self.is_in_stop_mode(archive_id, group_id, user_id):
+            return False
+        key = (archive_id, group_id, user_id)
+        last = self._last_user_message.get(key, "")
+        # 2026-05-12 P37: 续作意图词独立判定(不依赖 last_message)
+        # 即使没有 last_message 也清 stop_mode (用户明确表达想继续)
+        _msg_stripped = (current_message or "").strip()
+        # 去掉前导 @ 标记和空白
+        _msg_clean = _msg_stripped
+        for _prefix in ("[CQ:at,", "@bot ", "@", "/"):
+            if _msg_clean.startswith(_prefix):
+                _bracket = _msg_clean.find("]")
+                if _bracket > 0:
+                    _msg_clean = _msg_clean[_bracket+1:].strip()
+                else:
+                    _msg_clean = _msg_clean[len(_prefix):].strip()
+                break
+        _continue_keywords = (
+            "重试", "再试", "重做", "重新做", "再做", "重新跑", "再跑",
+            "继续", "接着", "接着干", "再来", "再来一次", "重来",
+            "go", "continue", "retry", "再次", "再次尝试",
+        )
+        if _msg_clean and len(_msg_clean) <= 30:
+            # 只对短消息触发(避免误判长 prompt 里偶然含"继续"字)
+            for _kw in _continue_keywords:
+                if _kw in _msg_clean:
+                    self.clear_stop_mode(archive_id, group_id, user_id)
+                    return True
+
+        # 原 E1 逻辑: 消息相似度判定
+        if not last or not current_message:
+            return False
+        # 完全相同直接返回
+        if last.strip() == current_message.strip():
+            self.clear_stop_mode(archive_id, group_id, user_id)
+            return True
+        # 字符级 trigram Jaccard
+        def _trigrams(s: str) -> set[str]:
+            s = s.strip()
+            if len(s) < 3:
+                return {s} if s else set()
+            return {s[i:i+3] for i in range(len(s) - 2)}
+        a, b = _trigrams(last), _trigrams(current_message)
+        if not a or not b:
+            return False
+        sim = len(a & b) / len(a | b)
+        if sim >= 0.7:
+            self.clear_stop_mode(archive_id, group_id, user_id)
+            return True
+        return False
+
+
+# 进程级单例
+_guard = GroupGuard()
+
+
+def get_group_guard() -> GroupGuard:
+    return _guard

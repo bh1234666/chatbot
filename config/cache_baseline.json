@@ -1,0 +1,26 @@
+{
+  "description": "Prompt cache convergence baseline. Values are percentages. Minimum fields are hard regression gates; reference fields are observation lines only. The goal is to keep improving until representative tests converge; the converged value may be higher or lower than any reference line. Round2/helper long workflows prioritize stable cacheable prefixes. Round1/Round3 fast paths prioritize low latency and low token load; cache reuse there is optimized only when it does not make the path noticeably heavier.",
+  "long_helper_min_prompt_tokens": 20000,
+  "reference_hit_rate_by_tag": {
+    "main": 95,
+    "helper.*": 96,
+    "long_helper": 97
+  },
+  "reference_warm_hit_rate_by_tag": {
+    "main": 99,
+    "helper.*": 99,
+    "long_helper": 99
+  },
+  "reference_shape_coverage_by_tag": {
+    "main": 99,
+    "helper.*": 99,
+    "long_helper": 99
+  },
+  "maximum_unstable_prefix_hash_chain_groups_by_label": {
+    "chat_stream": 0,
+    "round2.self_check": 0,
+    "user_profile.extract": 0,
+    "tools_loop.iter*.main": 0,
+    "tools_loop.iter*.helper.*": 0
+  }
+}

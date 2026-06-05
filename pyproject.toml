@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chatbot"
+version = "0.1.0"
+description = "群聊机器人后端:FastAPI + 多层记忆 + LLM 编排 + OCR + 后台 dream 整理"
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "bh1234666" }]
+dynamic = ["dependencies"]
+
+[project.urls]
+Homepage = "https://github.com/bh1234666/chatbot"
+Repository = "https://github.com/bh1234666/chatbot"
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+# ─────────────────────────────────────────────────────────────────────────
+# pytest
+# ─────────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "-q"
+
+# ─────────────────────────────────────────────────────────────────────────
+# ruff —— lint + format。先从一组安全规则起步,逐步收紧。
+# ─────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["**/__pycache__", "migrations"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pyflakes / pycodestyle
+    "I",             # isort
+    "B",             # bugbear
+    "UP",            # pyupgrade
+]
+ignore = [
+    "E501",   # 行长由 formatter 管,这里不卡
+    "B008",   # FastAPI Depends() 在默认参数里是惯用法
+    "E402",   # 工程内大量 lazy-import(避免循环依赖),允许函数内/模块中段 import
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011", "F401"]
+
+# ─────────────────────────────────────────────────────────────────────────
+# mypy —— 起步阶段宽松,只保证不因缺失依赖报错;后续可逐模块收紧。
+# ─────────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = false
+check_untyped_defs = false
+exclude = ['(^|/)__pycache__/', '^migrations/']

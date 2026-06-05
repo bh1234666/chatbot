@@ -1,0 +1,547 @@
+from __future__ import annotations
+
+import re
+
+
+def _u(value: str) -> str:
+    return value.encode("ascii").decode("unicode_escape")
+
+
+_RECALL_CAPABILITIES = tuple(map(_u, (
+    r"\u80fd\u770b\u5230", r"\u80fd\u627e\u5230", r"\u80fd\u67e5\u5230",
+    r"\u80fd\u8bfb\u5230", r"\u80fd\u6253\u5f00", r"\u80fd\u8bbf\u95ee",
+    r"\u770b\u5f97\u5230", r"\u627e\u5f97\u5230",
+)))
+_RECALL_OBJECTS = tuple(map(_u, (
+    r"\u6587\u4ef6", r"\u6587\u6863", r"\u8bb0\u5f55", r"\u8d44\u6599",
+    r"\u56fe\u7247", r"\u7167\u7247", r"\u4e0a\u4f20", r"\u7fa4\u6587\u4ef6",
+    r"\u77e5\u8bc6\u5e93", r"\u804a\u5929\u8bb0\u5f55", r"\u6d88\u606f",
+)))
+_RECALL_HISTORY = tuple(map(_u, (
+    r"\u4e4b\u524d", r"\u4e0a\u6b21", r"\u4e0a\u56de", r"\u521a\u624d",
+    r"\u524d\u9762", r"\u4ee5\u524d",
+)))
+_RECALL_ACTIONS = tuple(map(_u, (
+    r"\u5e2e\u6211\u627e", r"\u5e2e\u6211\u67e5", r"\u67e5\u4e00\u4e0b",
+    r"\u627e\u4e00\u4e0b", r"\u641c\u4e00\u4e0b", r"\u8bb0\u5f97",
+    r"\u8bb0\u4f4f", r"\u4fdd\u5b58",
+)))
+
+_NEGATIVE_FEEDBACK_TERMS = tuple(map(_u, (
+    r"\u4f60\u778e\u8bf4", r"\u4f60\u80e1\u8bf4", r"\u778e\u626f",
+    r"\u80e1\u626f", r"\u4e71\u8bf4", r"\u53c8\u7f16\u4e86",
+    r"\u4f60\u5728\u7f16", r"\u7eaf\u5c5e\u80e1\u626f",
+    r"\u6ca1\u8fd9\u56de\u4e8b",
+    r"\u91cd\u505a", r"\u91cd\u65b0\u505a", r"\u518d\u505a\u4e00\u6b21",
+    r"\u518d\u5199\u4e00\u6b21", r"\u91cd\u65b0\u5199",
+    r"\u91cd\u65b0\u6765\u8fc7", r"\u518d\u6765\u8fc7",
+    r"\u4e0d\u5bf9", r"\u4e0d\u662f\u8fd9\u6837", r"\u4e0d\u662f\u8fd9\u4e2a",
+    r"\u5b8c\u5168\u9519\u4e86", r"\u641e\u9519\u4e86",
+    r"\u7406\u89e3\u9519\u4e86", r"\u4f60\u5f04\u9519\u4e86", r"\u8fd9\u4e0d\u5bf9",
+    r"\u8fd9\u662f\u4ec0\u4e48", r"\u4ec0\u4e48\u73a9\u610f",
+    r"\u8fd9\u5783\u573e", r"\u4e0d\u6ee1\u610f", r"\u4e0d\u884c\u554a",
+    r"\u8fd9\u4e0d\u884c",
+)))
+
+_TRIVIAL_PHRASES = {
+    "hi", "hello", "hey", "ok", "okay", "thanks", "thx", "thank you", "3q",
+    "bye", "byebye", "88",
+    *_u(
+        r"\u4f60\u597d|\u60a8\u597d|\u55e8|\u54c8\u55bd|\u54c8\u55e8|"
+        r"\u65e9\u5b89|\u665a\u5b89|\u65e9\u4e0a\u597d|\u4e2d\u5348\u597d|"
+        r"\u4e0b\u5348\u597d|\u665a\u4e0a\u597d|\u65e9|\u665a|"
+        r"\u5728\u5417|\u5728\u4e0d|\u5728\u4e48|\u5728\u54a9|"
+        r"\u597d\u7684|\u884c|\u53ef\u4ee5|\u4e86\u89e3|\u61c2\u4e86|"
+        r"\u660e\u767d|\u77e5\u9053\u4e86|\u6536\u5230|"
+        r"\u8c22\u8c22|\u591a\u8c22|\u611f\u8c22|\u8f9b\u82e6|"
+        r"\u9ebb\u70e6\u4e86|\u8c22\u8c22\u4f60|\u8c22\u8c22\u554a|"
+        r"\u518d\u89c1|\u62dc\u62dc|"
+        r"\u7761\u4e86|\u7761\u89c9|\u53bb\u7761|\u6e9c\u4e86|\u6e9c\u5566|"
+        r"\u4e0b\u64ad|\u4e0b\u7ebf|\u5148\u8fd9\u6837|\u5c31\u8fd9\u6837|"
+        r"\u6ca1\u4e8b|\u6ca1\u4ec0\u4e48|\u6ca1\u5565|\u6ca1\u95ee\u9898|"
+        r"\u5bf9|\u4e0d\u5bf9|\u662f\u7684|\u662f|\u4e0d\u662f|\u4e0d|"
+        r"\u5bf9\u7684|\u5bf9\u554a|\u771f\u7684|\u5047\u7684|\u771f\u7684\u5417|"
+        r"\u662f\u5417|\u54e6|\u55ef|\u5475\u5475|"
+        r"\u7b11\u6b7b|\u7edd\u4e86|\u53ef\u4ee5\u7684|\u8349|\u725b|\u725b\u903c|"
+        r"\u597d|\u597d\u5427|\u884c\u5427|\u5f97\u561e|\u61c2|\u7b97\u4e86|"
+        r"\u4e0d\u7528|\u4e0d\u8981|\u4e0d\u9700\u8981"
+    ).split("|"),
+}
+
+_SINGLE_CHAR_INTERJECTIONS = set(_u(r"\u554a\u54e6\u55ef\u5450\u6b38\u54c8\u54e6\u563f\u989d\u6b38"))
+_TRIVIAL_PUNCT_RE = re.compile(r"^[\s!！。？\.\?~～、，,]+|[\s!！。？\.\?~～、，,]+$")
+_TASK_MARKERS = tuple(map(_u, (
+    r"\uff1a", r":", r"\u5e2e\u6211", r"\u8bf7", r"\u8bb0\u4f4f", r"\u8bb0\u4f4f\u8fd9\u4e2a",
+    r"\u56de\u590d", r"\u7528\u4e00\u53e5\u8bdd", r"\u603b\u7ed3", r"\u5199",
+    r"\u751f\u6210", r"\u68c0\u67e5", r"\u5206\u6790", r"\u89e3\u91ca",
+    r"\u8bc6\u522b", r"ocr", r"tts", r"docx", r"ppt", r"xlsx",
+)))
+_DIRECT_REPLY_PREFIXES = tuple(map(_u, (
+    r"\u53ea\u56de\u590d", r"\u4ec5\u56de\u590d", r"\u76f4\u63a5\u56de\u590d",
+    r"\u4e25\u683c\u56de\u590d", r"\u539f\u6837\u56de\u590d", r"\u590d\u8bfb",
+    r"\u53ea\u8bf4", r"\u4ec5\u8bf4", r"\u76f4\u63a5\u8bf4",
+    r"\u7528\u4e00\u4e2a\u5b57\u56de\u590d", r"\u7528\u4e24\u4e2a\u5b57\u56de\u590d",
+    r"\u7528\u4e09\u4e2a\u5b57\u56de\u590d", r"\u7528\u56db\u4e2a\u5b57\u56de\u590d",
+    r"\u7528\u4e94\u4e2a\u5b57\u56de\u590d", r"\u7528\u516d\u4e2a\u5b57\u56de\u590d",
+    r"\u7528\u4e03\u4e2a\u5b57\u56de\u590d", r"\u7528\u516b\u4e2a\u5b57\u56de\u590d",
+    r"\u7528\u4e5d\u4e2a\u5b57\u56de\u590d", r"\u7528\u5341\u4e2a\u5b57\u56de\u590d",
+    r"\u7528\u4e00\u53e5\u8bdd\u56de\u590d",
+)))
+_DIRECT_REPLY_BLOCKERS = tuple(map(_u, (
+    r"\u6587\u4ef6", r"\u6587\u6863", r"\u56fe\u7247", r"\u56fe\u50cf",
+    r"\u7167\u7247", r"\u622a\u56fe", r"\u4ee3\u7801", r"\u5de5\u4f5c\u533a",
+    r"\u4e0a\u4f20", r"\u4e0b\u8f7d", r"\u751f\u6210", r"\u521b\u5efa",
+    r"\u68c0\u67e5", r"\u5206\u6790", r"\u8bc6\u522b", r"\u67e5",
+    r"\u627e", r"\u641c", r"\u8bfb\u53d6", r"\u6253\u5f00",
+    r"\u8fd0\u884c", r"\u4fee\u590d", r"\u7ed8\u56fe", r"\u753b\u56fe",
+    r"ocr", r"tts", r"docx", r"ppt", r"pptx", r"xlsx", r"excel",
+    r"png", r"jpg", r"jpeg", r"webp", r"wav", r"mp3", r"pdf",
+)))
+_DIRECT_REPLY_PAYLOAD_BLOCKERS = tuple(map(_u, (
+    r"\u4e0a\u9762", r"\u524d\u9762", r"\u521a\u624d", r"\u521a\u521a",
+    r"\u4e4b\u524d", r"\u4e0a\u6b21", r"\u6700\u8fd1", r"\u7fa4\u91cc",
+    r"\u5927\u5bb6", r"\u8c01\u8bf4", r"\u8ba8\u8bba", r"\u6839\u636e",
+    r"\u7ed3\u5408", r"\u53c2\u8003", r"\u4e0a\u6587", r"\u524d\u6587",
+    r"\u5bf9\u8bdd", r"\u603b\u7ed3", r"\u5206\u6790", r"\u89e3\u91ca",
+    r"\u56de\u7b54\u8fd9\u4e2a", r"\u8fd9\u4e2a\u95ee\u9898",
+)))
+
+_ARTIFACT_CREATE_VERBS = tuple(map(_u, (
+    r"\u521b\u5efa", r"\u65b0\u5efa", r"\u751f\u6210", r"\u5236\u4f5c",
+    r"\u505a\u4e00\u4e2a", r"\u505a\u4e00\u4efd", r"\u5199\u5165",
+    r"\u8f93\u51fa", r"\u4fdd\u5b58", r"\u5bfc\u51fa", r"\u6574\u7406\u6210",
+    r"\u5199\u6210", r"\u753b", r"\u7ed8\u5236", r"\u5408\u6210",
+)))
+_ARTIFACT_CREATE_VERBS_EN = (
+    "create", "generate", "make", "write", "save", "export", "render",
+    "draw", "synthesize",
+)
+_ARTIFACT_FILE_RE = re.compile(
+    r"(?:^|[\s`'\"“”‘’（(：:])[\w\u4e00-\u9fff][\w\u4e00-\u9fff ._()（）-]{0,80}"
+    r"\.(?:txt|md|csv|json|html|py|js|ts|c|cpp|h|java|go|rs|docx|pptx|xlsx|pdf|png|jpg|jpeg|webp|svg|wav|mp3|flac)\b",
+    re.IGNORECASE,
+)
+_ARTIFACT_NOUNS = tuple(map(_u, (
+    r"\u6587\u4ef6", r"\u6587\u6863", r"\u62a5\u544a", r"\u8bba\u6587",
+    r"\u7b14\u8bb0", r"\u8868\u683c", r"\u56fe\u8868", r"\u56fe\u7247",
+    r"\u6298\u7ebf\u56fe", r"\u67f1\u72b6\u56fe", r"\u97f3\u9891",
+    r"\u8bed\u97f3\u6587\u4ef6",
+)))
+_OFFICE_DOC_RE = re.compile(
+    r"\.(?:docx|pptx|xlsx|pdf)\b|"
+    r"(?:docx|pptx|xlsx|excel|ppt|pdf)|"
+    r"(?:\u62a5\u544a|\u8bba\u6587|\u5b8c\u6574\u6587\u6863|\u6f14\u793a\u6587\u7a3f|\u5e7b\u706f\u7247|\u8868\u683c)",
+    re.IGNORECASE,
+)
+_DIRECT_REPLY_COUNT_RE = re.compile(
+    r"^请?(?:用)?[一二三四五六七八九十两\d]{1,3}(?:个)?(?:字|词|句|句话)\s*(?:回复|回答|说|输出)",
+    re.IGNORECASE,
+)
+_DIRECT_REPLY_EXTRACT_RE = re.compile(
+    r"^\s*(?:请)?(?:"
+    r"只回复|仅回复|直接回复|严格回复|原样回复|复读|"
+    r"只说|仅说|直接说|"
+    r"(?:用)?[一二三四五六七八九十两\d]{1,3}(?:个)?(?:字|词|句|句话)\s*(?:回复|回答|说|输出)"
+    r")\s*[:：]\s*(?P<reply>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+_STRONG_VISION_NOUNS = tuple(map(_u, (
+    r"\u56fe\u7247", r"\u56fe\u50cf", r"\u7167\u7247", r"\u622a\u56fe",
+    r"\u622a\u5c4f", r"\u65b0\u7684\u56fe", r"\u65b0\u56fe",
+    r"\u521a\u53d1\u7684\u56fe", r"\u4ef7\u76ee\u8868", r"\u83dc\u5355",
+    r"\u6d77\u62a5", r"\u5e7f\u544a\u724c", r"\u5e7b\u706f\u7247",
+    r"\u4e8c\u7ef4\u7801", r"\u6761\u7801", r"\u7968\u636e",
+    r"\u53d1\u7968", r"\u6536\u636e", r"\u8bc6\u56fe",
+)))
+_WEAK_VISION_NOUNS = tuple(map(_u, (
+    r"\u56fe", r"\u836f", r"\u5b57", r"\u6587\u5b57", r"\u6807\u7b7e",
+    r"\u8bc1\u4ef6", r"\u8eab\u4efd\u8bc1", r"\u5b66\u751f\u8bc1",
+    r"\u5de5\u4f5c\u8bc1", r"\u5361\u7247", r"\u5c4f\u5e55",
+)))
+_VISION_VERBS = tuple(map(_u, (
+    r"\u770b\u770b", r"\u770b\u4e00\u4e0b", r"\u770b\u4e0b", r"\u770b",
+    r"\u8bc6\u522b", r"\u8bfb\u51fa", r"\u8bfb\u4e00\u4e0b", r"\u8bfb",
+    r"\u8ba4\u51fa", r"\u8fa8\u8bc6", r"\u8fa8", r"\u627e",
+    r"\u6253\u51fa\u6765", r"\u63d0\u53d6", r"\u62f7\u8d1d", r"\u590d\u5236",
+    r"\u5199\u4e86\u4ec0\u4e48", r"\u5199\u7684\u4ec0\u4e48",
+    r"\u6709\u4ec0\u4e48", r"\u662f\u4ec0\u4e48\u5185\u5bb9",
+)))
+_DEICTIC_PRONOUNS = tuple(map(_u, (
+    r"\u8fd9\u4e2a", r"\u8fd9\u5f20", r"\u8fd9\u662f", r"\u8fd9\u79cd",
+    r"\u8fd9", r"\u90a3\u4e2a", r"\u90a3\u5f20", r"\u90a3\u662f",
+)))
+_OCR_ACTION_RE = re.compile(
+    r"(?:重新|再|帮我|请|调用|执行|跑|做|进行)?\s*ocr\s*(?:一下|识别|提取|这张|这个|图片|图|截图|照片|文件|_downloaded_media|[A-Za-z]:\\|/|\.png|\.jpe?g|\.webp|\.bmp|\.gif)"
+    r"|(?:ocr|识别|提取).*?(?:图片|图像|照片|截图|图中文字|图片文字|_downloaded_media|\.png|\.jpe?g|\.webp|\.bmp|\.gif)",
+    re.IGNORECASE,
+)
+_TOOL_CONCEPT_TERMS = (
+    "ocr", "tts", "asr", "stt", "api", "llm", "gpu", "cuda",
+    "光学字符识别", "文本转语音", "语音合成", "语音识别",
+)
+_CONCEPT_QUESTION_MARKERS = tuple(map(_u, (
+    r"\u4ec0\u4e48\u662f", r"\u662f\u4ec0\u4e48", r"\u8bb2\u8bb2",
+    r"\u89e3\u91ca", r"\u539f\u7406", r"\u6280\u672f", r"\u6982\u5ff5",
+    r"\u5b9a\u4e49", r"\u533a\u522b", r"\u4ecb\u7ecd",
+)))
+_TOOL_ACTION_MARKERS = tuple(map(_u, (
+    r"\u8bc6\u522b", r"\u8bfb\u53d6", r"\u8bfb\u56fe", r"\u770b\u56fe",
+    r"\u56fe\u91cc", r"\u8fd9\u5f20\u56fe", r"\u622a\u56fe",
+    r"\u751f\u6210", r"\u5408\u6210", r"\u8f93\u51fa", r"\u4fdd\u5b58",
+    r"\u6587\u4ef6", r"wav", r"mp3", r"png", r"jpg", r"docx",
+)))
+_CONCRETE_TOOL_RESOURCE_MARKERS = tuple(map(_u, (
+    r"\u8fd9\u5f20", r"\u8fd9\u4e2a", r"\u90a3\u5f20", r"\u90a3\u4e2a",
+    r"\u521a\u53d1", r"\u9644\u4ef6", r"\u56fe\u91cc", r"\u56fe\u4e2d",
+    r"\u622a\u56fe", r"\u6587\u4ef6", r"\u4ea7\u7269", r"\u751f\u6210",
+    r"\u5408\u6210", r"\u8f93\u51fa", r"\u4fdd\u5b58", r"wav", r"mp3",
+    r"png", r"jpg", r"jpeg", r"docx", r"pptx", r"xlsx", r"pdf",
+)))
+_TOOL_CONCEPT_CONTEXT_MARKERS = tuple(map(_u, (
+    r"\u521a\u624d", r"\u521a\u521a", r"\u524d\u9762", r"\u4e0a\u9762",
+    r"\u4e4b\u524d", r"\u4e0a\u6b21", r"\u8fd9\u6b21", r"\u672c\u8f6e",
+    r"\u7fa4\u91cc", r"\u6700\u8fd1", r"\u65e5\u5fd7", r"\u6d41\u7a0b",
+    r"\u5931\u8d25", r"\u5361\u4f4f", r"\u62a5\u9519", r"\u5f02\u5e38",
+    r"\u663e\u5b58", r"\u5de5\u5177\u94fe", r"\u5de5\u4f5c\u6d41",
+)))
+_NEGATED_TOOL_ACTION_RE = re.compile(
+    r"(?:也|并|且)?(?:不要|不需要|无需|不用|别|禁止)"
+    r"(?=[^，。；,.!?]{0,40}(?:调用|执行|使用|识别|识图|读取|读图|看图|图里|这张图|截图|生成|合成|输出|保存|文件|工具|wav|mp3|png|jpg|docx|ocr|tts))"
+    r"[^，。；,.!?]{0,40}",
+    re.IGNORECASE,
+)
+
+_CONTEXT_FOLLOWUP_TERMS = tuple(map(_u, (
+    r"\u8fd9\u4e2a", r"\u90a3\u4e2a", r"\u8fd9\u4e8b", r"\u90a3\u4e8b",
+    r"\u4ed6\u8bf4\u7684", r"\u5979\u8bf4\u7684", r"\u5b83\u8bf4\u7684",
+    r"\u8bf4\u5f97\u5bf9", r"\u8bf4\u7684\u5bf9", r"\u5bf9\u5417",
+    r"\u771f\u7684\u5417", r"\u90a3\u4e3a\u4ec0\u4e48",
+    r"\u8fd9\u4e3a\u4ec0\u4e48", r"\u8fd9\u4e2a\u4e3a\u4ec0\u4e48",
+    r"\u90a3\u600e\u4e48\u529e", r"\u8fd9\u600e\u4e48\u529e",
+    r"\u90a3\u600e\u4e48\u89e3\u51b3", r"\u8fd9\u600e\u4e48\u89e3\u51b3",
+    r"\u8fd9\u4e2a\u600e\u4e48\u89e3\u51b3", r"\u90a3\u600e\u4e48\u6539",
+    r"\u8fd9\u600e\u4e48\u6539", r"\u7136\u540e\u5462",
+    r"\u7ee7\u7eed", r"\u5c55\u5f00", r"\u8be6\u7ec6\u70b9",
+    r"\u8fd8\u6709\u5462", r"\u4e0b\u4e00\u6b65", r"\u63a5\u4e0b\u6765",
+    r"\u4f60\u89c9\u5f97\u5462", r"\u600e\u4e48\u770b",
+)))
+_CONTEXT_FOLLOWUP_SHORT_RE = re.compile(
+    r"^(?:\s|[？?。！!，,、…~～])*"
+    r"(?:这个|那个|这事|那事|然后呢|继续|展开|详细点|还有呢|对吗|真的吗|为啥|为什么|怎么弄|怎么办|怎么改|怎么解决|下一步|接下来|你怎么看|你觉得呢)"
+    r"(?:\s|[？?。！!，,、…~～])*$"
+)
+
+
+def has_implicit_recall_intent(message: str) -> bool:
+    text = (message or "").strip().lower()
+    if not text:
+        return False
+    has_object = any(obj in text for obj in _RECALL_OBJECTS)
+    if any(cap in text for cap in _RECALL_CAPABILITIES) and has_object:
+        return True
+    if any(word in text for word in _RECALL_HISTORY) and (
+        has_object or any(action in text for action in _RECALL_ACTIONS)
+    ):
+        return True
+    if any(action in text for action in _RECALL_ACTIONS) and has_object:
+        return True
+    return False
+
+
+def has_context_followup_intent(message: str) -> bool:
+    """Return True for short replies that need nearby dialogue context.
+
+    This is intentionally weaker than recall intent: it should keep recent group
+    messages visible for pronoun/continuation turns, without pulling KB, files,
+    or long-term memory into ordinary current-message tasks.
+    """
+    text = (message or "").strip()
+    if not text or len(text) > 80:
+        return False
+    lower = text.lower()
+    if has_implicit_recall_intent(text) or has_image_intent_in_msg(text):
+        return False
+    if any(marker in lower or marker in text for marker in _TASK_MARKERS):
+        return False
+    if _CONTEXT_FOLLOWUP_SHORT_RE.match(text):
+        return True
+    return any(term in text for term in _CONTEXT_FOLLOWUP_TERMS)
+
+
+def has_image_intent_in_msg(message: str) -> bool:
+    if not message:
+        return False
+    message = _NEGATED_TOOL_ACTION_RE.sub("", message)
+    if not message.strip():
+        return False
+    msg_l = message.lower()
+    if "[cq:image" in msg_l or "[图片]" in msg_l or "[image]" in msg_l:
+        return True
+    if _OCR_ACTION_RE.search(message):
+        return True
+    if any(n in msg_l for n in _STRONG_VISION_NOUNS):
+        return True
+
+    def _positions(haystack: str, needle: str) -> list[int]:
+        if not needle:
+            return []
+        out: list[int] = []
+        start = 0
+        while True:
+            idx = haystack.find(needle, start)
+            if idx < 0:
+                return out
+            out.append(idx)
+            start = idx + max(1, len(needle))
+
+    def _near(terms_a: tuple[str, ...], terms_b: tuple[str, ...], max_gap: int = 10) -> bool:
+        spans_a: list[tuple[int, int]] = []
+        spans_b: list[tuple[int, int]] = []
+        for term in terms_a:
+            source = msg_l if term.isascii() else message
+            spans_a.extend((p, p + len(term)) for p in _positions(source, term))
+        for term in terms_b:
+            source = msg_l if term.isascii() else message
+            spans_b.extend((p, p + len(term)) for p in _positions(source, term))
+        for a0, a1 in spans_a:
+            for b0, b1 in spans_b:
+                if max(a0, b0) - min(a1, b1) <= max_gap:
+                    return True
+        return False
+
+    weak_visual_objects = tuple(
+        n for n in _WEAK_VISION_NOUNS if n not in ("字", "文字", "标签")
+    )
+    weak_text_objects = ("字", "文字", "标签")
+
+    # Weak visual nouns only count when the visual object is local to the
+    # deictic/vision verb. This avoids routing ordinary text like "15字" +
+    # "看不进去" into OCR.
+    if _near(_DEICTIC_PRONOUNS, weak_visual_objects, max_gap=8):
+        return True
+    if _near(_VISION_VERBS, weak_visual_objects, max_gap=8):
+        return True
+
+    # Text-like nouns are common in writing requests. Treat them as vision
+    # intent only when tied to a concrete image/screen object or deictic.
+    if _near(_DEICTIC_PRONOUNS, weak_text_objects, max_gap=6):
+        return True
+    if _near(("图", "屏幕", "截图", "图片", "照片"), weak_text_objects, max_gap=8):
+        return True
+    if _near(("读", "识别", "提取", "打出来", "写了什么"), weak_text_objects, max_gap=6):
+        return True
+    return False
+
+
+def is_tool_concept_question(message: str) -> bool:
+    """Return True for questions about a tool/technology concept, not tool use.
+
+    This keeps "什么是 OCR/TTS" on the lightweight answer path while leaving
+    actual resource requests such as "OCR 这张图" or "生成 wav" untouched.
+    """
+    text = (message or "").strip()
+    if not text or len(text) > 160:
+        return False
+    lower = text.lower()
+    if not any(term in lower or term in text for term in _TOOL_CONCEPT_TERMS):
+        return False
+    if not any(marker in text for marker in _CONCEPT_QUESTION_MARKERS):
+        return False
+    if (
+        has_context_followup_intent(text)
+        or has_implicit_recall_intent(text)
+        or any(marker in text for marker in _TOOL_CONCEPT_CONTEXT_MARKERS)
+    ):
+        return False
+    action_text = _NEGATED_TOOL_ACTION_RE.sub("", text)
+    action_lower = action_text.lower()
+    if any(marker in action_lower or marker in action_text for marker in _CONCRETE_TOOL_RESOURCE_MARKERS):
+        return False
+    return not any(marker in action_lower or marker in action_text for marker in _TOOL_ACTION_MARKERS if marker not in ("图片", "识别"))
+
+
+def is_negative_feedback(message: str) -> bool:
+    if not message:
+        return False
+    text = message.strip().lower()
+    if len(text) > 120:
+        return False
+    return any(term in text for term in _NEGATIVE_FEEDBACK_TERMS)
+
+
+_LEADING_CQ_AT_RE = re.compile(r"^(?:\[CQ:at,qq=\d+\]\s*)+", flags=re.IGNORECASE)
+
+
+def _strip_trivial_noise(text: str) -> str:
+    text = _LEADING_CQ_AT_RE.sub("", text.strip())
+    return _TRIVIAL_PUNCT_RE.sub("", text).strip().lower()
+
+
+def is_trivial_message(message: str) -> bool:
+    text = _LEADING_CQ_AT_RE.sub("", (message or "").strip())
+    if not text or len(text) > 35:
+        return False
+    if has_implicit_recall_intent(text):
+        return False
+    if any(marker in text.lower() for marker in _TASK_MARKERS):
+        return False
+
+    normalized = _strip_trivial_noise(text)
+    if not normalized:
+        return True
+    if normalized in _TRIVIAL_PHRASES:
+        return True
+    if len(normalized) <= 6 and set(normalized).issubset(_SINGLE_CHAR_INTERJECTIONS):
+        return True
+    return False
+
+
+def is_direct_short_reply_request(message: str) -> bool:
+    """Return True for explicit reply-shaping turns that must not enter tool routing."""
+    text = (message or "").strip()
+    if not text or len(text) > 80:
+        return False
+    lower = text.lower()
+    if has_implicit_recall_intent(text) or has_image_intent_in_msg(text):
+        return False
+    if any(blocker in lower for blocker in _DIRECT_REPLY_BLOCKERS):
+        return False
+    payload = text
+    colon_pos = max(text.rfind(":"), text.rfind("："))
+    if colon_pos >= 0:
+        payload = text[colon_pos + 1:].strip()
+    if any(blocker in payload.lower() or blocker in payload for blocker in _DIRECT_REPLY_PAYLOAD_BLOCKERS):
+        return False
+    compact = re.sub(r"\s+", "", text)
+    compact_l = compact.lower()
+    if any(compact_l.startswith(prefix.lower()) for prefix in _DIRECT_REPLY_PREFIXES):
+        return True
+    return bool(_DIRECT_REPLY_COUNT_RE.search(compact))
+
+
+def extract_direct_short_reply(message: str) -> str:
+    """Extract the literal answer from a direct short-reply request, if safe."""
+    if not is_direct_short_reply_request(message):
+        return ""
+    match = _DIRECT_REPLY_EXTRACT_RE.match(message or "")
+    if not match:
+        return ""
+    prefix = (message or "")[: match.start("reply")]
+    compact_prefix = re.sub(r"\s+", "", prefix).lower()
+    literal_prefixes = tuple(map(str.lower, (
+        "只回复", "仅回复", "直接回复", "严格回复", "原样回复", "复读",
+        "只说", "仅说", "直接说",
+    )))
+    reply = match.group("reply").strip()
+    is_literal_prefix = any(compact_prefix.startswith(p) for p in literal_prefixes)
+    if any(blocker in reply.lower() or blocker in reply for blocker in _DIRECT_REPLY_PAYLOAD_BLOCKERS):
+        return ""
+    if not is_literal_prefix:
+        question_like = (
+            "?" in reply or "？" in reply
+            or "多少" in reply
+            or bool(re.search(r"\d+\s*[-+*/×÷]\s*\d+", reply))
+        )
+        if question_like:
+            return ""
+    if not reply or len(reply) > 40:
+        return ""
+    if any(blocker in reply.lower() for blocker in _DIRECT_REPLY_BLOCKERS):
+        return ""
+    return reply
+
+
+def extract_requested_literal_reply(message: str) -> str:
+    """Extract a literal final reply after required tools have already run.
+
+    Tool-related words in the instruction only block the early shortcut; once the
+    workflow has honored them, the final wording can still follow the user's
+    explicit literal reply request.
+    """
+    text = (message or "").strip()
+    if not text or len(text) > 120:
+        return ""
+
+    def _safe_literal_reply(value: str) -> str:
+        reply = value.strip().strip("`\"'“”‘’")
+        if not (0 < len(reply) <= 30):
+            return ""
+        if any(blocker in reply.lower() or blocker in reply for blocker in _DIRECT_REPLY_PAYLOAD_BLOCKERS):
+            return ""
+        question_like = (
+            "?" in reply or "？" in reply
+            or "多少" in reply
+            or bool(re.search(r"\d+\s*[-+*/×÷]\s*\d+", reply))
+        )
+        if question_like:
+            return ""
+        return reply
+
+    match = _DIRECT_REPLY_EXTRACT_RE.match(text)
+    if match:
+        return _safe_literal_reply(match.group("reply"))
+    colon_pos = max(text.rfind(":"), text.rfind("："))
+    if colon_pos >= 0:
+        prefix = text[:colon_pos]
+        compact_prefix = re.sub(r"\s+", "", prefix).lower()
+        if (
+            any(compact_prefix.startswith(p.lower()) for p in _DIRECT_REPLY_PREFIXES)
+            or _DIRECT_REPLY_COUNT_RE.search(compact_prefix)
+        ):
+            return _safe_literal_reply(text[colon_pos + 1:])
+    return ""
+
+
+def has_artifact_creation_intent(message: str) -> bool:
+    """Return True when the current turn explicitly asks to create an artifact.
+
+    This is a conservative routing guard for imperative file/product requests.
+    It requires both a creation verb and a concrete output target, so ordinary
+    explanations like "什么是 OCR" or short reply shaping do not enter tools.
+    """
+    text = (message or "").strip()
+    if not text or is_direct_short_reply_request(text):
+        return False
+    lower = text.lower()
+    compact = re.sub(r"\s+", "", lower)
+    has_create_verb = (
+        any(v in text for v in _ARTIFACT_CREATE_VERBS)
+        or any(re.search(rf"\b{re.escape(v)}\b", lower) for v in _ARTIFACT_CREATE_VERBS_EN)
+    )
+    if not has_create_verb:
+        return False
+    return bool(_ARTIFACT_FILE_RE.search(text) or any(noun in compact for noun in _ARTIFACT_NOUNS))
+
+
+def is_office_document_creation_intent(message: str) -> bool:
+    """Return True for artifact creation whose expected output is an Office/PDF doc."""
+    if not has_artifact_creation_intent(message):
+        return False
+    return bool(_OFFICE_DOC_RE.search(message or ""))
+
+
+def is_light_workspace_list_with_literal_reply(message: str) -> bool:
+    """Return True for simple workspace-list probes with an explicit literal reply.
+
+    This is intentionally narrow: it only covers listing/checking the current
+    workspace itself, not reading, analyzing, creating, OCR, Office, TTS, or
+    named-file work.
+    """
+    text = (message or "").strip()
+    if not extract_requested_literal_reply(text):
+        return False
+    lower = text.lower()
+    compact = re.sub(r"\s+", "", lower)
+    workspace_terms = ("工作区", "目录", "文件列表", "当前文件", "workspace")
+    check_terms = ("检查", "查看", "看一下", "列", "list", "dir", "ls")
+    if not any(term in compact for term in workspace_terms):
+        return False
+    if not any(term in compact for term in check_terms):
+        return False
+    heavy_terms = (
+        "读取", "打开", "分析", "总结", "生成", "创建", "修改", "修复", "搜索",
+        "ocr", "tts", "docx", "ppt", "pptx", "xlsx", "excel", "pdf",
+        "图片", "图像", "截图", "语音", "绘图", "画图", "代码", "运行测试",
+    )
+    return not any(term in lower for term in heavy_terms)

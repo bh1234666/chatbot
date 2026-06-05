@@ -1,0 +1,38 @@
+# 本地开发用：启动 PostgreSQL + Redis
+# 用法：
+#   docker compose up -d         # 后台启动
+#   docker compose logs -f       # 看日志
+#   docker compose down          # 停止
+#   docker compose down -v       # 停止并删除数据卷（重置数据）
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: chatbot-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: chatbot
+      POSTGRES_PASSWORD: chatbot
+      POSTGRES_DB: chatbot
+    ports:
+      - "5432:5432"
+    volumes:
+      - chatbot_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chatbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7
+    container_name: chatbot-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - chatbot_redis:/data
+
+volumes:
+  chatbot_pg:
+  chatbot_redis:
