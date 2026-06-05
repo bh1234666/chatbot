@@ -2814,8 +2814,12 @@ function setQueueAutoRun(enabled) {
 function createAccount() {
   const displayName = prompt("账号名称", "本地用户");
   if (!displayName) return;
-  const userId = prompt("用户 ID", `local-${Date.now()}`);
+  let userId = prompt("用户 ID（必须以字母开头）", `local-${Date.now()}`);
   if (!userId) return;
+  if (!/^[a-zA-Z]/.test(userId)) {
+    alert("用户 ID 必须以字母开头（a-z 或 A-Z）。");
+    return;
+  }
   state.accounts.push({ userId, displayName, createdAt: nowIso(), lastUsedAt: nowIso() });
   state.activeAccountId = userId;
   const archive = makeLocalArchive(userId, "默认对话", "");

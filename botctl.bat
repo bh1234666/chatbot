@@ -3,6 +3,11 @@ chcp 65001 >nul
 title Bot Controller
 set PY=.venv\Scripts\python.exe botctl_helper.py
 
+if /i "%~1"=="--check" (
+    echo botctl.bat OK
+    exit /b 0
+)
+
 if "%1"=="" goto menu
 
 if /i "%1"=="create"   goto cmd_create

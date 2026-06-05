@@ -128,6 +128,8 @@ def cmd_list_groups(args: list[str] | None = None):
         print(f"[!] API error (HTTP {code})")
         sys.exit(1)
     items = data.get("items", [])
+    # Only show numeric QQ groups; filter out non-QQ alphanumeric group IDs.
+    items = [g for g in items if g.get("group_id", "").isdigit()]
     if not items:
         print("No groups configured. Use: botctl create <name> <group_id>")
         return

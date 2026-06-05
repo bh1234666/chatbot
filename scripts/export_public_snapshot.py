@@ -70,6 +70,8 @@ INCLUDE_FILES: list[str] = [
     "open_agent.bat",
     "botctl.bat",
     "cleanup_generated.bat",
+    "export_public_snapshot.bat",
+    "auto_publish.bat",
     "monitor.sh",
 ]
 
@@ -340,12 +342,25 @@ def main() -> int:
 
     if out.exists():
         if not args.force:
-            print(f"[ERROR] Output dir {out} already exists. Use --force to wipe.", file=sys.stderr)
+            print(f"[ERROR] Output dir {out} already exists. Use --force to refresh.", file=sys.stderr)
             return 2
-        print(f"[INFO] Wiping existing {out}")
-        shutil.rmtree(out)
+        # Preserve .git/ so repeated exports keep their commit history.
+        # Clear everything else (files + non-.git directories) before re-copying.
+        preserved_git = (out / ".git").exists()
+        for entry in out.iterdir():
+            if entry.name == ".git":
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        if preserved_git:
+            print(f"[INFO] Cleared {out} contents (preserved existing .git/)")
+        else:
+            print(f"[INFO] Cleared {out} contents")
+    else:
+        out.mkdir(parents=True)
 
-    out.mkdir(parents=True)
     perform_copy(plan)
     print(f"Copied {len(plan)} files into {out}")
 
@@ -366,14 +381,15 @@ def main() -> int:
         return 3
 
     print("\nSecret scan: clean.")
-    print("\nNext steps (manual):")
+    print("\nNext steps:")
     print(f"  cd {out}")
-    print("  git init")
-    print("  git add -A")
-    print('  git commit -m "Initial public snapshot"')
-    print("  git remote add origin <your-github-url>")
-    print("  git branch -M main")
-    print("  git push -u origin main")
+    print("  git status                              # confirm staged changes")
+    print('  git commit -am "Update <something>"     # if .git/ already exists')
+    print("  git push                                # push the update")
+    print("  # First-time only:")
+    print("  #   git init && git add -A && git commit -m 'Initial public snapshot'")
+    print("  #   git remote add origin <your-github-url>")
+    print("  #   git branch -M main && git push -u origin main")
     return 0
 
 

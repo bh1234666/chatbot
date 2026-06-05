@@ -1,6 +1,12 @@
 @echo off
+chcp 65001 >nul
 title Chatbot QQ Bot - One Click Start
 color 0A
+
+if /i "%~1"=="--check" (
+    echo startbot.bat OK
+    exit /b 0
+)
 
 echo.
 echo   ==============================================
@@ -47,25 +53,37 @@ echo.
 echo   Database: SQLite (chatbot.db) - zero config
 echo.
 
-start "Chatbot API" cmd /k "cd /d %~dp0 && title Chatbot API && .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "Chatbot API" cmd /k "chcp 65001 >nul && cd /d %~dp0 && title Chatbot API && .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 echo          Chatbot API launched on port 8000 [OK]
 
 timeout /t 2 /nobreak >nul
 
-start "NapCat Bridge" cmd /k "cd /d %~dp0 && title NapCat Bridge && .venv\Scripts\python.exe napcat_bridge.py"
+start "NapCat Bridge" cmd /k "chcp 65001 >nul && cd /d %~dp0 && title NapCat Bridge && .venv\Scripts\python.exe napcat_bridge.py"
 echo          NapCat Bridge launched on port 8090 [OK]
 
 REM [5/5] Start NapCat QQ
 echo  [5/5] Starting NapCat QQ...
-if not exist "napcat\NapCat.44498.Shell\napcat.bat" (
-    echo   [ERROR] napcat\NapCat.44498.Shell\napcat.bat not found
-    echo          Please check NapCat installation.
+
+REM QQ account for the bot. Override via environment variable if needed.
+if not defined QQ_BOT_NUM set "QQ_BOT_NUM=1042414563"
+
+set "NAPCAT_BAT="
+for /d %%D in ("%~dp0napcat\NapCat.*.Shell") do (
+    if exist "%%D\napcat.bat" set "NAPCAT_BAT=%%D\napcat.bat"
+)
+if not defined NAPCAT_BAT (
+    echo   [ERROR] napcat\NapCat.*.Shell\napcat.bat not found
+    echo          Run NapCatInstaller.exe or unpack NapCat.Shell.zip first.
     pause
     exit /b 1
 )
+for %%D in ("%NAPCAT_BAT%") do set "NAPCAT_DIR=%%~dpD"
+if "%NAPCAT_DIR:~-1%"=="\" set "NAPCAT_DIR=%NAPCAT_DIR:~0,-1%"
 
-start "NapCat QQ" cmd /k "cd /d %~dp0napcat\NapCat.44498.Shell && title NapCat QQ && napcat.bat"
-echo          NapCat QQ launched [OK]
+REM Always launch via napcat.bat — it sets NAPCAT_DISABLE_MULTI_PROCESS=1
+REM (the proven workaround for Worker crash on this box).
+start "NapCat QQ" cmd /k "chcp 65001 >nul && cd /d %NAPCAT_DIR% && set QQ_BOT_NUM=%QQ_BOT_NUM% && napcat.bat"
+echo          NapCat QQ launched [OK] account=%QQ_BOT_NUM% (via napcat.bat)
 
 echo.
 echo   ==============================================

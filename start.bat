@@ -1,6 +1,12 @@
 @echo off
+chcp 65001 >nul
 title Chatbot - One Click Start
 color 0E
+
+if /i "%~1"=="--check" (
+    echo start.bat OK
+    exit /b 0
+)
 
 echo.
 echo   ==============================================
@@ -48,10 +54,10 @@ echo.
 echo   Database: SQLite (chatbot.db) - zero config
 echo.
 
-start "Chatbot API" cmd /c "cd /d %~dp0 && title Chatbot API && .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "Chatbot API" cmd /c "chcp 65001 >nul && cd /d %~dp0 && title Chatbot API && .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 echo          Chatbot API launched on port 8000 [OK]
 
-start "NapCat Bridge" cmd /c "cd /d %~dp0 && title NapCat Bridge && .venv\Scripts\python.exe napcat_bridge.py"
+start "NapCat Bridge" cmd /c "chcp 65001 >nul && cd /d %~dp0 && title NapCat Bridge && .venv\Scripts\python.exe napcat_bridge.py"
 echo          NapCat Bridge launched on port 8090 [OK]
 
 echo.
