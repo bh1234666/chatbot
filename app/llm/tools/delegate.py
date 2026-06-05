@@ -1092,6 +1092,20 @@ def _guard_false_persona_veto_looks_like_workflow_issue(
     人设否决只用于明确角色或安全拒绝；技术任务的拆分、类型、框架问题不应变成 persona_veto。
     """
     reason_l = (reason or "").lower()
+    # 2026-06-05: guard 自相矛盾 — should_act=false 但 reason 明确说允许执行。
+    # 病因(实测 trace 373640 17:07:07): guard LLM 返回 should_act=false,reason 是
+    # "Role persona allows execution. ... Framework already referenced; no further
+    # block needed.",从语义上明显是放行。旧版 _looks_like_workflow_issue 只软化
+    # 含 split/kind 建议的拒绝,本例没有 actionable_guidance → 误触发 persona_veto,
+    # 浪费 1 轮重派。修法:reason 自相矛盾时(显式说放行)直接软化为放行。
+    self_contradiction_markers = (
+        "persona allows", "role permits", "role allows", "persona permits",
+        "no persona refusal", "no further block", "no need to block",
+        "kind matches", "no split needed",
+        "角色允许", "人设允许", "无需阻断", "无需拆分", "类型匹配",
+    )
+    if any(marker in reason_l for marker in self_contradiction_markers):
+        return True
     workflow_words = (
         "no user request",
         "detached",
@@ -5394,12 +5408,13 @@ async def _sanitize_and_validate_tasks(
         if kind == "read" and expected_outputs:
             _read_expected_before = list(expected_outputs)
             expected_outputs = _filter_read_helper_expected_outputs(prompt, expected_outputs)
+            _read_dropped = [x for x in _read_expected_before if x not in expected_outputs]
             if expected_outputs != _read_expected_before:
                 debug.log(
                     "delegate.expected_outputs.read_evidence_filtered",
                     (
                         f"task '{raw_tid}' kind='read' keeps only internal txt evidence outputs; "
-                        f"before={_read_expected_before}, after={expected_outputs}"
+                        f"before={_read_expected_before}, after={expected_outputs}, dropped={_read_dropped}"
                     ),
                 )
             if expected_outputs:
@@ -5412,6 +5427,25 @@ async def _sanitize_and_validate_tasks(
                     "If the original request mentioned `_env/<evidence>.txt`, keep the same basename and do not write it under `_env/`; `_env/` is reserved for staged project source files.\n"
                     "内部证据写到 helper 沙箱根目录或共享区；不要写入 `_env/` 项目暂存区。"
                 )
+                # 2026-06-05: 当过滤掉了 .csv/.json/.png 等非 txt 产物时,显式告诉 helper
+                # 这些产物不应由本 helper 直接生成,而是写到证据 .txt 里供下游消费 helper
+                # 转换。原 prompt 里的 CSV 路径只是源材料引用,不是本任务交付物。
+                # 病因(实测 trace 373640 16:57:29): survey-existing-algos 是 read kind,
+                # 但 expected_outputs 含 complexity_table.csv,helper 按 prompt 写 CSV
+                # 时被 read_helper_workspace_path_forbidden 拦,误以为是路径问题反复重试。
+                if _read_dropped:
+                    _dropped_show = ", ".join(_read_dropped[:6])
+                    prompt += (
+                        "\n\n## Non-txt outputs in original request — handle carefully\n"
+                        f"The original task request listed these non-`.txt` outputs: {_dropped_show}.\n"
+                        "Read helpers can only WRITE `.txt` evidence files — they are not allowed to "
+                        "produce CSV, JSON, PNG, source code, or Office files directly. Treat each "
+                        "non-`.txt` item above as either source material to read, OR as a deliverable "
+                        "that a downstream helper will assemble from your evidence text. Capture the "
+                        "structured content (e.g. CSV columns, JSON fields) inside your evidence "
+                        "`.txt` so a later code/edit helper can convert it.\n"
+                        "本任务是 read helper，只能写 .txt 证据；CSV/JSON/PNG/源码/Office 类产物请把结构化内容嵌在 .txt 里，由下游 code/edit helper 转换。"
+                    )
 
         expected_outputs = _expand_environment_expected_outputs(prompt, expected_outputs)
         if kind == "read" and expected_outputs:

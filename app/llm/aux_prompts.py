@@ -143,6 +143,12 @@ _TQG_KIND_PRINCIPLES_TAIL = (
 )
 _TQG_OUTPUT = (
     "For repeated review of the same task boundary, become progressively more action-oriented: keep the first pass precise, reserve later blocks for clear current errors, and let the workflow proceed when the main thread has already received usable split/kind/framework guidance.\n"
+    "\n# `should_act` semantics — read carefully\n"
+    "`should_act` means **the helper task is allowed to run as planned**.\n"
+    "- `should_act: true` — Allow execution. The plan is fine, OR you have only soft suggestions that the main thread can apply later. Use this whenever the persona is willing AND the task itself is legitimate technical work for the user goal, even if you also fill split_recommendations / kind_recommendations.\n"
+    "- `should_act: false` — Block execution NOW. Reserve this for: (1) clear persona/safety refusal, OR (2) the helper plan is so structurally wrong that running it would waste the user's time (e.g. fundamentally invalid kind, or batch lacks the shared framework that downstream depends on — set `framework_block.block: true` in that case).\n"
+    "Never set `should_act: false` while saying in `reason` that the persona allows it. Never set `should_act: false` purely to attach a soft split or kind suggestion — leave `should_act: true` and put the suggestion in the dedicated array instead. Only one of these patterns is valid for a refusal: { should_act: false, reason: \"persona refuses ...\" }, OR { should_act: false, framework_block.block: true, ...} — anything else should be `should_act: true`.\n"
+    "should_act 表示任务可以按当前方案继续；只有在角色/安全拒绝或缺共享框架真到必须先停时才填 false。带软建议时仍保持 true，把建议放进 split/kind 数组。\n"
     "\n# Output format\n"
     "Strict JSON, no markdown:\n"
     "{\n"

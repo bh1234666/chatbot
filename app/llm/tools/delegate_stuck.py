@@ -285,9 +285,18 @@ class StuckDetector:
         self._read_calls_no_write: int = 0
         self._evidence_writes: int = 0
         self._read_no_evidence_hint_sent: bool = False
-        # easy 模式较紧, hard 模式宽限
+        self._read_no_evidence_strong_hint_sent: bool = False
+        # 2026-06-05 软化: 之前 SOFT=8 / HARD=14 太紧, read helper 在体量大的工作区
+        # 探索 / verify 任务下经常 14 次内无法收敛就 stuck (实测 trace 990126 19:42 +
+        # 19:52 两次 read kind 撞墙, 浪费 ~3 分钟)。改为多级 soft hint:
+        #   SOFT (8/14) -> 第一次普通提示 "请写 evidence 或停手"
+        #   STRONG (16/24) -> 第二次强提示 "再不写 evidence 必停"
+        #   HARD (28/40) -> 最终 stuck (避免无限循环)
+        # 真在做 verify/inspect 类轻量任务的 read helper 在 16 次后会被 STRONG hint
+        # 驱使收尾, 不会再因为 14 次硬阈值被无理由 kill。
         self._READ_NO_EVIDENCE_SOFT = 8 if mode != "hard" else 14
-        self._READ_NO_EVIDENCE_HARD = 14 if mode != "hard" else 24
+        self._READ_NO_EVIDENCE_STRONG = 16 if mode != "hard" else 24
+        self._READ_NO_EVIDENCE_HARD = 28 if mode != "hard" else 40
         # 哪些工具算"读取类"
         self._READ_TOOLS_FOR_READ_HELPER = (
             "read_file", "search_in_file", "search_files",
@@ -392,22 +401,11 @@ class StuckDetector:
                     p: 0 for p in self._edits_per_file
                 }
 
-        # ── 2026-05-15 P69: edit thrashing 硬升级 ──
-        # 当同一文件 edit count 达 _EDIT_SAME_FILE_HARD_STUCK (=12) 且 last_run_failed,
-        # 升级为 hard stuck。soft hint (限阈值 4) 已发过但 helper 没响应。
-        if (self._most_edited_file
-                and self._edits_per_file.get(self._most_edited_file, 0) >= self._EDIT_SAME_FILE_HARD_STUCK
-                and self._last_run_failed
-                and not self._stuck):
-            n_edits = self._edits_per_file[self._most_edited_file]
-            self._mark_stuck(
-                f"P69 edit thrashing: `{self._most_edited_file}` has been edited {n_edits} times while "
-                f"verification still fails. The earlier soft hint did not change the pattern. The main "
-                f"process should stop this helper, preserve its report, and reroute with a fresh task_id "
-                f"that asks for root-cause analysis or a clean rewrite of the affected unit.\n"
-                f"同一文件多次修补仍失败时，主进程应保留报告并重新派发根因分析或干净重写。"
-            )
-            return
+        # ── 2026-05-15 P69 → 2026-06-05 软化: edit thrashing 不再硬 stuck ──
+        # 用户要求: 不限制最大 edit 次数,除非导致上下文超限。
+        # 仍记录 soft hint(由 same_file_edit_fail 路径在 4 次时发出),但不升级为 stuck。
+        # helper 自决何时收手;只有在 _consec_fails / _BASH_FAIL_RATE / lifetime_same_error
+        # 等其他独立硬约束触发时才会 stuck。
 
         # ── 2026-05-15 P70: bash 失败率 stuck ──
         # 最近 _BASH_FAIL_RATE_WINDOW 次 bash 调用里失败率 >= _BASH_FAIL_RATE_THRESHOLD,
@@ -612,6 +610,13 @@ class StuckDetector:
                 if _wa in ("write", "append") and _wp.endswith((".txt", ".md")):
                     self._evidence_writes += 1
                     self._read_calls_no_write = 0  # 写了 evidence 重置读循环计数
+            # 2026-06-05 P130 修复: OCR 工具自身产出 .txt 文件应算 evidence write
+            # (实测 trace 990126 19:42 read_classroom_exercises 用 ocr 处理 4 张图片
+            # 共生成 14 个 .txt OCR 中间文件,但因为不是 workspace.write 没被记账,
+            # 被 P130 误判 "0 evidence" 而 stuck)。OCR 输出本身就是结构化证据。
+            elif tool_name == "ocr" and self._is_success(result_str):
+                self._evidence_writes += 1
+                self._read_calls_no_write = 0
             # 硬升级: 读类调用累计已达硬阈值且仍 0 evidence write
             if (self._evidence_writes == 0
                     and self._read_calls_no_write >= self._READ_NO_EVIDENCE_HARD
@@ -1319,6 +1324,26 @@ class StuckDetector:
                 f"  2) You have enough coverage to write the evidence file. Write it now (workspace.write to a "
                 f"`*_evidence.txt`) and finalize the short report; further reads should be limited to named gaps.\n"
                 f"读取类调用累计较多但未写 evidence 时，先判断输入是否为 helper 产物（应改派消费 kind），否则立即写 evidence 并收尾。"
+            )
+
+        # 2026-06-05 P130 第二级强提示: 第一次软提示后 helper 仍在读循环, 距离硬阈值
+        # 还有 ~12 次余量, 但要明确警告"不写 evidence 必停手", 给 LLM 最后一次自决机会。
+        if (self._kind in ("read", "ocr")
+                and self._read_no_evidence_hint_sent
+                and not self._read_no_evidence_strong_hint_sent
+                and self._evidence_writes == 0
+                and self._read_calls_no_write >= self._READ_NO_EVIDENCE_STRONG):
+            self._read_no_evidence_strong_hint_sent = True
+            return (
+                f"[SYSTEM_HINT/read_helper_no_evidence_FINAL]\n"
+                f"You are now at {self._read_calls_no_write} reads with 0 evidence writes. Hard stop will trigger "
+                f"at {self._READ_NO_EVIDENCE_HARD}. THIS IS THE LAST WARNING. Pick ONE in your very next tool call:\n"
+                f"  (a) workspace.write a `*_evidence.txt` with everything you've found so far, then finalize.\n"
+                f"  (b) Output the final report immediately with whatever conclusion the existing reads support, "
+                f"even if partial. A short honest 'partial coverage of X, missing Y' is better than another read.\n"
+                f"  (c) If the task is impossible (inputs are helper-produced, or files don't exist), state that "
+                f"explicitly in the final report and stop.\n"
+                f"再读必停手；下次工具调用必须是写 evidence 或最终报告，不接受继续读取。"
             )
 
 

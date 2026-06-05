@@ -498,10 +498,96 @@ def _office_blocks_hard_limit_error(action: str, blocks: list) -> str | None:
     )
 
 
+def _office_blocks_format_warning(action: str, blocks: list) -> dict | None:
+    """检测 block.text 里残留的 LaTeX/Markdown 数学标记 (^{...} / _{...} / \\frac /
+    \\sqrt 等), 但不硬改。给 LLM 可执行的提示让它自己决定 (公式残留就重写, 故意
+    保留 raw 风格则忽略)。
+
+    实测 trace fee099 (2026-06-05): docx 文末出现 `e^{-r/2}` `e^{-r/4}` 等 6 处
+    plain-text 形式没有渲染成上下标也没用 LaTeX `$...$`, 看起来像残骸。这里只
+    报告位置, 由 LLM 决定是否补救。
+    """
+    findings: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+    # 检测 ^{...} / _{...} 风格 (raw markdown/LaTeX 风格的上下标 + 大括号包裹)
+    pat_brace = re.compile(r"([\^_])\{([^{}\n]+)\}")
+    # 检测裸 LaTeX 命令字符串(被剥掉 $ 后的命令残骸)
+    pat_latex_cmd = re.compile(r"\\(?:frac|sqrt|sum|int|prod|alpha|beta|gamma|delta|"
+                                r"theta|sigma|tau|phi|psi|omega|partial|nabla|cdot|"
+                                r"text|mathrm|mathbf|boxed|begin|end|left|right|"
+                                r"infty|leq|geq|neq|approx|equiv)\b")
+    # 检测未配对的 $ 符号 (奇数个 $ 通常意味着 LaTeX 包裹失败)
+    for idx, block in enumerate(blocks or []):
+        if not isinstance(block, dict):
+            continue
+        text = block.get("text") or block.get("caption") or ""
+        if not isinstance(text, str) or not text:
+            # 也扫表格 cells
+            cells = block.get("cells")
+            if isinstance(cells, list):
+                text = "\n".join(
+                    str(c) for row in cells if isinstance(row, list)
+                    for c in row if isinstance(c, str)
+                )
+            if not text:
+                continue
+        # ^{...} / _{...}
+        for m in pat_brace.finditer(text):
+            kind = "superscript" if m.group(1) == "^" else "subscript"
+            sample = m.group(0)
+            key = (idx, sample)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append({"block_index": idx, "kind": kind, "sample": sample})
+            if len(findings) >= 12:
+                break
+        if len(findings) >= 12:
+            break
+        # \frac \sqrt 等命令
+        for m in pat_latex_cmd.finditer(text):
+            sample = m.group(0)
+            key = (idx, "cmd:" + sample)
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append({"block_index": idx, "kind": "raw_latex_command", "sample": sample})
+            if len(findings) >= 12:
+                break
+        if len(findings) >= 12:
+            break
+        # 奇数 $ 数量 (一段里 $ 出现奇数次 → 包裹未闭合)
+        n_dollar = text.count("$")
+        if n_dollar % 2 == 1 and n_dollar > 0:
+            findings.append({"block_index": idx, "kind": "unbalanced_dollar", "count": n_dollar})
+
+    if not findings:
+        return None
+    return {
+        "issue": "raw_math_markup_in_plain_text",
+        "findings_count": len(findings),
+        "findings": findings,
+        "advisory": (
+            f"The {action} call has {len(findings)} block-text occurrence(s) of LaTeX/Markdown style "
+            f"math markup (like `^{{-r/4}}` or `\\frac{{a}}{{b}}` or unbalanced `$`) sitting as plain text. "
+            f"In docx these will render literally as `^{{-r/4}}` rather than as a real superscript or formula. "
+            f"If these are intentional code samples / notation explanations, ignore this. Otherwise consider "
+            f"either: (a) wrapping the math in `$...$` so the office tool renders it via LaTeX→Unicode/OMML, "
+            f"or (b) rewriting with Unicode super/subscript characters directly (e.g. `e⁻ʳ⁄⁴` or `e^(-r/4)`).\n"
+            f"docx 中残留的 ^{{...}} / \\frac 等 raw 数学标记不会自动渲染；按需用 $...$ 包或改 Unicode 上下标，"
+            f"如果是代码示例可忽略。"
+        ),
+    }
+
+
 def _attach_block_sizing_warning(payload: dict, action: str, blocks: list) -> dict:
     warning = _office_blocks_sizing_warning(action, blocks)
     if warning:
         payload["arg_size_warning"] = warning
+    # 2026-06-05: 公式/数学残留检测 (软提示, 不改文)
+    fmt_warning = _office_blocks_format_warning(action, blocks)
+    if fmt_warning:
+        payload["format_warnings"] = fmt_warning
     # 2026-05-18 P176: 粒度过细 nudge — 记录最近 block 数, 若过度细化给 helper 正向引导
     try:
         key = _current_office_key.get()

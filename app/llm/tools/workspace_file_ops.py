@@ -922,8 +922,8 @@ def _track_edit_count(ws_dir: str, path: str, op: str) -> tuple[int, str | None]
     2026-05-03 优化 #5:之前铁律 #2 只说 edit_file ≥3 次,但 multi_edit 内部
     可能批量 5 个改动也算"一次 edit_file",计数失准。这里统一所有 edit 类工具。
 
-    2026-05-15 P69 增强: 同 path edit ≥10 次时返回的警告以 "🚫HARD_BLOCK:" 开头,
-    上层 handler 据此把整个 edit 操作变成 ok=False error_kind=edit_thrashing_exceeded。
+    2026-06-05 软化: 之前 ≥10 次有 "🚫HARD_BLOCK:" 前缀让上层硬拒,用户 06-05
+    要求改为软提示 — 仅返回 advisory warning 字符串, 不影响 ok=True/False。
     """
     history_path = os.path.join(ws_dir, ".edit_history.json")
     history: dict = {}
@@ -1438,28 +1438,9 @@ async def handle_edit_file(
             "error": _SHARED_READONLY_ERROR_MSG,
             "blocked_path": path,
         }
-    # ── 2026-05-15 P69: edit thrashing 硬阻断 ──
-    # 病因(实测 comp_bench 1.5h): 同 helper 对 bench/benchmark.c 编辑 50 次, bench/compress.h
-    # 编辑 55 次, 旧版只软提示 _rewrite_suggestion 文本, helper LLM 直接忽略。
-    # 修法: 同文件 edit 次数 ≥10 后拒绝执行, 强制 helper 切换策略。
-    _prev_edits = _peek_edit_count(ws_dir, path)
-    if _prev_edits >= _EDIT_HARD_BLOCK_THRESHOLD:
-        return {
-            "ok": False,
-            "error_kind": "edit_thrashing_exceeded",
-            "error": (
-                f"edit_file paused because `{path}` already has {_prev_edits} edit operations "
-                f"(threshold {_EDIT_HARD_BLOCK_THRESHOLD}). This repeated patch pattern needs a strategy change.\n"
-                "同文件编辑过多，需要换策略。"
-            ),
-            "edit_count": _prev_edits,
-            "next_action": (
-                f"Choose one evidence-based path: {_rewrite_strategy_hint(path)}, "
-                f"report the verified blocker and failed subtask, or read the current local fragment and apply one planned "
-                f"multi_edit instead of another loop of small str_replace calls.\n"
-                "可整体重写、报告阻塞，或一次性计划 multi_edit；已有 _env 副本仍在原文件上编辑，不用 workspace.write 覆盖。"
-            ),
-        }
+    # ── 2026-05-15 P69 → 2026-06-05 软化: edit thrashing 仅作软提示, 不再硬拒 ──
+    # 用户要求: 不限制最大 edit 次数,除非导致上下文超限。让 LLM 自行判断是否换策略。
+    # _track_edit_count (调用在实际 edit 路径里) 仍累计并产出 soft warning。
     try:
         target = _safe_resolve(ws_dir, path)
     except ValueError as e:
@@ -1770,24 +1751,7 @@ async def handle_multi_edit(
             "blocked_path": path,
         }
 
-    # ── 2026-05-15 P69: edit thrashing 硬阻断 (multi_edit) ──
-    _prev_edits = _peek_edit_count(ws_dir, path)
-    if _prev_edits >= _EDIT_HARD_BLOCK_THRESHOLD:
-        return {
-            "ok": False,
-            "error_kind": "edit_thrashing_exceeded",
-            "error": (
-                f"multi_edit paused because `{path}` already has {_prev_edits} edit operations "
-                f"(threshold {_EDIT_HARD_BLOCK_THRESHOLD}). This repeated patch pattern needs a strategy change.\n"
-                "同文件编辑过多，需要换策略。"
-            ),
-            "edit_count": _prev_edits,
-            "next_action": (
-                f"Choose one evidence-based path: {_rewrite_strategy_hint(path)}, "
-                f"report the verified blocker, or stop editing this path.\n"
-                "可整体重写、报告阻塞，或停止编辑该路径；已有 _env 副本仍在原文件上编辑，不用 workspace.write 覆盖。"
-            ),
-        }
+    # ── 2026-05-15 P69 → 2026-06-05 软化: multi_edit thrashing 不再硬拒 ──
 
     try:
         target = _safe_resolve(ws_dir, path)
@@ -2005,23 +1969,7 @@ async def handle_insert_in_file(
             "error": _SHARED_READONLY_ERROR_MSG,
             "blocked_path": path,
         }
-    # ── 2026-05-15 P69: edit thrashing 硬阻断 (insert_in_file) ──
-    _prev_edits = _peek_edit_count(ws_dir, path)
-    if _prev_edits >= _EDIT_HARD_BLOCK_THRESHOLD:
-        return {
-            "ok": False,
-            "error_kind": "edit_thrashing_exceeded",
-            "error": (
-                f"insert_in_file paused because `{path}` already has {_prev_edits} edit operations "
-                f"(threshold {_EDIT_HARD_BLOCK_THRESHOLD}). This repeated patch pattern needs a strategy change.\n"
-                "同文件编辑过多，需要换策略。"
-            ),
-            "edit_count": _prev_edits,
-            "next_action": (
-                f"{_rewrite_strategy_hint(path)}, or report the verified blocker.\n"
-                "可整体重写，或报告已验证阻塞；已有 _env 副本仍在原文件上编辑，不用 workspace.write 覆盖。"
-            ),
-        }
+    # ── 2026-05-15 P69 → 2026-06-05 软化: insert_in_file thrashing 不再硬拒 ──
     try:
         target = _safe_resolve(ws_dir, path)
     except ValueError as e:

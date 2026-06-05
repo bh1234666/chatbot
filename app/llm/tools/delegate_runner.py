@@ -683,7 +683,17 @@ async def _run_one_helper(
             allowed_prefixes=frozenset(_allowed_prefixes),
             allowed_basenames=_allowed_basenames,
             include_downloaded_media=(kind in {"read", "ocr"}),
-            include_environment_files=_is_environment_helper_workspace(),
+            # 2026-06-05: 在普通 chat 模式也传递 `_env/` 给下游 helper。
+            # 病因(实测 trace 373640 17:07:48): design-act-algo / impl-baseline-algos
+            # 把源码 merge 到 <main>/_env/，但 run-benchmarks helper 因 environment
+            # mode 关而 _env 未递归 fork 进沙箱 → 对所有源文件 `read_file _env/...`
+            # 全 not found。helper 浪费 90s 找文件最终 stuck。
+            # 修法: 只要主区有 _env/，就传给下游。chat 模式下 _env 内容来自前序 helper，
+            # 不会污染用户项目；environment 模式行为不变。
+            include_environment_files=(
+                _is_environment_helper_workspace()
+                or os.path.isdir(os.path.join(main_workspace, "_env"))
+            ),
         )
         _cap = enforce_workspace_capacity(
             helper_workspace,
@@ -2828,19 +2838,17 @@ async def _run_one_helper(
                     and _all_files_promoted and (not interrupted and not was_stuck or _terminal_converged)
                     and not main_resource_request and not _has_office_output):
                 _result["_post_helper_action"] = "output_json_directly"
+                # 2026-06-05 简化: 之前的提示太长 (~280 chars * 14 helpers = 4K context),
+                # 而且每个 helper 完成都重复;改为 1 行核心信息。
                 _result["_post_helper_hint"] = (
-                    "This helper completed cleanly: outputs_complete=true, quality_warnings is empty, and all "
-                    "expected_outputs are available in the main workspace with clean names. "
-                    "If this is the only accepted version of the requested deliverable, list that clean filename in "
-                    "plan.deliverables. If another helper produced the same semantic deliverable, choose one final "
-                    "artifact before delivery and keep the others as internal evidence."
-                    "\n同一交付物有多个候选时先选最终版，只把干净文件名写入 deliverables。"
+                    "Outputs complete. Put the clean filename in plan.deliverables "
+                    "(pick one final if multiple candidates exist).\n"
+                    "产物完整；deliverables 写干净文件名,多候选选最终版。"
                 )
                 if _env_available_files:
                     _result["_post_helper_hint"] += (
-                        " Environment outputs are also merged into the main workspace under `_env/...`; verify or run "
-                        "those `_env` paths directly instead of manually copying from a `_delegate_*` sandbox."
-                        "\n环境产物已在主区 _env 路径，直接验证该路径。"
+                        " _env/ paths are in main workspace; use those directly.\n"
+                        "_env 产物已在主区,直接用。"
                     )
 
         # 2026-05-10 Patch 84: 对 interrupted / stuck / 长跑 helper 加 retry hint

@@ -94,6 +94,34 @@ _DANGEROUS_KEYWORDS = {
     "msiexec",
 }
 
+# 2026-06-05: 关键字 → 修复路径映射。被拦时附在错误信息后面,避免 LLM 重试同一命令。
+# 与 command_risk.recovery_hints 对齐, 但 set 包含的关键字更全(如 'start' 在这里 layer 命中)。
+_SECURITY_RECOVERY_HINTS: dict[str, str] = {
+    "start": (
+        "Don't background-launch processes. Foreground-run via `python ...` (no `start`), "
+        "or set timeout_sec on the workspace.run call. For long jobs, split into smaller steps.\n"
+        "不要后台启动；直接前台运行 `python ...` 并用 timeout_sec 限制时长,长任务拆步。"
+    ),
+    "format": (
+        "Use Python (`pathlib.Path.unlink/rmdir/shutil.rmtree`) on specific files instead of disk format.\n"
+        "用 Python 删除具体文件,不要格式化磁盘。"
+    ),
+    "powershell": (
+        "Switch to bash/cmd or python directly; powershell is restricted. For most tasks, "
+        "the python tool or workspace(action='run', command='python ...') is enough.\n"
+        "PowerShell 被限制；改用 bash/cmd 或 python 工具。"
+    ),
+    "taskkill": (
+        "Don't kill processes from helpers. If a previous workspace.run is still holding "
+        "files, wait briefly and retry, or report the blocker — the harness reaps killed "
+        "processes when timeout_sec expires.\n"
+        "不要在 helper 里杀进程；等待或报告占用,harness 会按 timeout_sec 回收。"
+    ),
+    "shutdown": "Out of scope; skip this step.\n超出范围,跳过。",
+    "logoff": "Out of scope; skip this step.\n超出范围,跳过。",
+    "regedit": "Registry access is out of scope; describe what config is needed instead.\n注册表超出范围,改述配置需求。",
+}
+
 # ═══════════════════════════════════════════════════════════════
 # cmd：破坏性操作（需检查目标路径是否在沙箱外）
 # ═══════════════════════════════════════════════════════════════
@@ -142,7 +170,15 @@ _PATH_RE = re.compile(
     r'|"[^"]*?[\\/][^"]*?"'              # 含路径分隔符的引号字符串
     r"|'[^']*?[\\/][^']*?')"             # 含路径分隔符的单引号字符串
 )
-_REDIRECT_RE = re.compile(r'[>]{1,2}\s*([^\s&|<>]+)')
+_REDIRECT_RE = re.compile(r'[>]{1,2}\s*([^\s&|<>;]+)')
+
+# 2026-06-05: 与 command_risk._REDIRECT_OUTSIDE_MSG 对齐的恢复提示。
+_REDIRECT_OUTSIDE_MSG = (
+    "security blocked: refusing redirect outside workspace.\n"
+    "Recovery: keep redirects inside the helper sandbox. For discarding stderr, "
+    "Unix `2>/dev/null` is allowed; or write to `_scratch/<name>.tmp` for temporaries.\n"
+    "安全策略拦截沙箱外重定向写入。/dev/null 允许；其它重定向请放工作区内或写到 _scratch/。"
+)
 
 
 def _compact_repeating_lines(text: str, min_repeat: int = 3) -> tuple[str, int]:
@@ -489,7 +525,15 @@ def _security_check(command: str, ws_dir: str) -> str | None:
     cmd_lower = command.lower()
     for kw in _DANGEROUS_KEYWORDS:
         if re.search(r'\b' + re.escape(kw) + r'\b', cmd_lower):
-            return f"security blocked: command uses restricted system operation '{kw}'.\n安全策略拦截该系统操作。"
+            # 2026-06-05: 给被拦的关键字附 recovery hint, 避免 LLM 反复重试同一命令。
+            # 病因(实测 trace 394304 14:55:28 / 14:57:33 / 14:57:39 / 14:58:48):
+            # impl_new helper 用 `start python ...` 想后台运行,4 次连续被拦,只看到
+            # "安全策略拦截",没看到怎么改 → 继续重试。
+            _hint = _SECURITY_RECOVERY_HINTS.get(kw, "")
+            _msg = f"security blocked: command uses restricted system operation '{kw}'.\n安全策略拦截该系统操作。"
+            if _hint:
+                _msg = f"{_msg}\n{_hint}"
+            return _msg
 
     # Layer 2：命令类型分发
     parts = command.split()
@@ -563,7 +607,7 @@ def _check_cmd(command: str, ws_dir: str) -> str | None:
     if first_token in _READ_OPS:
         # echo 配合重定向可能写入，单独检查
         if first_token == "echo" and _has_redirect_to_outside(command, ws_dir):
-            return "security blocked: refusing redirect outside workspace.\n安全策略拦截沙箱外重定向写入。"
+            return _REDIRECT_OUTSIDE_MSG
         return None
 
     # 破坏性操作：检查所有路径目标
@@ -575,7 +619,7 @@ def _check_cmd(command: str, ws_dir: str) -> str | None:
 
     # 检查重定向写入目标
     if _has_redirect_to_outside(command, ws_dir):
-        return "security blocked: refusing redirect outside workspace.\n安全策略拦截沙箱外重定向写入。"
+        return _REDIRECT_OUTSIDE_MSG
 
     return None
 
@@ -611,7 +655,7 @@ def _check_gcc(command: str, ws_dir: str) -> str | None:
 
     # Check shell redirect
     if _has_redirect_to_outside(command, ws_dir):
-        return "security blocked: refusing redirect outside workspace.\n安全策略拦截沙箱外重定向写入。"
+        return _REDIRECT_OUTSIDE_MSG
 
     return None
 

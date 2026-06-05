@@ -106,13 +106,17 @@ For crashes, inspect initialization, bounds, ownership, NUL termination, integer
     "doc-incremental-build": """\
 # Incremental Document Construction
 
-Build Office documents in small reliable steps rather than one huge script.
+Build documents in a few substantial calls instead of one tiny section at a time.
 
 ## Preferred Flow
-1. Create the document skeleton with title, sections, and placeholders for known resources.
-2. Append sections in bounded chunks.
-3. Insert final PNG/chart resources after they exist.
-4. Inspect the final file structure and, when needed, read body text or spot-check tables/images.
+1. Create the document skeleton with title, all section headings, figure/image placeholders, and a brief intro paragraph (one office.write call with 8-30 blocks).
+2. Use office.append in batches — each append call should carry content for 3-6 sections or 800-2000 words, not a single paragraph. Pack multiple heading+paragraph+image blocks into one append blocks array.
+3. If you must read back, read a broad range (start_block/end_block covering 15-40 blocks) rather than peeking at one section at a time.
+4. Insert final PNG/chart resources after they exist.
+5. Verify only at the end — read the heading list or a wide body excerpt, check against your source evidence, and fix discovered gaps with one more append/replace_block — not another round of per-section reads.
+6. Target 5-10 office tool calls total for a 12-section document. More calls than that and you are moving one paragraph at a time (too slow).
+
+Every extra LLM iteration between office calls costs seconds. Bundle content into fewer, larger calls.
 
 ## Data And Evidence
 Use source CSV/JSON/stdout/OCR text as evidence. Keep numbers, labels, units, figure names, and conclusions consistent with those sources. If a required chart or source is missing, request the resource and pause rather than writing a fake final section.
@@ -124,9 +128,15 @@ For papers, technical research notes, and benchmark reports, keep evidence, inte
 Use tables for compact comparable fields. Split very wide comparisons into smaller tables, and convert paragraph-length cells into prose, bullets, or appendices before final delivery.
 
 ## Formula And Formatting
-Preserve formulas in the format supported by the Office tool. After generation, inspect or read enough content to catch raw markup that failed to render.
+The Office tool renders math only when it is wrapped in `$...$` (inline) or `$$...$$` (display) using LaTeX syntax. Plain Unicode like `P_e = (1/2)·erfc(√r)` or `T_B = 1/R_B = 10⁻³` will be left as raw text and look ugly in the final docx — even if Unicode subscripts/superscripts read OK in your editor, the academic standard is real OMML formulas. Examples:
+- inline: `误码率 $P_e = \\tfrac{1}{2}\\,\\mathrm{erfc}(\\sqrt{r})$ 表示...`
+- display: `$$T_B = \\frac{1}{R_B} = 10^{-3}\\,\\mathrm{s}$$`
+For long answer-style explanations with many derivations, wrap every formula even if it looks "trivial" — `$N = T_B / T_c = 2000$` reads better than `N = T_B / T_c = 2000`. Aim for ≥1 LaTeX-wrapped formula per derivation step, not just the final answer. After generation, inspect the docx and check that each derivation step rendered as a real formula (look for `<m:oMath>` density in the XML if you can); if you see plain text where a formula should be, append the corrected version.
 
-文档构建按骨架、分段、插图、验收逐步做；学术文档只用已验证来源，表格保持可读，缺资源时请求主线程。""",
+## Citations and Sources
+Treat any reference list, citation, or "[Author Year]" tag as load-bearing — it must come from a verified source you actually read or that the main process supplied. Inventing plausible-sounding paper titles or author names is fabrication and harms the deliverable. If you don't have verified sources, replace the section with a "Suggested reading" note explaining the topic areas to consult.
+
+文档构建每次调用带 3-6 节内容(800-2000 词)；一个 12 节文档 5-10 次 office 调用完成；不要逐段读写。学术文档只用已验证来源，表格保持可读，缺资源时请求主线程。""",
 
     "verification-checklist": """\
 # Adversarial Verification Checklist

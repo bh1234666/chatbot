@@ -895,8 +895,12 @@ async def _call_llm_streaming_with_idle(
     stream_iter = stream.__aiter__()
     next_progress_at = progress_log_every_chunks
     chunk_idle_budget = first_chunk_timeout  # 第一个 chunk 仍用较长 budget
-    helper_tool_arg_bloat_warn_at = 8_000
-    helper_tool_arg_bloat_close_at = 12_000
+    # 2026-06-05 软化: 之前 12K 触发硬关流,但合法的文档/代码生成 (一次写入 docx
+    # 章节、写完整 matplotlib 脚本、生成长 .py 实现) 经常超过 12K,被阻断 → 续写
+    # 非常碎片化。提高 close 阈值到 24K,warn 阈值到 14K。真正失控 (循环重复内容)
+    # 在 24K 时用户也会看到, 但合法长内容能一次过。
+    helper_tool_arg_bloat_warn_at = 14_000
+    helper_tool_arg_bloat_close_at = 24_000
     helper_tool_arg_bloat_warned = False
 
     try:

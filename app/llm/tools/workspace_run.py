@@ -77,7 +77,10 @@ def _unix_inventory_syntax_fix_hint(command: str, stderr: str, stdout: str) -> s
         r"(^|[&|]\s*)head(?:\s|$)",
         r"(^|[&|]\s*)tail(?:\s|$)",
         r"(^|[&|]\s*)wc(?:\s|$)",
-        r"/dev/null|<<\s*['\"]?\w+|`[^`]+`|\$\(",
+        # 2026-06-05 修: `/dev/null` 单独不应触发 Unix-inventory 误报。
+        # 它在 `2>/dev/null` 这种丢弃 stderr 的常见用法里太普遍,会跟 redirect-outside
+        # 误报叠加。仅在和真正的 Unix 工具一起出现时才作为信号。
+        r"<<\s*['\"]?\w+|`[^`]+`|\$\(",
     )
     if not any(re.search(pattern, lower) for pattern in unix_patterns):
         return None
@@ -85,8 +88,11 @@ def _unix_inventory_syntax_fix_hint(command: str, stderr: str, stdout: str) -> s
     failure_signals = (
         "invalid switch", "参数格式不正确", "找不到", "not recognized",
         "was unexpected", "file not found", "系统找不到", "用法",
-        "security blocked", "refusing redirect outside workspace",
     )
+    # 2026-06-05 修: 如果失败原因是"redirect outside workspace",这是 redirect 自己的
+    # 锅,不要再让 Unix-inventory 提示混进来误导模型。
+    if "refusing redirect outside workspace" in combined:
+        return None
     if combined.strip() and not any(signal in combined for signal in failure_signals):
         return None
     return (
@@ -882,13 +888,75 @@ async def handle_run(
                 "workspace.run.timeout",
                 f"killed pid={proc.pid} after {timeout}s ({timeout_source}, proc_id={proc_id})",
             )
-            return {
+
+            # 2026-06-05: drain partial stderr after kill so OS-level failures
+            # (Cygwin fork exhaustion, missing exe, etc.) surface to LLM as a
+            # recovery hint instead of just "timed out".
+            # 实测 trace 373640 17:13:05: bash 命令在 fork 失败时先打 6 行 dofork
+            # 错误到 stderr,然后 bash 卡住等不到子进程结束 → 走 timeout 路径,
+            # LLM 只看到 "timed out after 10s" 完全错认为是耗时问题继续重试。
+            _partial_stderr = ""
+            _partial_stdout = ""
+            try:
+                if proc.stderr is not None:
+                    _err_buf = b""
+                    while True:
+                        try:
+                            _chunk = await asyncio.wait_for(proc.stderr.read(4096), timeout=0.2)
+                        except (asyncio.TimeoutError, Exception):
+                            break
+                        if not _chunk:
+                            break
+                        _err_buf += _chunk
+                        if len(_err_buf) >= 8192:
+                            break
+                    if _err_buf:
+                        try:
+                            _partial_stderr = _err_buf.decode("utf-8", errors="replace")
+                        except Exception:
+                            _partial_stderr = ""
+                if proc.stdout is not None:
+                    _out_buf = b""
+                    while True:
+                        try:
+                            _chunk = await asyncio.wait_for(proc.stdout.read(4096), timeout=0.2)
+                        except (asyncio.TimeoutError, Exception):
+                            break
+                        if not _chunk:
+                            break
+                        _out_buf += _chunk
+                        if len(_out_buf) >= 8192:
+                            break
+                    if _out_buf:
+                        try:
+                            _partial_stdout = _out_buf.decode("utf-8", errors="replace")
+                        except Exception:
+                            _partial_stdout = ""
+            except Exception:
+                pass
+
+            _fork_hint_on_timeout = _cygwin_fork_exhaustion_hint(cmd_line, _partial_stderr)
+            _timeout_error = f"command timed out after {timeout}s{hint}"
+            if _fork_hint_on_timeout:
+                _timeout_error = (
+                    f"{_fork_hint_on_timeout}\n\n"
+                    f"(Process was killed at {timeout}s, but stderr already "
+                    f"showed the host-level fork failure above before the timeout.)\n"
+                    f"{_timeout_error}"
+                )
+
+            _ret = {
                 "ok": False,
-                "error": f"command timed out after {timeout}s{hint}",
+                "error": _timeout_error,
                 "timed_out": True,
                 "timeout_used": timeout,
                 "proc_id": proc_id,  # LLM 看到这个能确认是哪个进程超的(虽然已注销)
             }
+            if _partial_stderr:
+                _ret["partial_stderr"] = _partial_stderr[:4000]
+            if _partial_stdout:
+                _ret["partial_stdout"] = _partial_stdout[:4000]
+            return _ret
 
         # 智能解码: cmd.exe 内置命令 / 本地化错误信息在中文 Windows 上是 cp936(GBK),
         # 不是 UTF-8。直接 utf-8 解码会得到 mojibake (如 "'tail'      ڲ ..."),

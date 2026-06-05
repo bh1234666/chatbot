@@ -2644,7 +2644,13 @@ async def _handle_delegate_collect(
         f"{r.get('task_id', '?')}={r.get('terminal_reason', '?')}"
         for r in results
     ) if results else ""
-    success_count = sum(1 for r in results if r.get("ok"))
+    # 2026-06-05: helper 同时带 ok=true + stuck/interrupted=true 时 (P130 read-helper
+    # 之类的 hard-stop 可能仍走 forced_finalize 输出 ok=true), success_count 不能把
+    # 它们算成成功 — 否则 timing_summary 会报 ok=1 stuck=1 自相矛盾。
+    success_count = sum(
+        1 for r in results
+        if r.get("ok") and not r.get("interrupted") and not r.get("stuck")
+    )
     resource_required_count = sum(
         1 for r in results
         if r.get("terminal_reason") == "resource_required" or r.get("resource_required")
@@ -3649,7 +3655,11 @@ async def handle_delegate(
     spawned_ordered = list(by_tid.values())
     ordered = initial_ordered + spawned_ordered
 
-    ok_count = sum(1 for r in ordered if r.get("ok"))
+    # 2026-06-05: 同一 fix — ok=true 且 interrupted/stuck=true 不应算成功
+    ok_count = sum(
+        1 for r in ordered
+        if r.get("ok") and not r.get("interrupted") and not r.get("stuck")
+    )
     resource_required_count = sum(
         1 for r in ordered
         if r.get("terminal_reason") == "resource_required" or r.get("resource_required")

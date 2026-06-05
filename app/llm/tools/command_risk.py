@@ -66,7 +66,20 @@ PATH_RE = re.compile(
     r'|"([^"]*?[\\/][^"]*?)"'
     r"|'([^']*?[\\/][^']*?)'"
 )
-REDIRECT_RE = re.compile(r'[>]{1,2}\s*([^\s&|<>]+)')
+REDIRECT_RE = re.compile(r'[>]{1,2}\s*([^\s&|<>;]+)')
+
+# 2026-06-05: redirect-outside 错误附 recovery hint。
+# 病因(实测 trace 373640 16:55:30 / 17:11:15 / 17:45:14):
+# 旧版 message 不区分"真去沙箱外"和"目标只是奇怪路径",FIX_HINT 是泛用 Unix 盘点提示,
+# 不能告诉模型怎么改。模型一脸茫然,反复重试相同命令。
+_REDIRECT_OUTSIDE_MSG = (
+    "security blocked: refusing redirect outside workspace.\n"
+    "Recovery: keep redirects inside the helper sandbox. For discarding stderr, "
+    "use Unix `2>/dev/null` (allowed; the target literal `/dev/null` is permitted) "
+    "or just omit the redirect. For temporary output, write to `_scratch/<name>.tmp` "
+    "or any path under the workspace root.\n"
+    "安全策略拦截沙箱外重定向写入。/dev/null 是允许的，但请保持其它重定向在工作区内（或写到 _scratch/）。"
+)
 
 
 def _helper_has_env_workspace(ws_dir: str) -> bool:
@@ -248,7 +261,7 @@ def analyze_command(command: str, ws_dir: str, *, is_main_thread: bool = True) -
     if exe in CMD_READ_OPS or exe in CMD_DESTRUCTIVE_OPS:
         return _analyze_bare_cmd_builtin(command, ws_dir, is_main_thread=is_main_thread)
     if has_redirect_to_outside(command, ws_dir):
-        return CommandRiskDecision(False, "security blocked: refusing redirect outside workspace", "outside_redirect")
+        return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
     return CommandRiskDecision(True)
 
 
@@ -271,7 +284,7 @@ def _analyze_bare_cmd_builtin(command: str, ws_dir: str, *, is_main_thread: bool
 
     if first_token in CMD_READ_OPS:
         if has_redirect_to_outside(command, ws_dir):
-            return CommandRiskDecision(False, "security blocked: refusing redirect outside workspace", "outside_redirect")
+            return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
         return CommandRiskDecision(True)
 
     if first_token in CMD_DESTRUCTIVE_OPS:
@@ -283,7 +296,7 @@ def _analyze_bare_cmd_builtin(command: str, ws_dir: str, *, is_main_thread: bool
                     "outside_destructive",
                 )
         if has_redirect_to_outside(command, ws_dir):
-            return CommandRiskDecision(False, "security blocked: refusing redirect outside workspace", "outside_redirect")
+            return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
 
     return CommandRiskDecision(True)
 
@@ -312,11 +325,7 @@ def _analyze_cmd(command: str, ws_dir: str, *, is_main_thread: bool) -> CommandR
 
     if first_token in CMD_READ_OPS:
         if first_token == "echo" and has_redirect_to_outside(command, ws_dir):
-            return CommandRiskDecision(
-                False,
-                "security blocked: refusing redirect outside workspace.\n安全策略拦截沙箱外重定向写入。",
-                "outside_redirect",
-            )
+            return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
         return CommandRiskDecision(True)
 
     if first_token in CMD_DESTRUCTIVE_OPS:
@@ -329,11 +338,7 @@ def _analyze_cmd(command: str, ws_dir: str, *, is_main_thread: bool) -> CommandR
                 )
 
     if has_redirect_to_outside(command, ws_dir):
-        return CommandRiskDecision(
-            False,
-            "security blocked: refusing redirect outside workspace.\n安全策略拦截沙箱外重定向写入。",
-            "outside_redirect",
-        )
+        return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
 
     return CommandRiskDecision(True)
 
@@ -373,11 +378,7 @@ def _analyze_gcc(command: str, ws_dir: str) -> CommandRiskDecision:
                 )
 
     if has_redirect_to_outside(command, ws_dir):
-        return CommandRiskDecision(
-            False,
-            "security blocked: refusing redirect outside workspace.\n安全策略拦截沙箱外重定向写入。",
-            "outside_redirect",
-        )
+        return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
     return CommandRiskDecision(True)
 
 
