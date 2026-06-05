@@ -217,11 +217,28 @@ def analyze_command(command: str, ws_dir: str, *, is_main_thread: bool = True) -
     parts = command.split()
     first_exe = _first_executable(parts)
     if first_exe in DANGEROUS_EXACT_EXECUTABLES:
-        return CommandRiskDecision(
-            False,
-            f"security blocked: command uses restricted executable '{first_exe}'.\n安全策略拦截该可执行程序。",
-            "blocked_keyword",
+        # 2026-06-05: 给被拦的可执行加可操作恢复路径,避免 LLM 反复重试同一命令。
+        # 病因(实测 trace 394304 14:55:28 / 14:57:33 / 14:57:39 / 14:58:48):
+        # impl_new helper 反复用 `start python ...` 想后台运行,3 次连续被拦,
+        # 错误信息只说"安全策略拦截"没说怎么改,LLM 继续重试。
+        recovery_hints = {
+            "start": (
+                "Don't background-launch processes. Foreground-run via `python ...` (no `start`), "
+                "or set timeout_sec on the workspace.run call. For long jobs, split into smaller steps.\n"
+                "不要后台启动；直接前台运行 `python ...` 并用 timeout_sec 限制时长,长任务拆步。"
+            ),
+            "format": "Use Python (`pathlib.Path.unlink/rmdir/shutil.rmtree`) on specific files instead of disk format.\n用 Python 删除具体文件,不要格式化磁盘。",
+            "label": "Disk volume label changes are out of scope; skip this step.\n不可改盘卷标。",
+            "convert": "Filesystem conversion is out of scope; skip this step.\n不可文件系统转换。",
+            "compact": "NTFS compact attribute is out of scope; skip this step.\n不可 NTFS 压缩属性。",
+            "cipher": "EFS encryption is out of scope; skip this step.\n不可 EFS 加密。",
+        }
+        _hint = recovery_hints.get(first_exe, "")
+        _msg = (
+            f"security blocked: command uses restricted executable '{first_exe}'.\n安全策略拦截该可执行程序。"
+            + (f"\n{_hint}" if _hint else "")
         )
+        return CommandRiskDecision(False, _msg, "blocked_keyword")
 
     exe = parts[0].lower() if parts else ""
     if exe in ("cmd", "cmd.exe"):

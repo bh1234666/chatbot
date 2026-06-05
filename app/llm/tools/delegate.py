@@ -922,6 +922,28 @@ async def _persona_consent_guard(
                         ),
                     )
                     continue
+                # 2026-06-05: guard LLM 看用户最终目标(要 word 论文)就把所有 code 任务推向 edit,
+                # 但实际产物是源代码文件 (.py / .c / .h / .js 等) — edit helper 没有合适工具。
+                # 病因(实测 14:48:58 trace 394304bbb02940e7): impl_new 任务声明产 _helpers_shared/acb_tree.py,
+                # guard LLM 因用户最终目标含 docx 论文,强制 code→edit,主线程被 hard-block,
+                # 浪费 1 轮重派,后续仍按 code 跑(重派结果还是 code helper 实现 .py)。
+                # 修法: 当主任务输出含明确源码/数据扩展时, 忽略 LLM 的 code→edit 建议;
+                # 物理硬约束 _deterministic_kind_recommendations 已经在 docx/pptx/xlsx 等 Office 主体
+                # 上独立工作,这里只阻止 LLM 因"用户最终目标"误推。
+                if (
+                    _current == "code"
+                    and _suggested == "edit"
+                    and _has_non_text_implementation_output(_expected)
+                ):
+                    debug.log(
+                        "delegate.guard_kind.ignored_code_to_edit_for_source_output",
+                        (
+                            f"task '{rec.get('task_id')}' kind recommendation ignored: "
+                            f"expected_outputs include source/data files {_expected[:3]} which need code helper tools; "
+                            "edit helper cannot run/build/test source artifacts"
+                        ),
+                    )
+                    continue
             _filtered_kinds.append(rec)
         cleaned_kinds = _filtered_kinds
 
@@ -5289,6 +5311,49 @@ async def _sanitize_and_validate_tasks(
             write_scopes = [f"{k}: {v}" for k, v in _raw_write_scopes.items() if str(k).strip()][:20]
         else:
             write_scopes = []
+
+        # 2026-06-05: dispatch-time rewrite — helper cannot write to `_shared/` (read-only scaffold).
+        # 病因(实测 14:41 trace 394304bbb02940e7): 主线程把 `_shared/file_map.json` 列入 expected_outputs,
+        # helper 反复尝试 workspace.write 全部被 `_shared/` read-only 守卫拦截,iter 18-23 连续失败,
+        # 最终触发 `delegate.framework_design.stuck` 浪费 224s 后中断,主线程后续重做框架。
+        # 修法: spawn 时把 expected_outputs/write_scopes/prompt 中的 `_shared/...` 自动改写到
+        # `_helpers_shared/...`(后者会自动合并回主区,语义保留),避免 helper 接到不可能完成的契约。
+        def _rewrite_shared_to_helpers_shared(items: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
+            rewrites: list[tuple[str, str]] = []
+            new_items: list[str] = []
+            for item in items:
+                norm = item.replace("\\", "/").lstrip("./")
+                if norm == "_shared" or norm.startswith("_shared/"):
+                    fixed = "_helpers_shared/" + norm[len("_shared/"):] if norm.startswith("_shared/") else "_helpers_shared"
+                    rewrites.append((item, fixed))
+                    new_items.append(fixed)
+                else:
+                    new_items.append(item)
+            return new_items, rewrites
+
+        expected_outputs, _exp_rewrites = _rewrite_shared_to_helpers_shared(expected_outputs)
+        write_scopes, _ws_rewrites = _rewrite_shared_to_helpers_shared(write_scopes)
+        if _exp_rewrites or _ws_rewrites:
+            try:
+                # Rewrite only the specific deliverable paths in the prompt — leave any read-side
+                # `_shared/...` references untouched (helpers can read `_shared/`, just not write).
+                _seen_paths: set[str] = set()
+                for _orig, _fixed in (_exp_rewrites + _ws_rewrites):
+                    if _orig in _seen_paths or _orig == _fixed:
+                        continue
+                    _seen_paths.add(_orig)
+                    if _orig in prompt:
+                        prompt = prompt.replace(_orig, _fixed)
+            except Exception:
+                pass
+            debug.log(
+                "delegate.expected_outputs.shared_rewritten",
+                (
+                    f"task '{raw_tid or f'task{idx}'}' rewrote `_shared/` paths to `_helpers_shared/`: "
+                    f"expected_outputs={_exp_rewrites} write_scopes={_ws_rewrites}. "
+                    f"Reason: helper sandbox treats `_shared/` as read-only; `_helpers_shared/` auto-merges back to main."
+                ),
+            )
 
         if kind in {"project_map", "file_summary", "impact_review", "inventory", "summarize"} and expected_outputs:
             debug.log(

@@ -1421,6 +1421,13 @@ class StuckDetector:
         # "无任何进展" → meta-judge 升级 hard→veryhard → 多跑 30 分钟。
         if '"rate_limited": true' in s or '"rate_limited":true' in s:
             return True
+        # 2026-06-05: Windows git-bash Cygwin fork 资源耗尽属环境抖动,不是 LLM 策略错误。
+        # 病因(实测 trace 394304 14:45-15:05): 多 helper 并行 + 长复合命令导致 Cygwin
+        # 多次 dofork 失败 (errno 11 / Resource temporarily unavailable) 返回 rc=254。
+        # 这种失败 LLM 重试同一命令几乎一定继续失败,但已经通过 fix_hint 提示拆分;
+        # 不再计入 _consec_fails 避免凑齐 4 次环境抖动就触发 stuck (浪费 helper 续作)。
+        if "dofork: child" in s and "Resource temporarily unavailable" in s:
+            return True
         # 显式 error 字段
         if '"error":' in s and '"ok": false' in s:
             return False

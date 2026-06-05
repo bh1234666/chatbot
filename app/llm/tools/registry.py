@@ -1555,9 +1555,13 @@ def _helper_large_text_write_warning(helper_kind: str, path: str, content: str) 
         return None
     content_text = content if isinstance(content, str) else str(content)
     char_count = len(content_text)
-    line_count = content_text.count("\n") + (1 if content_text else 0)
-    if char_count <= 6000 and line_count <= 140:
+    # 2026-06-05: 字符总量是真正成本指标; 行数多但字符不大(短 bullet/大纲)不应硬卡。
+    # 病因(实测 trace 394304 14:44:31): paper_outline.md 2786 字符 167 行短 bullet 大纲
+    # 触发 line_count > 140 被硬拒, helper 卡住浪费 ~1 分钟。
+    # 修法: 仅按字符总量(6000)判断;丢弃行数子条件(对短 bullet 误伤)。
+    if char_count <= 6000:
         return None
+    line_count = content_text.count("\n") + (1 if content_text else 0)
     return {
         "ok": False,
         "error": "helper_large_text_write_should_segment",

@@ -2307,7 +2307,13 @@ _EDIT_REWRITE_THRESHOLD = 3
 # 编辑 55 次, 反复修不通同一组接口耦合的 .c/.h 死循环。
 # 修法: 阈值 ≥10 时返 ok=false + error_kind="edit_thrashing_exceeded", 拒绝执行 edit,
 # 强制 helper 切换策略 (workspace.write 整文件重写, 或承认失败 spawn 新 task)。
-_EDIT_HARD_BLOCK_THRESHOLD = 10
+#
+# 2026-06-05 调整: 实测 trace 394304 14:55:22 / 14:57:00 / 15:03:26 — helper 在
+# 实现复杂数据结构 (acb_tree.py / existing_algos.py) 时 10 次 edit 仍属正常增量
+# 开发, 命中 hard block 后被迫整体重写反而丢失增量进度。提高到 20, 配合 stuck
+# detector 的 same_file_edit_fail (≥4 次 edit + run_fail 才软提示) 已经能在真正的
+# 死循环里给出引导,不需要这条硬线。
+_EDIT_HARD_BLOCK_THRESHOLD = 20
 
 # ── 进程内 read tracker(2026-05-03 trace b78b242533a24a46 教训)──
 # 磁盘 .read_history.json 在 helper sandbox 里偶尔写不进去(实测 lz78 helper 27 分钟里

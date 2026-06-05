@@ -108,6 +108,52 @@ def _windows_unix_inventory_command_hint(command: str) -> str | None:
     )
 
 
+_CYGWIN_FORK_SIGNALS = (
+    "dofork: child",
+    "child died unexpectedly",
+    "child_copy: dll data read copy failed",
+    "fork: Resource temporarily unavailable",
+    "fork: retry: Resource temporarily unavailable",
+)
+
+
+def _cygwin_fork_exhaustion_hint(command: str, stderr: str) -> str | None:
+    """Detect git-bash/Cygwin fork exhaustion and nudge LLM toward simpler tools.
+
+    病因 (实测 trace 394304 14:45:27, 14:47:28, 14:53:17, 14:53:37, 14:54:06,
+    14:54:28, 14:58:48, 15:00:* 等十余次):
+    Windows 上 git-bash 的 Cygwin 在并行多 helper、长复合命令(`cmd1 && cmd2 && ...
+    多次嵌套 python -c`)下出现 dofork: child died, errno 11 ("Resource temporarily
+    unavailable") — 这是 OS 级 fork 资源耗尽,LLM 重试同一长命令几乎肯定再次失败。
+    错误信号通常带部分 stdout(前几条命令成功),仅最后段失败,LLM 容易错认为是逻辑
+    错而陷入复述循环(复杂命令越来越长)。
+
+    应对: 让 LLM 看到清晰的"系统级 fork 失败 != 你的命令逻辑问题",并明确建议
+    拆成多次小命令 / 改用 read_file/inspect_file 等专用工具。
+    """
+    if sys.platform != "win32":
+        return None
+    err = stderr or ""
+    if not any(sig in err for sig in _CYGWIN_FORK_SIGNALS):
+        return None
+    cmd = (command or "").strip()
+    # 估算复合命令复杂度(含 && / || / ; / | 数量)以决定是否提示拆分。
+    compound_ops = sum(cmd.count(op) for op in (" && ", " || ", " ; ", " | "))
+    return (
+        "git-bash/Cygwin reported a host-level fork failure (`dofork: child died` / "
+        "`Resource temporarily unavailable`). This is the Windows process subsystem "
+        "running out of fork capacity, NOT a logic bug in your command. Stdout that "
+        "did print before the failure is real. "
+        "Recovery: split the work into several short single-purpose calls, or skip the "
+        "shell entirely — read_file/inspect_file/search_in_file/locate cover most "
+        "inventory needs without forking. For JSON/Python checks, use the python tool "
+        "(no shell). Avoid chaining ≥3 commands with && in one bash call on Windows.\n"
+        "Cygwin/git-bash 在 Windows 上 fork 资源耗尽: 拆短命令或改用 read_file/inspect_file/"
+        "python 等无 shell 的工具,不要重试相同长复合命令。"
+        + (f"\n(本次复合操作数 ≈ {compound_ops}; 建议每次 1-2 步)" if compound_ops >= 3 else "")
+    )
+
+
 def _sync_workspace_globals() -> None:
     from app.llm.tools import workspace as _workspace
     globals().update({
@@ -921,6 +967,11 @@ async def handle_run(
         _unix_inventory_hint = _unix_inventory_syntax_fix_hint(command, stderr, stdout)
         if _unix_inventory_hint:
             fix_hint = f"{_unix_inventory_hint}\n{fix_hint}" if fix_hint else _unix_inventory_hint
+        # 2026-06-05: Windows git-bash Cygwin fork 资源耗尽提示 — 优先级最高(放最前)
+        # 因为系统级 fork 失败时 LLM 重试同一命令几乎一定再次失败,提前提醒切换工具。
+        _fork_hint = _cygwin_fork_exhaustion_hint(command, stderr)
+        if _fork_hint:
+            fix_hint = f"{_fork_hint}\n{fix_hint}" if fix_hint else _fork_hint
 
         # ── 2026-05-02 part14:stdout 智能摘要(模仿"先看 head/tail + grep 关键词"模式)──
         # 教训(trace 74b1295b iter 89):helper 自加 fprintf DEBUG → stdout 从 700→13K chars,
