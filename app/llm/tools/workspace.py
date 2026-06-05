@@ -2273,17 +2273,13 @@ from app.llm.tools.workspace_file_ops import (  # noqa: E402,F401
 # 二进制检测阈值:前 1KB 含 NULL 字节即视为二进制
 _BINARY_DETECT_BYTES = 1024
 # 单次 read 最大字符数(防止 prompt 爆炸)
-# 2026-05-02 part16:1M context 下默认 16K 太保守,helper 一次 read 200 行看一个函数
-# 经常被截断要续读。放宽到 32K(~8000 tokens)— 注意力衰减依然可控,且省去续读 round-trip。
-# hard cap 64K 不变(更大就该用 search_in_file / code_index)。
-# 2026-05-02 part20:_READ_MAX_CHARS_DEFAULT 从 32KB → 500KB(用户支持 1M context)
-# 用户洞察:"裸 LLM 写得对,智能体调不对"根因之一是工具引导模型看片段。
-# Claude Code 的 Read 工具默认就允许读完整文件(2000 行 / ~200KB)。
-# 我们这边模型支持 1M context,500KB 默认完全 OK,让模型真能"一次看完整代码"。
-# trace 74769ad9 教训:huffman.c 13KB,模型本可一次 read_file 看完,
-# 但被 "默认 32KB" 误导以为只能看片段 → 转用 read_function 进入碎片化探查死循环。
-_READ_MAX_CHARS_DEFAULT = 500_000   # 默认 500KB(覆盖 99% 单文件)
-_READ_MAX_CHARS_HARD_CAP = 2_000_000  # HARD_CAP 2MB(极少数巨型文件)
+# 2026-06-05: 用户要求任何时候单次操作不超过 30KB, 正常默认 6KB。
+# 一次 read_file 应只返回合理大小片段。超限时截断并告知 LLM 用 search_in_file +
+# start_line/end_line 细读, 而不是续读下一块(续读同样会超限)。
+# 旧值从 500KB 降下来(实测 trace 990126 主线程全文读 4 份证据 ~22KB 后
+# 因上下文膨胀而张冠李戴把 2FSK 写成 16QAM)。
+_READ_MAX_CHARS_DEFAULT = 6_000   # 默认 6KB(鼓励按范围细读)
+_READ_MAX_CHARS_HARD_CAP = 30_000  # HARD_CAP 30KB(任何操作不可超过)
 # search 单次最大返回结果数 + 超时秒数
 _SEARCH_MAX_RESULTS_DEFAULT = 50
 _SEARCH_TIMEOUT_S = 2.0

@@ -1293,8 +1293,12 @@ async def handle_read_file(
     if truncated:
         result["next_start_line"] = actual_end + 1
         result["note"] = (
-            f"output truncated at {max_chars} chars; "
-            f"call again with start_line={actual_end + 1} to continue"
+            f"output truncated at {max_chars} chars ({result['shown_range'][0]}-{actual_end} of {total_lines} lines). "
+            f"Do NOT call again with next_start_line to continue — the hard single-call cap is {_READ_MAX_CHARS_HARD_CAP} chars "
+            f"and continuing would waste context on the same file. Use search_in_file to find specific content "
+            f"(e.g., search_in_file(path, 'keyword') for problem numbers, terms, or patterns), "
+            f"then read_file with narrow start_line/end_line that targets only the relevant lines.\n"
+            f"已截断；不要续读。用 search_in_file 搜索关键词后用 start_line/end_line 窄范围读取。"
         )
 
     # ── 重读警告 ──

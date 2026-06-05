@@ -3505,11 +3505,14 @@ async def handle_delegate(
         # response 构造时通过 ProcessRegistry 反查心跳汇报给主线程。
         results = await _dynamic_wait_loop(
             helper_tasks, spawn_queue,
-            on_done=lambda r, total: debug.log(
-                "delegate.progress",
-                f"{('✓' if r.get('ok') else ('⏸' if r.get('interrupted') else '✗'))} "
-                f"{r.get('task_id', '?')} done in {_time.monotonic() - _start:.1f}s "
-                f"({total}/? helpers complete)",
+            # 2026-06-05: ✗(failed)/⏸(stuck/interrupted) 是内部系统事件, 不应
+            # 作为用户可见的进度里程碑。只对 ok=true 的 ✓ helper 输出 progress。
+            on_done=lambda r, total: (
+                debug.log(
+                    "delegate.progress",
+                    f"✓ {r.get('task_id', '?')} done in {_time.monotonic() - _start:.1f}s "
+                    f"({total}/? helpers complete)",
+                ) if r.get('ok') else None
             ),
             wait_window_sec=wait_window_sec,
             min_results_to_return=min_results_to_return,  # 2026-05-03 优化 #1
