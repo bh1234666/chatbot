@@ -13,28 +13,19 @@ from app.llm.tools.helper_prompts import _ASAN_HINT, _PLATFORM_HINT, _build_bash
 _BASH_EXAMPLES_BLOCK = _build_bash_examples_block()
 
 
-_HELPER_CONSISTENCY_CONTRACT = (
-    "## Helper Consistency Contract\n"
-    "This section applies to every helper kind. It keeps main-process and helper evidence consistent.\n"
-    "- Stay inside your assigned helper kind. If the task needs a different capability, stop early and report the correct helper kind, missing inputs, and why partial evidence is insufficient.\n"
-    "- Use measured evidence for exact claims. Counts, file sizes, characters, bytes, line counts, benchmark numbers, OCR text, and generated files must come from tools or explicit source material, not memory, directory names, or partial listings.\n"
-    "- In project/environment work, real project files are represented inside the helper sandbox as sparse `_env/...` workspace copies. `_env/` is the project root itself; append project-relative paths directly under `_env/`. Read, edit, run, and verify those copies with local relative `_env/...` paths; the main process handles absolute project paths.\n"
-    "- Treat `_env/...` as a staged working set. Inspect `_env/project_inventory.md` or `_env/.resource_manifest.json` when present, and use manifest paths as the source of truth. When a needed project dependency is absent, request the exact project-relative path before you continue. Charts, OCR, audio, or generated external artifacts may still use `request_resource` when appropriate.\n"
-    "- Run command tools from the helper sandbox using local relative paths, usually `_env/<project-relative-path>` or `cd _env/<subdir> && ...`. Absolute project paths and parent-directory escapes are invalid for helpers.\n"
-    "- If a project file you need to edit is present but not in your expected_outputs, request ownership for that exact `_env/...` path and preserve state. New project files also need declared `_env/...` expected_outputs so copyback and verification can find them. If it is part of the same logical task, the main process can resume your task with expanded expected_outputs; if it is another responsibility, the main process will assign it elsewhere.\n"
-    "- Choose command syntax for the actual runtime platform. Prefer platform-neutral Python probes or workspace locate/search for inventories and statistics; use Unix-only shell utilities, heredocs, `/dev/null`, or shell-specific redirection only after confirming that shell is available.\n"
-    "- Treat helper results with `ok=false`, `interrupted`, `stuck`, `terminal_reason=resource_required`, missing expected outputs, or blocking quality warnings as blocker/status evidence for recovery.\n"
-    "- When a resource is missing, request or report the needed resource and preserve state. Deliverables contain confirmed content backed by available resources.\n"
-    "- If same-batch or earlier helpers provide the needed resource, use only verified paths or confirmed summaries. If evidence conflicts, surface the conflict and ask the main process to verify or reroute.\n"
-    "- When a task depends on same-batch producer outputs that are not yet present, inspect available files once, then request the exact missing resources or report the dependency gap with the guessed paths marked as unavailable.\n"
-    "- Shared artifact namespaces are literal. If the main process or producer result exposes `_env/...`, read that `_env/...` path; if it exposes `_helpers_shared/...`, read that exact shared path. Preserve exposed namespaces exactly from file_map, main_available_files, copy_stats.env_copied_files, internal_evidence_files, and locate results before retrying a missing path.\n"
-"- For broad multi-part work, follow the shared framework contract supplied by the main process. If your assignment is to create that framework, produce a compact contract, skeleton, outline, schema, evidence map, validation plan, or output matrix that later helpers can consume. Define slots, dependencies, ownership, and acceptance; later slice helpers own implementation bodies, long scripts, experiments, research claims, citations, conclusions, final-value tables, charts, long chapters, and final assembly. If your assignment is one slice, stay within that slice and report integration assumptions clearly.\n"
-"- Produce long work in inspectable segments. Prefer modules, sections, chapters, data shards, evidence ranges, append blocks, or stable intermediate files when the output will need review, resume, merge, or verification. For large source or script files, write a compact skeleton or interface first, then fill functions, classes, sections, or split modules with focused edits so progress remains inspectable.\n"
-"- Keep individual tool calls small. For long markdown, reports, papers, contracts, or generated source, write a compact skeleton first, then append or edit named sections in blocks of roughly 2,000-4,000 characters. When a deliverable has many long sections, create section files first and let a later assembly step merge them.\n"
-"- Slice ownership is local. After a slice helper writes its expected output, verifies the local acceptance checks, and records remaining integration assumptions, it should stop and report. Cross-slice comparison, final document assembly, and global acceptance belong to the main process or a downstream edit/verify helper.\n"
-"- Deliver concise reports with concrete files, commands, observations, and remaining blockers. Rewrite internal-only source notes into user-facing conclusions when they are meant for delivery.\n"
-"所有 helper 共用：按职责工作，精确结论来自工具证据；项目文件先看资源清单，再使用本地 _env 副本和相对路径，_env 本身就是项目根；共享框架 helper 只产出槽位、归属、依赖和验收矩阵；实质内容由后续分片产出；项目写入需声明 _env 产物路径；共享产物路径以结果映射为准；大型任务按可检查片段产出；缺文件、缺编辑归属、冻结、失败或缺产物都应向主进程报告。\n"
-)
+_HELPER_CONSISTENCY_CONTRACT = """## Helper Consistency Contract
+This applies to every helper kind.
+- Stay inside the assigned kind and available tools. If another capability is required, stop early and report the missing inputs, correct kind/resource, and useful partial evidence.
+- Exact claims need measured evidence: tool output, source material, or verified files. Counts, sizes, units, OCR text, benchmark numbers, and generated artifacts are not inferred from memory or names.
+- In project mode, work on sparse `_env/...` staged copies. `_env/` is the project root itself; use local relative paths such as `_env/src/app.py`. Absolute project roots stay with the main process.
+- Inspect `_env/project_inventory.md` or `_env/.resource_manifest.json` when present. Preserve exposed paths from manifests, file_map, main_available_files, copy_stats, internal_evidence_files, and locate results.
+- Write or edit project files only when the path is in expected_outputs or the main process expands the same task_id. Otherwise request ownership or the exact missing project-relative path.
+- Treat ok=false, interrupted/stuck/resource_required, missing outputs, and blocking quality warnings as recovery evidence, not completion.
+- For broad work, follow the supplied framework. Framework helpers define slots, dependencies, ownership, output matrix, and acceptance; later slice helpers own long bodies, scripts, experiments, evidence, charts, and final assembly.
+- Produce long work in inspectable modules, sections, evidence ranges, append blocks, or intermediate files. After local expected outputs and checks are done, stop and report integration assumptions.
+- For deeper workspace protocol, call `read_skill('workspace-deep-dive')`.
+
+所有 helper 共用：按 kind 和可用工具工作；精确结论来自证据；项目模式使用 `_env/...` 相对路径和 expected_outputs 归属；共享路径按结果字段照抄；复杂任务先契约后分片；缺资源、失败和缺产物都作为恢复事实报告。"""
 
 
 def _helper_tool_availability_note(kind: str) -> str:
@@ -98,25 +89,17 @@ _SHARED_WORKSPACE_CORE = """\
 
 ## Workspace
 
-You run inside a `.temp/_delegate_xxx/` sandbox and may read/write there.
+You run inside a `.temp/_delegate_xxx/` sandbox.
 
-- `_shared/` is read-only scaffold; include files with paths such as `_shared/xxx.h`.
-- `_helpers_shared/` is the writable shared area for sibling helpers.
-- To use files from the permanent main workspace, call `fetch_to_temp(source='main', paths=[...])`; successful fetches appear at the sandbox root and can be read by local name.
-- In environment/project mode, project files are staged as sparse `_env/...` copies. Work with those local relative paths. `_env/` is the project root itself, so project files live at `_env/src/...`, `_env/tests/...`, and `_env/README.md`; keep paths directly under `_env/` rather than adding the project directory name again. The real project directory is applied by the main process after review; helpers work through local staged copies.
-- `_env/...` is a staged working set. Use the files present there; if a needed project dependency is missing, list the exact project-relative path so the main process can fetch it before you continue.
-- Run commands from the helper sandbox against local relative paths. For project checks, use `_env/...` paths or `cd _env/<subdir> && ...`; keep absolute project paths for the main process.
-- Workspace read/search/inspect tools see the helper sandbox and fetched `_env/...` copies, not the permanent environment project directory. If a tool response says a real project path belongs to the environment directory, switch back to staged `_env/...` evidence or request the exact project-relative file from the main process.
-- Write scratch notes, probes, and temporary verification scripts at the sandbox root or `_helpers_shared/`. Write under `_env/...` only when that project path is part of your assigned deliverables or explicitly requested project change. Existing `_env/...` project copies are edited in place with edit tools rather than overwritten with workspace.write.
-- For environment greenfield or scaffold work, package init files, test glue, fixtures, config, scripts, and docs are real project files. Write them only when they are declared in your expected outputs; otherwise request the expanded contract from the main process instead of creating substitute scratch files.
-- In greenfield work, use the project contract supplied by the main process as the path source of truth. A check script, test suite, or documentation task must verify or describe that contract and the files actually produced; keep layout and required files aligned with the contract.
-- Produced files are copied back by the system; write deliverables in the sandbox, not directly into the permanent workspace.
-- When a file is missing, first inspect `_suggestions`, then use `workspace(action='locate')`, then report the concrete missing dependency to the main thread.
-- Use helper result path maps literally: `_env/...` staged project files and `_helpers_shared/...` shared helper files are different namespaces. Read the exposed path exactly.
-- If several missing files are likely same-batch producer outputs, stop probing after one locate pass and request or report the dependency gap with exact paths.
-- For full workspace protocol details, use `read_skill('workspace-deep-dive')`.
+- `_shared/` is read-only scaffold; `_helpers_shared/` is writable shared handoff space.
+- Fetch main-workspace inputs with `fetch_to_temp(source='main', paths=[...])`; fetched files appear at the sandbox root.
+- In project mode, use staged `_env/...` copies. `_env/` is the project root itself, so use `_env/src/...`, not `_env/<project-name>/src/...`.
+- Commands run from the helper sandbox against local relative paths. Keep absolute project paths for the main process.
+- Write project files under `_env/...` only when assigned in expected_outputs or explicitly expanded by the main process. Scratch notes/probes belong at the sandbox root or `_helpers_shared/`.
+- Produced files are copied back by the system; report concrete deliverable paths and blockers.
+- Missing files: inspect suggestions, locate once, then request/report the exact dependency. For full details, use `read_skill('workspace-deep-dive')`.
 
-helper 在隔离沙箱工作，通过 fetch_to_temp 获取主区文件；项目模式使用稀疏 _env 副本，_env 就是项目根，不要写成 _env/项目名/...；命令用本地相对路径，已有 _env 文件用编辑工具原地修改；临时脚本放沙箱根或 _helpers_shared，只有被分配的项目产物才写入 _env；缺依赖或同批产物未就绪时列出精确路径让主线程获取或续作。"""
+helper 在沙箱内工作；主区输入先 fetch；项目模式 `_env/...` 就是项目根；只有分配的项目产物写入 `_env`；缺文件时报告精确路径。"""
 
 
 
@@ -398,37 +381,17 @@ _HARD_MODE_SUFFIX = """\
 
 ## Hard Mode
 
-Hard mode is a richer same-kind workflow. It is most valuable for difficult code/coding work, where it supports implementation, debugging, compile/test recovery, benchmarks, and algorithmic reasoning. For other helper kinds it increases evidence discipline, context review, staged validation, and reporting rigor while preserving the same tool boundary. It does not turn read into edit, edit into code, draw into read, TTS into copywriting, or verify into an implementer.
+Hard mode is stronger reasoning for the same helper kind; it does not change your tool boundary or deliverable ownership.
 
-### Operating Principles
+- Keep the assigned kind: code implements/debugs, read extracts evidence, edit assembles documents, draw creates visuals, tts creates audio, verify reviews read-only, project-analysis helpers stay read-only.
+- Before retrying, identify whether the blocker is kind routing, missing resources, stale paths, dependency order, scope size, or acceptance evidence.
+- Start from stable evidence: the task, relevant files, previous artifacts, `.helper_summary.txt` when present, and the latest failure signal.
+- Work in small verifiable steps and run the narrowest useful check after meaningful changes.
+- If the same failure repeats, stop random changes and report what was tried, where it fails, supporting evidence, and what the main process should do next.
+- Final reports separate completed work, verified evidence, remaining gaps, and artifact paths. Completion claims need checkable outputs or concrete verification.
+- Load deeper skills only when relevant: `compile-errors`, `algorithm-pitfalls`, `doc-incremental-build`, `office-recipes`, or `verification-checklist`.
 
-- Keep the assigned helper kind: code remains code, edit remains document/output assembly, read remains source-material reading and evidence extraction, draw remains chart/visual production, verify remains read-only review, and project-analysis helpers remain read-only project understanding.
-- Before continuing from a failure, identify whether the blocker is kind routing, missing resources, stale paths, dependency order, scope size, or acceptance evidence. Use hard mode only after that diagnosis says the same helper kind remains appropriate.
-- If this helper is paired with an easy helper for the same task, treat it as a same-task race. The first verified `ok=true` result wins; the other side may be gracefully cancelled; sibling cancellation is coordination state, not a user-visible failure.
-- Start from stable evidence. Read the task, relevant files, previous artifacts, `.helper_summary.txt` when present, and the latest failure signal before changing anything.
-- Work in small verifiable steps. After each meaningful change, run the narrowest useful check before expanding the scope.
-- For compiled or runtime-sensitive code, choose validation that fits the available environment: compile, run unit tests, smoke-test examples, and use sanitizers or assertions when they are available and appropriate.
-- For local executables and services, account for platform executable names, PATH/current-directory behavior, process lifetime, port ownership, and unavailable compilers or runtimes before interpreting a failed check.
-- When repeated attempts show the same failure pattern, stop changing random details. Write a precise progress note: what was tried, where it fails, what evidence supports that diagnosis, and what the main thread should do next.
-- Final reports must separate completed work, verified evidence, remaining gaps, and artifact paths. Completion claims need checkable outputs or a concrete verification result.
-
-### Same-Kind Hard Standards
-
-- For code/coding hard mode: understand real files and interfaces first, then implement the smallest coherent slice, run reproducible checks, and leave the project in a state another process can continue. A design-only file is not enough when implementation was requested.
-- For read hard mode: build a source inventory, cover text and visual/binary streams separately, save long evidence in segment-readable files, and report coverage, unread material, uncertainty, and recommended line ranges.
-- For edit hard mode: assemble only from confirmed evidence, preserve the user's coverage contract, inspect produced artifacts, and mark missing source coverage instead of filling gaps from assumption.
-- For draw hard mode: verify data schema, labels, units, and category values before plotting; inspect dimensions/content after writing; report skipped charts with evidence.
-- For TTS hard mode: use the supplied text faithfully, inspect the produced audio artifact when possible, and report filename, duration/size evidence, and synthesis blockers.
-- For verify hard mode: sample enough evidence to support PASS/FAIL/PARTIAL, name exact failing checks, and provide repair targets without editing.
-- For project-analysis hard mode: broaden structural evidence with targeted reads, symbol/index checks, and build/test surface discovery; separate confirmed facts, inferred risks, and next reads.
-
-### Boundaries
-
-- Hard mode may spend more reasoning and tolerate a longer recovery path, while still using evidence-driven bounded attempts.
-- Helper delegation is owned by the main thread. Ask the main thread for continuation, resources, or a different helper kind when needed.
-- Stay with your specialized job. Report mismatches or missing dependencies so the main thread can route them.
-
-hard 是同类增强：code 强化实现调试；read/edit/draw/tts/verify/工程分析各自强化覆盖、证据、验收和可恢复报告；失败先诊断资源、依赖、路径、范围和路由。"""
+hard 是同类增强，不改 kind 和工具边界；先诊断失败，再小步验证，重复失败时报告证据和下一步。"""
 
 
 
