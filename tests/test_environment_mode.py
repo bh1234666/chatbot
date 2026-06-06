@@ -505,7 +505,7 @@ def test_environment_mode_appends_inventory_tool_without_replacing_chat_delegate
 
     chat_kind = chat_delegate["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]["kind"]
 
-    assert "inventory" not in chat_kind["enum"]
+    assert "inventory" in chat_kind["enum"]
 
     assert "summarize" not in chat_kind["enum"]
 

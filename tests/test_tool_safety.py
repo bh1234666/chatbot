@@ -1332,7 +1332,7 @@ def test_helper_kind_schema_includes_resource_helpers():
     assert "project_map" in SPAWN_HELPER_TOOL_SCHEMA["function"]["parameters"]["properties"]["kind"]["enum"]
     assert "file_summary" in delegate_kind["enum"]
     assert "impact_review" in delegate_kind["enum"]
-    assert "inventory" not in delegate_kind["enum"]
+    assert "inventory" in delegate_kind["enum"]
     assert "summarize" not in delegate_kind["enum"]
     assert "tts" in delegate_kind["enum"]
     assert "read" in delegate_kind["enum"]

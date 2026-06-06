@@ -1150,7 +1150,7 @@ DELEGATE_TOOL_SCHEMA = {
                             "kind": {
                                 "type": "string",
                                 # 真相源: app.llm.tools.delegate.VALID_HELPER_KINDS
-                                "enum": ["code", "edit", "verify", "draw", "tts", "read", "project_map", "file_summary", "impact_review"],
+                                "enum": ["code", "edit", "verify", "draw", "tts", "read", "project_map", "file_summary", "impact_review", "inventory"],
                                 "default": "code",
                                 "description": (
                                     "Choose the helper base kind from the work product, not from difficulty. "
@@ -1162,6 +1162,7 @@ DELEGATE_TOOL_SCHEMA = {
                                     "- `verify`: read-only adversarial review of code, data, images, documents, or helper artifacts, with evidence and acceptance status.\n"
                                     "- `draw`: image/chart production from data or a precise visual specification. Use `verify` for judging existing images and `code` for reusable charting applications.\n"
                                     "- `tts`: audio synthesis resources; report the produced audio path without changing voice policy.\n"
+                                    "- `inventory`: environment project first-pass inventory: directory shape, file types, README/entry/config/test hints, lightweight statistics, and unread source-material groups.\n"
                                     "Planning rules:\n"
                                     "- Keep the user's full goal covered: every requested deliverable, evidence source, and acceptance check must be owned by a helper or by the main thread.\n"
                                     "- Fill each task as a helper request envelope: `kind`, `mode`, `framework`, `input_files`, focused `prompt`, `expected_outputs`, and `acceptance_checks`. Use concrete `_env/...` paths for project files.\n"
@@ -1970,7 +1971,7 @@ REQUEST_RESOURCE_SCHEMA = {
             "properties": {
                 "kind": {
                     "type": "string",
-                    "enum": ["code", "edit", "draw", "verify", "tts", "read", "project_map", "file_summary", "impact_review"],
+                    "enum": ["code", "edit", "draw", "verify", "tts", "read", "project_map", "file_summary", "impact_review", "inventory"],
                     "description": "Resource helper kind requested from the main process.\n\n需要的资源 helper 类型。",
                 },
                 "reason": {

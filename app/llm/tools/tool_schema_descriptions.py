@@ -337,7 +337,7 @@ def _apply_english_schema_descriptions() -> None:
             "resource. Failed, stuck, interrupted, partial, or resource-waiting helper reports are recovery-state "
             "evidence until verified completion. For broad project understanding, prefer one project_map or inventory-style "
             "helper first, then add file_summary or impact_review helpers for specific files or risks discovered by "
-            "that map. Read/OCR helpers may expose internal evidence through `internal_evidence_files`, "
+            "that map. Read helpers may expose internal evidence through `internal_evidence_files`, "
             "`main_available_files`, or `copy_stats.env_copied_files`; read those main-workspace paths when more "
             "detail is needed, and treat helper sandbox paths in prose as non-authoritative. For review-only requests, "
             "ask helpers for evidence, risks, and concrete low-risk proposals; "

@@ -252,8 +252,8 @@ def docx_table_structure_warnings(abs_path: str) -> list[dict]:
                 "table_index": table_index,
                 "columns": max_cols,
                 "details": (
-                    "The DOCX contains a wide table. For Word papers/reports, consider whether splitting the "
-                    "comparison into smaller tables or prose sections would improve readability."
+                    "The DOCX contains a wide table. This is a layout signal, not a completion blocker; inspect "
+                    "the rendered document before deciding whether smaller tables or prose sections are needed."
                 ),
             })
         object_literal_cells: list[dict] = []
@@ -290,8 +290,9 @@ def docx_table_structure_warnings(abs_path: str) -> list[dict]:
                 "table_index": table_index,
                 "long_cell_count": long_cells,
                 "details": (
-                    "Many table cells contain paragraph-length prose. Consider converting this section to "
-                    "prose, bullets, or smaller focused tables for readability."
+                    "Many table cells contain paragraph-length prose. This is a layout signal, not a completion "
+                    "blocker; inspect the rendered document before deciding whether the section should become "
+                    "prose, bullets, or smaller focused tables."
                 ),
             })
     return warnings
@@ -334,12 +335,33 @@ def _extract_expected_text_tokens_for_document(prompt: str) -> list[str]:
     """Pull concrete user-requested text snippets for lightweight document QA."""
     text = str(prompt or "")
     tokens: list[str] = []
+
+    def _looks_like_template_placeholder(val: str) -> bool:
+        compact = re.sub(r"\s+", "", str(val or ""))
+        if not compact:
+            return True
+        placeholder_words = {"xx", "xxx", "x.x", "x.y", "n/a", "todo", "tbd", "...", "……"}
+        if compact.lower() in placeholder_words:
+            return True
+        placeholder_suffix = r"(?:章|节|题|页|部分|项|条|\?)*"
+        if re.fullmatch(rf"(?:第)?[Xx]{placeholder_suffix}", compact):
+            return True
+        if re.fullmatch(rf"\d+(?:\.[Xx])+[A-Za-z0-9]*{placeholder_suffix}", compact):
+            return True
+        if re.fullmatch(rf"[A-Za-z]+(?:[._-][Xx])+{placeholder_suffix}", compact):
+            return True
+        if re.search(r"(?:^|[第.。:：_/-])[Xx](?:$|[.。:：_/-]|题|章|节|页|部分|项|条|\?)", compact):
+            return True
+        return False
+
     for m in re.finditer(r"[“\"']([^“”\"'\n]{2,40})[”\"']", text):
         val = m.group(1).strip()
         sentence_start = max(text.rfind("。", 0, m.start()), text.rfind("\n", 0, m.start())) + 1
         prefix = text[sentence_start:m.start()]
         suffix = text[m.end():m.end() + 8]
         if re.search(r"(不要|不得|不能|禁止|避免|不应|不要出现|不得出现|不能出现|全文不得出现)", prefix + suffix):
+            continue
+        if _looks_like_template_placeholder(val):
             continue
         if val and not re.fullmatch(r"[\d\s,，.。:：;；、=-]+", val):
             tokens.append(val)

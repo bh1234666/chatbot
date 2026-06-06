@@ -55,6 +55,7 @@ META_JUDGE_SYSTEM = (
     "- Outputs, tests, evidence, or deliverables are improving across attempts.\n"
     "- Failures are changing into smaller concrete issues.\n"
     "- The task is near completion and mainly needs verification or cleanup.\n"
+    "- Recent artifact facts show ready or verified deliverables, and remaining warnings are non-blocking layout or cleanup signals.\n"
     "\n"
     "## Key Distinction\n"
     "A tool return code of 0 only means the tool itself ran; it does not prove task progress. "
@@ -78,12 +79,14 @@ def _meta_judge_user_payload(
     current_iter: int,
     next_level: str,
     timeline: str,
+    artifact_facts: list[str] | None = None,
 ) -> str:
     """Build a deterministic dynamic payload for the meta judge."""
     facts = {
         "current_iter": int(current_iter),
         "current_tier": str(current_level),
         "next_tier": str(next_level),
+        "recent_artifact_facts": list(artifact_facts or [])[:12],
         "tool_timeline": str(timeline),
     }
     return META_JUDGE_USER_TEMPLATE.format(
@@ -94,6 +97,59 @@ def _meta_judge_user_payload(
             separators=(",", ":"),
         )
     )
+
+
+def _extract_recent_artifact_facts_for_meta_judge(msgs: list[dict], *, max_items: int = 12) -> list[str]:
+    """Extract compact artifact/quality facts from recent tool messages."""
+    facts: list[str] = []
+    seen: set[str] = set()
+    artifact_ext_re = re.compile(r"[\w./\\-]+\.(?:docx|pptx|xlsx|pdf|png|jpg|jpeg|csv|json|md|txt)\b", re.IGNORECASE)
+    recent = msgs[-80:] if len(msgs) > 80 else msgs
+    for msg in recent:
+        if msg.get("role") != "tool":
+            continue
+        content = str(msg.get("content") or "")
+        try:
+            data = json.loads(content)
+        except Exception:
+            data = None
+        candidates: list[str] = []
+        if isinstance(data, dict):
+            if data.get("outputs_complete") is True:
+                candidates.append("outputs_complete=true")
+            if data.get("quality_blocked_count") == 0:
+                candidates.append("quality_blocked_count=0")
+            if data.get("path"):
+                candidates.append(f"path={data.get('path')}")
+            artifact = data.get("artifact")
+            if isinstance(artifact, dict) and artifact.get("path"):
+                status = artifact.get("status") or "unknown"
+                candidates.append(f"artifact {artifact.get('path')} status={status}")
+            for key in ("artifacts_ready", "main_available_files", "internal_evidence_files"):
+                val = data.get(key)
+                if isinstance(val, list) and val:
+                    candidates.append(f"{key}={len(val)}")
+            warnings = data.get("quality_warnings")
+            if isinstance(warnings, list) and warnings:
+                issues = []
+                for item in warnings[:4]:
+                    if isinstance(item, dict):
+                        issue = item.get("issue")
+                        severity = item.get("severity") or "warning"
+                        if issue:
+                            issues.append(f"{issue}:{severity}")
+                if issues:
+                    candidates.append("quality_warnings=" + ",".join(issues))
+        else:
+            for path in artifact_ext_re.findall(content):
+                candidates.append(f"artifact_path_mentioned={path}")
+        for candidate in candidates:
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                facts.append(candidate[:180])
+                if len(facts) >= max_items:
+                    return facts
+    return facts
 
 
 def _log_prompt_cache_shape(
@@ -1905,6 +1961,7 @@ async def _meta_judge_should_upgrade(
         current_iter=current_iter,
         next_level=next_level,
         timeline=timeline,
+        artifact_facts=_extract_recent_artifact_facts_for_meta_judge(msgs_snapshot),
     )
 
     try:

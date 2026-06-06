@@ -72,7 +72,7 @@ def _converge_terminal_state_for_complete_outputs(
     acceptance fact is the system output check, not the stale stuck/interrupted
     lifecycle flag. This only converges when expected outputs exist, all are
     present, no blocking quality/resource issue exists, and the helper is not a
-    read/OCR evidence task.
+    read-helper evidence task.
 
     当系统已确认声明产物完整且无阻塞问题时，完成事实优先于旧的中断/卡住状态。
     """
@@ -2086,14 +2086,14 @@ async def _run_one_helper(
             _result["post_helper_usage_hint"] = (
                 "environment files have already been merged into the main workspace. "
                 "Use/read/run these _env/... paths directly; do not copy from or refer to "
-                ".temp/_delegate_* helper workspaces. For read/OCR helpers, these paths are "
+                ".temp/_delegate_* helper workspaces. For read helpers, these paths are "
                 "internal evidence for the main process, not user-facing deliverables.\n\n"
                 "环境文件已合并到主工作区；直接使用 _env 路径，勿引用 helper 临时目录。"
             )
         elif kind in {"read", "ocr"} and _read_internal_evidence_files:
             _result["internal_evidence_files"] = _read_internal_evidence_files[:50]
             _result["post_helper_usage_hint"] = (
-                "Read/OCR evidence files have been merged into the main workspace. "
+                "Read-helper evidence files have been merged into the main workspace. "
                 "Use these paths for synthesis and verification; they are internal evidence, "
                 "not user-facing deliverables.\n\n"
                 "读取/OCR 证据文件已在主工作区；用于综合与验收，不作为用户交付物。"

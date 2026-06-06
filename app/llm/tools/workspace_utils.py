@@ -179,13 +179,13 @@ def _collect_read_evidence_files(
     copied_paths: list[str] | set[str] | tuple[str, ...] | None = None,
     max_files: int = 20,
 ) -> list[str]:
-    """Find read/OCR evidence files promoted to the main workspace.
+    """Find read-helper evidence files promoted to the main workspace.
 
     Read helpers intentionally do not expose raw extraction files as user
     deliverables. This list is the stable evidence channel for the main process,
     collect/status summaries, and later synthesis after context folding.
 
-    read/OCR 证据不是用户交付物；此清单供主进程和摘要机制稳定引用。
+    read helper 证据不是用户交付物；此清单供主进程和摘要机制稳定引用。
     """
     evidence: list[str] = []
     seen: set[str] = set()
@@ -232,7 +232,7 @@ def _build_read_evidence_summary(
     report: str = "",
     max_files: int = 12,
 ) -> dict:
-    """Build a compact authoritative coverage summary for read/OCR helpers."""
+    """Build a compact authoritative coverage summary for read helpers."""
     files = list(evidence_files or [])
     if not files:
         files = _collect_read_evidence_files(

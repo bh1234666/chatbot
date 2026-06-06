@@ -848,3 +848,76 @@ def test_intermediate_feedback_marks_kill_progress_as_stuck():
     )
     assert not ok
     assert reason == "runaway_helper_described_as_normal_progress"
+
+
+def test_inventory_kind_is_visible_in_public_helper_schemas():
+    from app.llm.tools.tool_schemas import DELEGATE_TOOL_SCHEMA, REQUEST_RESOURCE_SCHEMA
+
+    task_props = DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]
+    assert "inventory" in task_props["kind"]["enum"]
+    assert "inventory" in REQUEST_RESOURCE_SCHEMA["function"]["parameters"]["properties"]["kind"]["enum"]
+
+
+def test_ocr_is_tool_capability_not_public_helper_kind():
+    from app.llm.tools.helper_kinds import MODEL_VISIBLE_HELPER_KINDS, _normalize_helper_kind_mode
+    from app.llm.tools.tool_schemas import DELEGATE_TOOL_SCHEMA
+
+    task_props = DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]
+    assert "ocr" not in MODEL_VISIBLE_HELPER_KINDS
+    assert "ocr" not in task_props["kind"]["enum"]
+    assert _normalize_helper_kind_mode("ocr", "easy") == ("read", "easy")
+
+
+def test_model_visible_text_uses_read_helper_not_read_ocr_helper():
+    roots = [Path("app/core"), Path("app/llm")]
+    offenders: list[str] = []
+    for root in roots:
+        for path in root.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8")
+            if "read/OCR" in text or "Read/OCR" in text or "OCR helper" in text:
+                offenders.append(path.as_posix())
+    assert offenders == []
+
+
+def test_expected_document_text_tokens_skip_templates_but_keep_real_quotes():
+    from app.llm.tools.delegate_quality import _extract_expected_text_tokens_for_document
+
+    prompt = '每题以"6.X 题"为标题，且必须包含"Appendix A"。'
+    assert _extract_expected_text_tokens_for_document(prompt) == ["Appendix A"]
+    assert _extract_expected_text_tokens_for_document('每题以"6.X ?"为标题') == []
+
+
+def test_missing_module_hint_is_fact_first_not_install_first():
+    from app.llm.tools.workspace_run_checks import _diagnose_build_failure
+
+    stderr = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'scipy'"
+    hint = _diagnose_build_failure("python script.py", stderr, "", ws_dir=".")
+    assert "Python module is missing" in hint
+    assert "Install the package" not in hint
+    assert "whether the dependency is already declared" in hint
+
+
+def test_meta_judge_payload_includes_recent_artifact_facts():
+    from app.llm.client import _extract_recent_artifact_facts_for_meta_judge, _meta_judge_user_payload
+
+    messages = [
+        {
+            "role": "tool",
+            "content": (
+                '{"ok":true,"artifact":{"path":"homework.docx","status":"ready"},'
+                '"quality_warnings":[{"issue":"docx_table_too_wide","severity":"warning"}]}'
+            ),
+        }
+    ]
+    facts = _extract_recent_artifact_facts_for_meta_judge(messages)
+    payload = _meta_judge_user_payload(
+        current_level="medium",
+        current_iter=24,
+        next_level="hard",
+        timeline="tool timeline",
+        artifact_facts=facts,
+    )
+    assert "homework.docx" in payload
+    assert "docx_table_too_wide:warning" in payload

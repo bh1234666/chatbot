@@ -530,7 +530,7 @@ _HELPER_SYSTEM_INVENTORY = (
     "1. Identify the project shape: top-level directories, dominant suffixes, text/binary/Office/media/archive categories, generated/cache folders, and likely ignored areas.\n"
     "2. Look for README, docs, package/build/test configuration, lock files, entry points, main modules, CLI/server startup files, and representative tests.\n"
     "3. Read only key snippets needed for orientation: README overview, config scripts, entry files, public interfaces, and small manifests. Classify ordinary source-material body files from manifest path, suffix, size, parent directory, and filename evidence.\n"
-    "4. For text study materials, Office/PDF/images/archives/media, inventory paths, sizes, categories, and likely relevance only. Hand body-content extraction to read/OCR or a later focused helper.\n"
+    "4. For text study materials, Office/PDF/images/archives/media, inventory paths, sizes, categories, and likely relevance only. Hand body-content extraction to a read helper or a later focused helper with OCR/Office extraction tools when relevant.\n"
     "5. When exact counts, size rankings, suffix distribution, or line totals matter, use the scoped workspace runner or python tool for a small read-only statistics check and label units exactly.\n"
     "6. Mark source material that needs another specialist: images/scans/Office/PDF/archive/media, large generated files, or files whose content could not be read from the available evidence.\n\n"
     "## Command and evidence discipline\n"

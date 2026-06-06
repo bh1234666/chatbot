@@ -1859,14 +1859,15 @@ async def _handle_delegate_spawn_async(
                 "details": (
                     f"The user requested document-style deliverables, but this batch has {len(cleaned_tasks)} task(s) "
                     f"with kinds {sorted(_batch_kinds)} and no edit helper; the ledger also has no completed edit output. "
-                    "Add an edit-owned document assembly step before final delivery.\n\n"
-                    "用户要文档/论文/PPT 时，必须安排 edit helper 负责正式产物。"
+                    "The user-visible document artifact currently has no completed assembly owner.\n\n"
+                    "用户要文档/论文/PPT，但当前批次和历史记录未显示已完成的正式文档装配产物。"
                 ),
-                "suggested_action": "must_spawn_edit_kind",
+                "suggested_action": "document_artifact_needs_owner",
                 "suggestion": (
-                    "Spawn a kind='edit' task for document assembly. If the current batch only gathers data or code evidence, "
-                    "record the later draw/edit steps explicitly in the plan and expected outputs.\n\n"
-                    "数据/代码完成后，由 draw 产图、edit 组装文档。"
+                    "When supporting evidence is ready, assign a document assembly owner, typically a kind='edit' "
+                    "task with concrete input evidence, expected output path, and acceptance checks. If this batch "
+                    "only gathers evidence, record the later draw/edit steps explicitly in the plan.\n\n"
+                    "若当前批次只收集证据，应在计划中明确后续图表和文档装配归属。"
                 ),
             })
         if not _had_draw_done and _user_wants_chart:
@@ -1876,13 +1877,15 @@ async def _handle_delegate_spawn_async(
                 "severity": "medium",
                 "details": (
                     f"The user requested charts or visualizations, but this batch has {len(cleaned_tasks)} task(s) "
-                    f"with kinds {sorted(_batch_kinds)} and no completed draw helper in the ledger.\n\n"
-                    "用户要图表时，应安排 draw helper 生成可验证图片。"
+                    f"with kinds {sorted(_batch_kinds)} and no completed draw helper in the ledger. "
+                    "The requested visual artifact currently has no completed producer.\n\n"
+                    "用户要图表，但当前批次和历史记录未显示已完成的可验证图片产物。"
                 ),
-                "suggested_action": "must_spawn_draw_kind",
+                "suggested_action": "visual_artifact_needs_owner",
                 "suggestion": (
-                    "After source data is ready, spawn kind='draw' with concrete data paths, chart titles, expected PNG names, and validation checks.\n\n"
-                    "图表任务需要数据路径、图片文件名和验收条件。"
+                    "After source data is ready, assign a visual producer, typically a kind='draw' task with "
+                    "concrete data paths, chart titles, expected PNG names, and validation checks.\n\n"
+                    "图表产物需要明确数据路径、图片文件名和验收条件。"
                 ),
             })
 
@@ -3029,7 +3032,7 @@ async def handle_delegate(
         debug.log(
             "delegate.min_results.material_read_default_all",
             (
-                "read/OCR material batches wait for all helpers or wait_window instead of returning after "
+                "read-helper material batches wait for all helpers or wait_window instead of returning after "
                 "the first result; partial early return often makes the main process synthesize from missing evidence."
             ),
         )

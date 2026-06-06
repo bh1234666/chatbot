@@ -1477,10 +1477,10 @@ def _handle_fetch(workspace_dir: str, args: dict) -> dict:
             "max_bytes": MAX_FETCH_BYTES,
             "category": category,
             "next_action": (
-                "Use env_run for metadata or targeted extraction, or delegate a read/OCR/Office helper with the exact project_path from env_inventory. "
+                "Use env_run for metadata or targeted extraction, or delegate a read helper with the exact project_path from env_inventory; the helper can use OCR/Office extraction tools when relevant. "
                 "If only a small excerpt is needed, run a bounded project-side extraction command and save a "
                 "small evidence file before reading it.\n\n"
-                "大文件先用 env_run 做元数据或小片段抽取，完整内容交给 read/OCR/Office helper 分批处理。"
+                "大文件先用 env_run 做元数据或小片段抽取，完整内容交给 read helper 分批处理；需要时使用 OCR/Office 证据工具。"
             ),
             "suggested_helper_kind": "read",
             "suggested_project_path": _rel_to_root(src),
@@ -1488,7 +1488,7 @@ def _handle_fetch(workspace_dir: str, args: dict) -> dict:
         if suffix == ".pdf":
             result["suggested_actions"] = [
                 "Use env_run to inspect PDF page count/metadata without copying the whole file.",
-                "Delegate a read/OCR helper with this exact project_path for selected pages or summarized extraction.",
+                "Delegate a read helper with this exact project_path for selected pages or summarized extraction, using OCR when needed.",
                 "For full OCR, ask the helper to batch pages and write chunked evidence summaries instead of moving the source PDF into _env.",
             ]
         elif suffix in {".docx", ".doc", ".pptx", ".ppt", ".xlsx", ".xls"}:

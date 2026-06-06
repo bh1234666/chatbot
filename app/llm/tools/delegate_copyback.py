@@ -404,7 +404,7 @@ def _copy_results_to_main(
             if env_skipped_read_evidence:
                 debug.log(
                     f"delegate.{task_id}.env_read_evidence_guard",
-                    "read/OCR helper _env writes were not merged as project files: "
+                    "read-helper _env writes were not merged as project files: "
                     f"{env_skipped_read_evidence[:20]}"
                     + (f" and {len(env_skipped_read_evidence)} files total" if len(env_skipped_read_evidence) > 20 else ""),
                 )

@@ -465,9 +465,11 @@ def _diagnose_build_failure(command: str, stderr: str, stdout: str,
         exc_msg = m.group(2)[:120]
         if exc_type == "ModuleNotFoundError":
             return (
-                f"Python module is missing: {exc_msg}. Install the package or check the module spelling. "
-                "Confirm which Python/pip executable the subprocess is using.\n"
-                "缺 Python 模块时检查拼写、安装和 pip 路径。"
+                f"Python module is missing: {exc_msg}. Confirm the module name, the Python executable used by "
+                "the subprocess, and whether the dependency is already declared in the project. If dependency "
+                "changes are in scope, use the project-approved installation path; otherwise record the blocker "
+                "or run a dependency-free fallback check.\n"
+                "缺 Python 模块时先确认模块名、解释器和项目依赖声明；是否安装由任务范围决定。"
             )
         if exc_type == "FileNotFoundError":
             hint = (
