@@ -397,8 +397,15 @@ def _header(category: str) -> str:
     return f"[{ts}] [{tid:<{_TRACE_DISPLAY_MAX}}] [{category}]"
 
 
+def _console_enabled() -> bool:
+    """Return whether synchronous stderr debug output is safe to use."""
+    return bool(getattr(settings, "debug_console", False))
+
+
 def _emit_console(category: str, msg: str, payload: Any | None, *, color: str = "36") -> None:
     """输出到 stderr（带颜色，可选 payload）。"""
+    if not _console_enabled():
+        return
     head = _header(category)
     line = _c(color, head) + " " + str(msg)
     print(line, file=sys.stderr, flush=True)

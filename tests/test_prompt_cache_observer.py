@@ -605,6 +605,30 @@ def test_log_prompt_cache_shape_payload_contains_section_summaries(monkeypatch) 
     assert captured["category"] == "llm.prompt_cache_shape"
     assert payload["system_sections"][0]["label"] == "system:## Context And Safety Contract"
     assert payload["message_sections"][0]["label"] == "msg1.user:## Current Message To Answer"
+    assert "messages" in payload
+
+
+def test_log_prompt_cache_shape_summary_payload_is_opt_in(monkeypatch) -> None:
+    from app.llm import client
+
+    captured: dict[str, object] = {}
+
+    def fake_log(category, message, payload=None):
+        captured["payload"] = payload or {}
+
+    monkeypatch.setattr(client.debug, "log", fake_log)
+    monkeypatch.setattr(client.settings, "debug_prompt_cache_full_shape", False)
+    client._log_prompt_cache_shape(
+        label="unit",
+        model="unit-model",
+        messages=[
+            {"role": "system", "content": "## Context And Safety Contract\nstable"},
+            {"role": "user", "content": "## Current Message To Answer\nhello"},
+        ],
+        tools=[],
+    )
+
+    assert "messages" not in captured["payload"]
 
 
 def test_environment_tools_preserve_chat_tool_prefix() -> None:
@@ -725,7 +749,7 @@ def test_round2_dynamic_task_guidance_does_not_change_system_prefix() -> None:
 
     _append_round2_dynamic_user_tail(
         messages_a,
-        "## Current Request Contract Anchor\nAnalyze project A.",
+        "## Active Task Contract Anchor\nAnalyze project A.",
     )
     _append_round2_dynamic_user_tail(
         messages_b,
@@ -737,7 +761,7 @@ def test_round2_dynamic_task_guidance_does_not_change_system_prefix() -> None:
 
     assert shape_a["system_static_hash"] == shape_b["system_static_hash"]
     assert shape_a["messages_hash"] != shape_b["messages_hash"]
-    assert "Current Request Contract Anchor" in messages_a[-1]["content"]
+    assert "Active Task Contract Anchor" in messages_a[-1]["content"]
     assert "Mandatory Fresh OCR" in messages_b[-1]["content"]
 
 
@@ -1560,7 +1584,7 @@ def test_helper_auxiliary_context_stays_before_latest_task_tail() -> None:
         prompt="Build benchmark.c using framework.h and report results.",
         dynamic_prompt_prefix_parts=[
             "## Dependency File Paths (system-provided)\n- `framework.h` -> `_helpers_shared/framework/framework.h`",
-            "## Missing Dependency Check\n- `missing.csv`",
+            "## Referenced File Availability Facts\n- `missing.csv`",
             "## Hard Mode Runtime Focus\nUse a stricter same-kind validation pass.",
         ],
         kind="code",
@@ -1569,10 +1593,10 @@ def test_helper_auxiliary_context_stays_before_latest_task_tail() -> None:
     before_task, task_tail = prompt.split("\n\n---\n\n## Task\n", 1)
 
     assert "## Dependency File Paths" in before_task
-    assert "## Missing Dependency Check" in before_task
+    assert "## Referenced File Availability Facts" in before_task
     assert "## Hard Mode Runtime Focus" in before_task
     assert "## Dependency File Paths" not in task_tail
-    assert "## Missing Dependency Check" not in task_tail
+    assert "## Referenced File Availability Facts" not in task_tail
     assert "## Hard Mode Runtime Focus" not in task_tail
     assert task_tail.startswith("Build benchmark.c using framework.h and report results.")
 

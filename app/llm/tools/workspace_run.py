@@ -7,6 +7,12 @@ import sys
 from pathlib import Path
 
 from app.llm.tools.command_risk import helper_sandbox_copy_error
+from app.llm.tools.memory_guard import (
+    WorkspaceMemoryGuard,
+    memory_limit_error,
+    preflight_memory_check,
+    workspace_memory_limits,
+)
 
 
 _UNIX_INVENTORY_COMMANDS = {
@@ -444,6 +450,13 @@ async def handle_run(
     # an explicit PYTHONPATH in the command (for example `set PYTHONPATH=src && ...`).
     sandbox_env.pop("PYTHONPATH", None)
     sandbox_env.pop("PYTHONHOME", None)
+    # `_helpers_shared/` is an internal workspace package/handoff area. When a
+    # helper runs `python _helpers_shared/foo.py`, Python puts that subdirectory
+    # on sys.path, not the workspace root, so `from _helpers_shared...` fails even
+    # though the files exist. Add only the current workspace root, never the
+    # service process' PYTHONPATH, and only when the shared package is present.
+    if os.path.isdir(os.path.join(ws_dir, "_helpers_shared")):
+        sandbox_env["PYTHONPATH"] = ws_dir
     # Toolchain/code subprocesses are CPU-only. Dedicated OCR/MinerU tools build their
     # own environment and may use GPU; generic workspace.run must not consume VRAM.
     sandbox_env["CUDA_VISIBLE_DEVICES"] = ""
@@ -620,6 +633,10 @@ async def handle_run(
                 "FIX_HINT": _fix_hint,
             }
 
+    _memory_preflight = preflight_memory_check(cmd_line)
+    if _memory_preflight is not None:
+        return _memory_preflight
+
     if use_unix_bash:
         # git-bash:用 exec 拼 [bash, -c, cmd_line]。bash.exe 自身处理所有 unix
         # 语法(redirect / pipe / glob / 命令替换 / heredoc 等),cwd 自然继承。
@@ -741,6 +758,20 @@ async def handle_run(
         workspace_dir=ws_dir,
     )
     _proc_start_time = time.monotonic()  # 用于 abort 时记录跑了多久
+    _limit_bytes, _min_available_bytes = workspace_memory_limits()
+
+    def _memory_guard_kill_tree(pid: int, _proc=proc) -> None:
+        _kill_process_tree(pid, proc_obj=_proc)
+
+    memory_guard = WorkspaceMemoryGuard(
+        pid=proc.pid,
+        proc_id=proc_id,
+        command=cmd_line,
+        kill_tree=_memory_guard_kill_tree,
+        limit_bytes=_limit_bytes,
+        min_available_bytes=_min_available_bytes,
+        scope="workspace.run",
+    ).start()
 
     try:
         # ── 超时决定:LLM 显式指定优先,否则默认 1s(强制 LLM 自决) ──
@@ -936,6 +967,12 @@ async def handle_run(
                 pass
 
             _fork_hint_on_timeout = _cygwin_fork_exhaustion_hint(cmd_line, _partial_stderr)
+            if memory_guard.triggered:
+                return memory_limit_error(
+                    memory_guard.triggered,
+                    stdout=_partial_stdout,
+                    stderr=_partial_stderr,
+                )
             _timeout_error = f"command timed out after {timeout}s{hint}"
             if _fork_hint_on_timeout:
                 _timeout_error = (
@@ -974,6 +1011,12 @@ async def handle_run(
         # 关键尾部信息(Python 异常的 \"raise X\" 行、make 错误总结都在末尾)。
         _stdout_decoded = _smart_decode(stdout_bytes)
         _stderr_decoded = _smart_decode(stderr_bytes)
+        if memory_guard.triggered:
+            return memory_limit_error(
+                memory_guard.triggered,
+                stdout=_stdout_decoded,
+                stderr=_stderr_decoded,
+            )
         stdout_truncated = len(_stdout_decoded) > _MAX_OUTPUT
         stderr_truncated = len(_stderr_decoded) > _MAX_OUTPUT
         stdout = _truncate_head_tail(_stdout_decoded, _MAX_OUTPUT) if stdout_truncated else _stdout_decoded
@@ -1159,5 +1202,6 @@ async def handle_run(
             pass
         raise
     finally:
+        await memory_guard.stop()
         # 任何路径都注销 registry — 防 leak
         await proc_registry().unregister(proc_id)

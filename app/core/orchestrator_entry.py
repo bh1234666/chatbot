@@ -183,9 +183,162 @@ def _is_new_audio_file_request(message: str) -> bool:
         "重发", "复用", "再发", "刚才那个", "之前那个", "现有",
         "不用重新生成", "不要重新生成", "reuse", "resend",
     )
-    return any(term in msg for term in audio_terms) and not any(
-        term in msg for term in reuse_terms
+    return _is_audio_file_artifact_request(message) and not any(term in msg for term in reuse_terms)
+
+
+def _is_audio_file_artifact_request(message: str) -> bool:
+    """Return true when the user asks for an audio artifact, not voice reply style."""
+    msg = (message or "").lower()
+    if not msg:
+        return False
+    voice_reply_terms = (
+        "语音回复", "用语音回复", "说给我听", "读给我听", "用声音回复",
+        "voice reply", "reply by voice", "say it to me",
     )
+    if any(term in msg for term in voice_reply_terms):
+        return False
+    audio_noun = (
+        "语音", "音频", "声音", "wav", "mp3", "ogg", "m4a", "tts",
+        "audio", "voice file",
+    )
+    artifact_terms = (
+        "文件", "附件", "下载", "保存", "导出", "发给", "发送", "重发", "再发",
+        "file", "attachment", "download", "save", "export", "send", "resend",
+    )
+    action_terms = (
+        "生成", "输出", "合成", "做", "创建", "弄", "发", "给我",
+        "generate", "output", "synthesize", "create", "make",
+    )
+    has_audio = any(term in msg for term in audio_noun)
+    if not has_audio:
+        return False
+    if any(term in msg for term in artifact_terms):
+        return True
+    # Covers phrasing such as "输出一段随机测试语音" where the file-ness is
+    # implied by "output/generate audio" rather than an explicit 文件 suffix.
+    return any(term in msg for term in action_terms)
+
+
+async def _review_explicit_deliverables_with_warnings(
+    plan,
+    *,
+    user_message: str,
+    workspace_dir: str,
+    files_before: set,
+    warning_facts: list[str],
+) -> None:
+    """Let the model reconsider explicit deliverables when non-fatal warnings fire."""
+    if not warning_facts or not workspace_dir or not getattr(plan, "deliverables", None):
+        return
+    selected = [str(f) for f in (plan.deliverables or []) if str(f).strip()]
+    if not selected:
+        return
+    file_facts: list[dict] = []
+    for fname in selected:
+        full_path = os.path.join(workspace_dir, fname)
+        fname_norm = fname.replace("\\", "/")
+        files_before_norm = {
+            str(x).replace("\\", "/") for x in (files_before or set())
+        }
+        fact = {
+            "name": fname,
+            "basename": os.path.basename(fname_norm),
+            "extension": os.path.splitext(fname_norm)[1].lower(),
+            "exists": bool(os.path.isfile(full_path)),
+            "preexisting_at_round_start": (
+                fname in files_before
+                or fname_norm in files_before_norm
+                or os.path.basename(fname_norm) in {os.path.basename(x) for x in files_before_norm}
+            ),
+            "boundary_warning": _is_internal_deliverable_file(fname),
+        }
+        try:
+            if fact["exists"]:
+                fact["size_bytes"] = os.path.getsize(full_path)
+        except OSError:
+            pass
+        file_facts.append(fact)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You review user-facing file delivery decisions.\n"
+                "The current user message is the delivery mainline. Conversation history, recent activity, workspace listings, "
+                "and previous delivery lists are evidence only; they do not make old filenames current deliverables by themselves.\n"
+                "`current_deliverables` and `plan_*` fields are also review inputs, not commands to preserve every file. "
+                "They may contain filenames selected from old assistant messages or broad workspace listings. "
+                "Facts may warn that a selected file looks internal, staged, or pre-existing. "
+                "Warnings are evidence, not commands. This is not a rubber-stamp step: compare each filename, "
+                "its age, and boundary facts with the current user request and plan evidence. Keep a file only "
+                "when it is a final artifact for the current request, or when the current request explicitly needs "
+                "that pre-existing/source file as a deliverable. Drop unrelated old work, helper contracts, scratch "
+                "evidence, or source/input files that are merely context for the current work.\n"
+                "Return strict JSON only: {\"deliverables\":[filenames from current_deliverables only],\"reason\":\"brief factual reason\"}.\n\n"
+                "交付复核：警告是事实，不是删除命令；逐项比较当前请求、文件时间和边界事实，只保留当前任务的最终交付物。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "user_message": user_message,
+                    "current_deliverables": selected,
+                    "warning_facts": warning_facts,
+                    "file_facts": file_facts,
+                    "plan_intent": getattr(plan, "intent", ""),
+                    "plan_key_points": list(getattr(plan, "key_points", None) or [])[:8],
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ),
+        },
+    ]
+    try:
+        from app.llm.model_pool import chat_json, resolve_task
+        _spec = resolve_task("self_check_plan")
+        raw = await asyncio.wait_for(
+            chat_json(
+                messages,
+                model_spec=_spec,
+                reasoning="disabled",
+                metrics_tag="json.deliverable_warning_review",
+            ),
+            timeout=15.0,
+        )
+    except Exception as exc:
+        debug.log(
+            "workspace.deliverable_warning_review.failed",
+            f"{type(exc).__name__}: keeping explicit plan.deliverables",
+        )
+        return
+    if not isinstance(raw, dict):
+        return
+    allowed = set(selected)
+    reviewed: list[str] = []
+    for item in raw.get("deliverables") or []:
+        text = str(item).strip()
+        if text in allowed and text not in reviewed:
+            reviewed.append(text)
+    if not reviewed and raw.get("deliverables") not in ([], None):
+        return
+    if reviewed != selected:
+        debug.log(
+            "workspace.deliverable_warning_review.applied",
+            "LLM revised explicit deliverables after warning facts",
+            {
+                "before": selected,
+                "after": reviewed,
+                "reason": str(raw.get("reason", ""))[:300],
+            },
+        )
+        plan.deliverables = reviewed
+    else:
+        debug.log(
+            "workspace.deliverable_warning_review.kept",
+            str(raw.get("reason", "kept explicit deliverables"))[:300],
+            {"deliverables": reviewed},
+        )
 
 
 def _existing_environment_project_files(names: set[str]) -> set[str]:
@@ -616,6 +769,7 @@ async def orchestrate(
     _env_project_tool_intent = False
     _env_project_coding_intent = False
     _env_project_route_reason = ""
+    _audio_artifact_intent = _is_audio_file_artifact_request(req.message)
     try:
         from app.core.runtime_mode import is_environment_mode as _is_environment_mode
         if _is_environment_mode():
@@ -652,6 +806,7 @@ async def orchestrate(
         or _td.get("测试", 0) > 0.7
         or _has_implicit_recall_intent(req.message)
         or _has_image_intent_in_msg(req.message)
+        or _audio_artifact_intent
     )
     if _base_needs_static_context:
         _ctx_hot_group = hot_group
@@ -871,6 +1026,16 @@ async def orchestrate(
         _mode_text = ""
         _project_context_text = ""
 
+    _task_facts_text = ""
+    if _audio_artifact_intent:
+        _task_facts_text = (
+            "The current user request asks for a user-facing audio artifact. "
+            "For spoken/random test voice, use the TTS audio-generation path with a short spoken test phrase when the user did not supply text. "
+            "Do not ask a TTS helper to write Python wave/noise scripts unless the user explicitly requested synthetic tones/noise instead of speech. "
+            "Final deliverables should name the actual verified audio file path.\n"
+            "当前请求是面向用户的音频文件产物；随机测试语音优先用 TTS 合成可听语句，最终 deliverables 写真实已验证音频文件。"
+        )
+
     # 2026-05-15 Item 3: 4 段 per-turn 动态信息一次性塞进独立 user 消息,
     # 不再 append 到 system 尾部,保 prefix cache 稳定。
     _inject_dynamic_session_info(
@@ -881,6 +1046,7 @@ async def orchestrate(
         lang_directive=_lang_text,
         mode_text=_mode_text,
         project_context=_project_context_text,
+        task_facts_text=_task_facts_text,
     )
 
     # ── 2. 分支：根据复杂度决定流程 ──
@@ -968,6 +1134,14 @@ async def orchestrate(
             "round1.safety_gate",
             f"P86: easy→medium + needs_tools=True (image content query, "
             f"Round 1 lite 漏判: 用户问图片内容但说 needs_tools=False)",
+        )
+
+    if not needs_tools and (not _tool_concept_intent) and _audio_artifact_intent:
+        complexity = "medium" if complexity == "easy" else complexity
+        needs_tools = True
+        debug.log(
+            "round1.safety_gate",
+            "easy→medium + needs_tools=True (audio artifact request; Round 1 treated it as simple reply)",
         )
 
     # ── 2026-05-04 Bug #4 + #11 修复:stop 命令硬路由 ──
@@ -1583,59 +1757,65 @@ async def orchestrate(
                             _fetched_from_main,
                         )
 
-            if want and _is_new_audio_file_request(req.message or ""):
-                _audio_exts = {".wav", ".mp3", ".ogg", ".m4a"}
-                _stale_audio = {
+            _deliverable_warning_facts: list[str] = []
+            if want:
+                _preexisting_artifacts = {
                     f for f in want
-                    if os.path.splitext(f)[1].lower() in _audio_exts
-                    and f in _files_before
+                    if f in _files_before
+                    or f.replace("\\", "/") in {str(x).replace("\\", "/") for x in _files_before}
                 }
-                if _stale_audio:
-                    want -= _stale_audio
-                    plan.deliverables = [
-                        f for f in (plan.deliverables or []) if f not in _stale_audio
-                    ]
-                    _existing_partial = set(plan.delivery_partial or [])
-                    plan.delivery_partial = sorted(_existing_partial | _stale_audio)
-                    _miss_lines = "\n".join(f"  - {fn}" for fn in sorted(_stale_audio))
-                    _orig_intent = (plan.intent or "")[:200]
-                    plan.intent = (
-                        "用人设语气简短告诉用户:这次要求生成新的音频文件,但执行计划只拿到了"
-                        "本轮开始前已经存在的旧音频,不能当成本轮生成结果交付。"
-                        "需要重新合成后再发,这次先不推送旧音频。旧音频如下:\n"
-                        f"{_miss_lines}\n\n"
-                        "不要说音频已生成或已发送;不要让用户去收这些旧文件。"
-                        f"\n\n原 intent(供参考): {_orig_intent}"
+                if _preexisting_artifacts and not redeliver_existing:
+                    _kind = "audio " if _is_new_audio_file_request(req.message or "") else ""
+                    _deliverable_warning_facts.append(
+                        f"Delivery fact: the plan selected {_kind}file(s) that already existed before this round while other selected deliverable(s) are new: "
+                        + ", ".join(sorted(_preexisting_artifacts))
+                        + ". These files remain selected for model review; decide whether each is a final artifact for the current request or old/source/context material."
                     )
-                    plan.key_points = [
-                        "用户要的是本轮新生成的音频文件",
-                        "模型计划复用了旧音频文件,已阻止交付以避免错误音色/旧内容",
-                    ]
                     debug.log(
-                        "workspace.stale_audio_blocked",
-                        "new audio request attempted to deliver pre-existing audio",
-                        sorted(_stale_audio),
+                        "workspace.preexisting_artifact_flagged",
+                        "explicit deliverable(s) already existed before the round; kept and recorded fact",
+                        sorted(_preexisting_artifacts),
                     )
 
-            # 2026-05-10 Patch 75b: 推送层兜底过滤内部文件
+            # Push-layer boundary facts: do not remove explicit deliverables here.
             # 病因(trace 6c60898a160b4f6c):主线程 abort 路径从 helper delegate output
             # 抠 deliverables 时,把 .helper_xxx_full_report.txt(内部摘要)放进 plan.deliverables。
-            # P75 修了 abort_to_round3 的提取(过滤前缀 `.` 和 `_helpers_shared/`),但
-            # 主线程 LLM 自己也可能错放。推送层加第二道防线:want 集合移除内部文件。
+            # Earlier code removed such files symbolically. Current policy: if the LLM
+            # explicitly selected an existing file, record the boundary warning as a fact
+            # for the final model response; physical/safety checks below still apply.
             _internal_in_want = {
                 f for f in want
                 if _is_internal_deliverable_file(f)
             }
             if _internal_in_want:
-                want -= _internal_in_want
-                # 同步修正 plan.deliverables(让 round3 看到的也是过滤后的列表)
-                plan.deliverables = [f for f in plan.deliverables if f not in _internal_in_want]
-                debug.log(
-                    "workspace.internal_filtered",
-                    f"P75b: 从 plan.deliverables 移除 {len(_internal_in_want)} 个内部文件 "
-                    f"(helper 摘要/元数据/共享脚手架,不该推给用户)",
-                    {"removed": sorted(_internal_in_want)},
+                _deliverable_warning_facts.append(
+                    "Delivery fact: selected deliverable(s) match internal/staging naming boundaries: "
+                    + ", ".join(sorted(_internal_in_want))
+                    + ". They remain selected because plan.deliverables is an explicit model decision; decide wording from the file facts."
                 )
+                debug.log(
+                    "workspace.internal_flagged",
+                    f"{len(_internal_in_want)} explicit deliverable(s) match internal/staging boundaries; kept and recorded fact",
+                    {"flagged": sorted(_internal_in_want)},
+                )
+            if _deliverable_warning_facts:
+                existing_points = list(plan.key_points or [])
+                for _fact in _deliverable_warning_facts:
+                    if _fact not in existing_points:
+                        existing_points.append(_fact)
+                plan.key_points = existing_points
+                _note = (plan.internal_note or "").strip()
+                _warn_note = "deliverable boundary facts recorded for final response"
+                plan.internal_note = ((_note + " | " if _note else "") + _warn_note)[:300]
+                await _review_explicit_deliverables_with_warnings(
+                    plan,
+                    user_message=req.message,
+                    workspace_dir=workspace_dir,
+                    files_before=_files_before,
+                    warning_facts=_deliverable_warning_facts,
+                )
+                want = set(plan.deliverables) if plan.deliverables else set()
+                redeliver_existing = bool(want) and not any(f not in _files_before for f in want)
 
             _skipped_non_deliverable: list[str] = []
             for fname in ws_tool.list_generated_files(workspace_dir):
@@ -1656,10 +1836,9 @@ async def orchestrate(
                     if redeliver_existing:
                         debug.log("workspace.redeliver", f"re-delivering existing file selected by plan: {fname}")
                     else:
-                        # 2026-05-06 §C6: 污染防护 — 产物类文件若在会话开始前已存在,
-                        # 说明是上一轮任务的残留(chart*.png / *.docx / *.pptx / *.xlsx
-                        # 等)。源码(.c/.py)允许重复交付(可能被本轮修改过),但产物类文件
-                        # 极大概率是旧任务残留,直接跳过。
+                        # 产物类文件若在会话开始前已存在,这是交付事实而不是推送层
+                        # 可以替 LLM 做的语义判断。上方已把 pre-existing fact 注入
+                        # plan 并交给模型复核；此处只负责物理/安全边界。
                         ext = os.path.splitext(fname)[1].lower()
                         _STALE_ARTIFACT_EXTS = (
                             ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp",
@@ -1667,12 +1846,11 @@ async def orchestrate(
                         )
                         if ext in _STALE_ARTIFACT_EXTS:
                             debug.log(
-                                "workspace.contamination",
-                                f"SKIPPING stale artifact from previous task: {fname} "
-                                f"(already existed at session start, likely from prior round)",
+                                "workspace.preexisting_artifact.deliver",
+                                f"delivering explicit pre-existing artifact after model-visible fact review: {fname}",
                             )
-                            continue
-                        debug.log("workspace.redeliver", f"re-delivering modified file: {fname}")
+                        else:
+                            debug.log("workspace.redeliver", f"re-delivering modified file: {fname}")
                 url = f"/v1/chat/files/{req.archive_id}/{req.group_id}/{fname}"
                 generated_files.append((fname, url, full_path))
             if _skipped_non_deliverable:
@@ -1742,7 +1920,10 @@ async def orchestrate(
                             if _actual in _files_before:
                                 _ext = os.path.splitext(_actual)[1].lower()
                                 if _ext in _STALE_EXTS and not redeliver_existing:
-                                    continue
+                                    debug.log(
+                                        "workspace.prefix_resolve.preexisting",
+                                        f"resolved explicit deliverable to pre-existing artifact fact, still delivering: {_actual}",
+                                    )
                             _url = f"/v1/chat/files/{req.archive_id}/{req.group_id}/{_actual}"
                             generated_files.append((_actual, _url, _fp))
                         debug.log(
@@ -1809,23 +1990,18 @@ async def orchestrate(
                     _miss_lines = "\n".join(f"  - {fn}" for fn in sorted(_missing_set))
                     _orig_intent = (plan.intent or "")[:200]
                     _remaining_ok = len(plan.deliverables or []) + len(generated_files)
-                    if _remaining_ok == 0:
-                        plan.intent = (
-                            "Reply briefly in persona. Tell the user that the planned delivered files were not found, so they were not delivered. "
-                            "Name the missing files and describe the likely state as missing output, filename mismatch, or interrupted work:\n"
-                            f"{_miss_lines}\n\n"
-                            "Use honest delivery-state wording and do not claim the user already has these files.\n"
-                            f"Original intent reference: {_orig_intent}\n"
-                            "简短说明计划交付文件未找到，因此未推送。"
-                        )
-                    else:
-                        plan.intent = (
-                            f"Reply briefly in persona. Most files were delivered, but {len(_missing_set)} planned file(s) were not found and were not delivered:\n"
-                            f"{_miss_lines}\n\n"
-                            "Use the delivery prompt for successfully sent files, and keep the missing files clearly marked as not delivered.\n"
-                            f"Original intent reference: {_orig_intent}\n"
-                            "简短说明大部分已发，缺失文件未推送。"
-                        )
+                    _missing_fact = (
+                        "Delivery fact: these planned deliverable files do not exist in the chat workspace and therefore cannot be attached:\n"
+                        f"{_miss_lines}\n\n"
+                        f"Existing attached file count after physical checks: {_remaining_ok}. "
+                        f"Original intent reference: {_orig_intent}\n"
+                        "交付事实：上述文件不存在，物理上无法推送；其它已存在附件按实际列表处理。"
+                    )
+                    plan.intent = (
+                        "Reply in persona using the delivery facts below. Do not state that a missing file was sent; decide the user-facing wording from the facts.\n"
+                        + _missing_fact
+                    )
+                    plan.key_points = list(plan.key_points or []) + [_missing_fact]
 
             # ── 2026-05-09 Patch 32b: 代码级 deliverable 结构验收 ──
             # 病因(trace 779bbcf0):helper 出 docx 219 段 8455 字 + image_count=0,
@@ -1839,11 +2015,11 @@ async def orchestrate(
                 ".docx", ".pptx", ".xlsx", ".pdf",
                 ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
             }
-            # 致命 warning 关键词:命中即拒。其他 warning(如"极短"/"图片极小"/"长文档无图")只 log 不拒。
+            # 致命 warning 只保留物理/结构边界。质量类 warning(如"极短"/"长文档无图")
+            # 作为事实交给 LLM 处理,不在推送层替模型判定质量是否可交付。
             _FATAL_WARN_KEYWORDS = (
                 "完全空白", "0 幻灯片", "所有 sheet 均空", "尺寸 0×0",
                 "文件大小为 0",
-                "0 张图 — 演示文稿",              # Patch 32a 触发 — pptx 多页无图
             )
             _validation_failures: list[tuple[str, list[str]]] = []  # (fname, fatal_warnings)
             _validation_warnings: list[tuple[str, list[str]]] = []  # 非致命 warning 也 log
@@ -1882,6 +2058,15 @@ async def orchestrate(
                     f"{len(_validation_warnings)} deliverable(s) 有非致命 warning(允许交付)",
                     {f: ws for f, ws in _validation_warnings},
                 )
+                _warning_lines = []
+                for _fn, _ws in _validation_warnings:
+                    if _ws:
+                        _warning_lines.append(f"{_fn}: " + "; ".join(str(w) for w in _ws[:3]))
+                if _warning_lines:
+                    plan.key_points = list(plan.key_points or []) + [
+                        "Delivery fact: structural inspection reported non-fatal warning(s), but the file(s) passed physical delivery checks: "
+                        + " | ".join(_warning_lines)
+                    ]
 
             if _validation_failures:
                 # 把致命 fail 的 deliverable 从 generated_files 移除
@@ -1914,22 +2099,18 @@ async def orchestrate(
                 if _remaining_ok_count == 0:
                     # 全部被拒:一个都没推
                     plan.intent = (
-                        "Reply briefly in persona. The work reached artifact generation, but every artifact failed structural validation, "
-                        "so no file was delivered. Name the rejected items and their reasons:\n"
+                        "Reply in persona using the delivery facts below. The listed files failed physical/structural delivery checks and were not attached:\n"
                         + "\n".join(_fail_lines) + "\n\n"
-                        "Use honest delivery-state wording: rejected files are not in the user's hands.\n"
                         f"Original intent reference: {_orig_intent}\n"
-                        "简短说明产物生成了但结构验收失败，因此未推送。"
+                        "交付事实：上述文件未通过物理/结构检查，未推送。"
                     )
                 else:
                     # 部分被拒:其他通过的会正常推送(由 Patch 35 引导措辞),这里只描述"哪些没推"
                     plan.intent = (
-                        "Reply briefly in persona. Most files were delivered, but some artifacts failed structural validation and were held back. "
-                        f"Use the normal delivery prompt for successful files. Rejected items ({len(_validation_failures)}):\n"
+                        "Reply in persona using the delivery facts below. Some files passed attachment checks; the following files failed physical/structural delivery checks and were not attached:\n"
                         + "\n".join(_fail_lines) + "\n\n"
-                        "Keep rejected files marked as not delivered; successful files may be described as delivered.\n"
                         f"Original intent reference: {_orig_intent}\n"
-                        "简短说明部分已发，结构不达标的产物未推送。"
+                        "交付事实：通过检查的附件按实际列表处理；上述文件未推送。"
                     )
                 # 同时把检查出问题的内容塞进 internal_note,便于 maintenance 写记忆
                 plan.internal_note = (

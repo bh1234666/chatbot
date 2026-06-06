@@ -272,6 +272,24 @@ async def test_workspace_run_does_not_inherit_parent_pythonpath(tmp_path, monkey
     assert explicit["stdout"].strip() == "good"
 
 
+async def test_workspace_run_adds_workspace_root_for_helpers_shared_package(tmp_path):
+    from app.llm.tools.workspace import handle_run
+
+    shared = tmp_path / "_helpers_shared"
+    shared.mkdir()
+    (shared / "__init__.py").write_text("", encoding="utf-8")
+    (shared / "compression_framework.py").write_text("VALUE = 'shared-ok'\n", encoding="utf-8")
+    (shared / "huffman.py").write_text(
+        "from _helpers_shared.compression_framework import VALUE\nprint(VALUE)\n",
+        encoding="utf-8",
+    )
+
+    result = await handle_run(str(tmp_path), "python _helpers_shared/huffman.py", timeout_sec=5)
+
+    assert result["ok"] is True
+    assert result["stdout"].strip() == "shared-ok"
+
+
 async def test_workspace_run_pytest_forces_workspace_rootdir(tmp_path, monkeypatch):
     from app.llm.tools import workspace as ws_tool
 

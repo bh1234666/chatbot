@@ -76,6 +76,44 @@ When reporting evidence, mention the original uploaded file if relevant, but kee
 
 上传文件路径可能带时间戳；代码和脚本应使用稳定本地文件名，不依赖会话快照路径。""",
 
+    "source-reading-recipes": """\
+# Source Reading Recipes
+
+Use this skill when a read helper must extract evidence from source materials, visual files, Office/PDF files, many files, or long documents.
+
+## Inputs And Paths
+- Work from workspace-relative files and the resource manifest before reading source material.
+- In project mode, inspect `_env/project_inventory.md` or `_env/.resource_manifest.json` when present.
+- Treat manifest `project_path` and `staged_path` entries as path truth. Read existing staged `_env/...` copies exactly.
+- If a manifest entry is not staged, try `fetch_to_temp(source='main', paths=[project_path])` once. If it remains unavailable, call `request_resource` with the exact `project_path`, useful partial evidence, and the resume condition.
+- Preserve manifest paths instead of reconstructing nested directory names from labels or basenames.
+
+## Reading Effort
+- Match effort to purpose. Original wording, IDs, numbers, labels, formulas, tables, question/options, transcription, and readability judgments need stronger evidence than gist summaries.
+- Use `ocr` only for visual, scanned, image-based, or recognition-needed content. Use `allow_upgrade=true` when exact visual evidence remains insufficient and a stronger tier is available.
+- Reuse OCR cache when its tier and quality satisfy the purpose. Stop when evidence is sufficient, no stronger tier is available, or the requested max tier has been reached.
+- Preserve uncertainty rather than turning weak recognition into confident prose.
+
+## Large Files
+- Read document body text and image text as separate evidence streams.
+- For Word body text, use office(read) with `start_block`/`end_block`/`max_blocks` and continue from `next_start_block` when more coverage is needed.
+- For embedded images, use office(ocr_images) with `image_offset`/`max_images`/`save_to`, then read the saved OCR text with read_file line ranges.
+- For standalone large or long images, call ocr with `save_to` and read the saved text by ranges.
+- Treat truncation as a signal to page evidence, not to guess.
+
+## Coverage And Evidence Files
+- Save detailed extracted evidence in a `*_evidence.txt` or `*_long_report.md` file; keep the final report compact.
+- Report source files covered, section/page/image ranges, item counts, missing or uncertain spans, and recommended line ranges.
+- If complete coverage is required and any source, section, or required item class remains unread, mark PARTIAL.
+- For large projects or many source files, prefer an evidence map plus focused excerpts over reading every candidate file.
+
+## Evidence File Shape
+Always include the verdict line and extracted content. Add fields only when they change a downstream decision: `source_files`, `methods_used`, `coverage_summary`, `item_counts`, `quality`, `cache_status`, `line_ranges`, `needs_escalation`, `next_action`.
+
+A tiny OCR or extraction result does not need a large boilerplate template. Write the extracted text plus concrete uncertainty or missing-span notes.
+
+read helper 按用途抽取证据：项目路径以 manifest 为准；视觉证据按需 OCR 升级；大文件分正文和图片流分页；长证据写入 evidence 文件，短报告只给覆盖、缺口和下一步。""",
+
     "compile-errors": """\
 # Compile And Link Error Recovery
 
@@ -193,17 +231,36 @@ Estimate complexity before large runs. Use representative probes, cap slow algor
 
 Use Office tools for docx/pptx/xlsx containers. Use normal text/file tools for plain `.txt`, `.md`, `.json`, `.yaml`, and `.csv`.
 
+## Actions
+- `read`: extract text, headings, tables, image metadata, and pagination hints.
+- `extract_images`: export embedded media to workspace files.
+- `ocr_images`: recognize embedded image text; batch with `image_offset`/`max_images` and use `save_to` for large OCR output.
+- `write`/`append`: create or extend DOCX blocks, PPTX slides, or XLSX sheets.
+- `replace_section`/`replace_block`/`insert_block`/`delete_block`: targeted DOCX edits after a read gives reliable indexes.
+- `replace_slide`/`insert_slide`/`delete_slide`: targeted PPTX edits.
+- `update_cells`: targeted XLSX edits.
+- `verify_numbers`/`verify_rigor`/`verify_integrity`: numeric, rigor, and workbook integrity checks.
+
+## Large Writes
+- Prefer one coherent chapter/section per call: heading, paragraphs, tables, formulas, and images that belong together.
+- The tool may return `arg_size_warning` with the active block/text limits. Use those reported limits for the next call.
+- If the same heading is repeatedly replaced without convergence, read the document structure once and rewrite the affected section from current evidence.
+- Once body text, tables, images, and acceptance checks pass, stop rereading the whole artifact unless a named gap remains.
+
 ## DOCX
 - Build from confirmed evidence: create a skeleton, append bounded sections, and keep each section coherent.
 - Valid block types are `heading`, `paragraph`, `list`, `table`, `image`, `equation`, and `page_break`. Use `paragraph` for ordinary prose and `list` for bullet or numbered content.
 - Tables need non-empty two-dimensional rows. Remove empty rows before calling the tool.
 - Keep Word tables readable: prefer 3-6 meaningful columns, short cells, and several focused tables over one wide prose-heavy table.
 - Image blocks need an existing workspace `path`; generate or fetch images first, then embed them.
+- If prose says "Figure N", "Fig. N", or "图 N", the adjacent content should include the corresponding image block or markdown image. Use office read/inspect output to confirm figure consistency.
 - For targeted edits, read the document first and use the exact non-negative `block_index`.
 - Verify DOCX data claims with `verify_numbers` or `verify_rigor`; use `read` or `inspect_file` for structural acceptance.
+- For large DOCX reads, page body text with `start_block`/`end_block`/`max_blocks`. Read body text and embedded-image OCR as separate evidence streams.
 
 ## PPTX
 - Keep each slide focused.
+- Layouts include `title`, `section`, `title_content`, `two_column`, `image`, `table`, and `blank`. Put top-level images in the slide image field or a blank-slide body item, not as prose.
 - Use existing chart/image files rather than recreating chart logic inside the presentation step.
 - Inspect slide count and media count.
 
@@ -214,9 +271,19 @@ Use Office tools for docx/pptx/xlsx containers. Use normal text/file tools for p
 - Use `verify_integrity` for cross-sheet consistency and formula cached-value sanity; it is XLSX-only.
 
 ## Formulas
-Use the supported formula markup and verify rendered output when formulas are central to the task.
+Use inline `$...$`, display `$$...$$`, or an explicit `equation` block. Simple formulas may become Unicode; supported Word-native OMML covers nested superscript/subscript, fractions, roots, sums/integrals/products, limits, binomials, Greek letters, common operators, set/logic symbols, and common function names. Unsupported formulas fall back to PNG or a preflight error.
 
-Office 工具用于结构化文档容器；DOCX block/action 必须匹配，复杂计算先由 code helper 给出证据，再由 edit helper 写入文档。""",
+Keep Chinese prose outside LaTeX formula text. Split align/cases/matrix-style content into multiple equations or a table. Verify rendered output when formulas are central to the task.
+
+## Data Rigor
+- `verify_numbers` checks absolute numbers in DOCX/PPTX against CSV sources with tolerance.
+- `verify_rigor` adds ratio/assertion checks, pivot aliases/values, internal fact consistency, scaling observations, and optional reproducibility metadata checks for DOCX.
+- `comparison_assertions` are strongest when the document wording, CSV row filters, baseline/target pivots, claimed ratio, value column, and tolerance are all supplied.
+- `internal_facts` can check repeated facts across abstract/body/conclusion with a regex and expected value.
+- `verify_integrity` checks XLSX cross-sheet consistency and formula cached-value sanity.
+- If a verifier reports concrete mismatches, repair the cited section/cell and run the relevant verifier again.
+
+Office 工具用于结构化文档容器；DOCX block/action 必须匹配，大文档按工具返回限制分段，图片引用要嵌入并验收，公式和数据严谨性按证据检查，复杂计算先由 code helper 给出证据再写入文档。""",
 
     "parallel-helpers-coordination": """\
 # Parallel Helper Coordination
@@ -262,6 +329,7 @@ _SKILL_DESCRIPTIONS: dict[str, str] = {
     "workspace-deep-dive": "Workspace sandbox, _shared/_helpers_shared, main fetches, and environment _env staging.",
     "find-missing-file": "Stepwise missing-file recovery: suggestions, locate, fetch, or request the main process.",
     "shared-files-warning": "Use stable local names instead of timestamped upload snapshot paths in generated code.",
+    "source-reading-recipes": "Source-material extraction, OCR effort, large-file paging, coverage, and evidence files.",
     "compile-errors": "Compiler/linker/runtime error recovery from build evidence.",
     "doc-incremental-build": "Incremental docx/pptx/xlsx construction and evidence-based document closure.",
     "verification-checklist": "Read-only adversarial PASS/FAIL/PARTIAL verification workflow.",

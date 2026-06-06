@@ -32,6 +32,7 @@ def _inject_dynamic_session_info(
     lang_directive: str = "",
     mode_text: str = "",
     project_context: str = "",
+    task_facts_text: str = "",
 ) -> None:
     """把 per-user / per-turn 动态信息塞进独立 user 消息插在 base_msgs 顶端附近。
 
@@ -47,6 +48,7 @@ def _inject_dynamic_session_info(
         ("Language Constraint", lang_directive),
         ("User Profile", profile_text),
         ("Current Project", project_context),
+        ("Current Task Facts", task_facts_text),
         ("Pause Snapshot", pause_text),
         ("Feedback Review", feedback_text),
     ):

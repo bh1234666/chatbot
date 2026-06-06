@@ -518,9 +518,17 @@ _current_user_message: ContextVar[str] = ContextVar(
 
 def set_current_persona_excerpt(persona: str):
 
-    """orchestrator round2 入口调用,告知 delegate 守卫人设核心。"""
+    """orchestrator round2 入口调用,告知 delegate 守卫人设执行准则。"""
 
-    return _current_persona_excerpt.set((persona or "").strip()[:800])
+    rules = ""
+    try:
+        from app.memory.persona_files import persona_round2_instruct_by_content
+        rules = persona_round2_instruct_by_content(persona or "")
+    except Exception:
+        rules = ""
+    if not rules:
+        rules = (persona or "").strip()
+    return _current_persona_excerpt.set(rules.strip()[:1800])
 
 
 

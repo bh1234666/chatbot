@@ -260,6 +260,7 @@ from app.llm.tools.tool_schemas import (  # noqa: E402,F401
     READ_FUNCTION_SCHEMA,
     SEARCH_ACROSS_FILES_SCHEMA,
     AGENT_STATE_SCHEMA,
+    TASK_PLAN_SCHEMA,
     DELEGATE_TOOL_SCHEMA,
     OFFICE_TOOL_SCHEMA,
     TODO_WRITE_SCHEMA,
@@ -446,6 +447,7 @@ MAIN_THREAD_TOOL_METAS: list[ToolMeta] = [
     tool_meta(CODE_INDEX_SCHEMA, read_only=True, side_effect="none", requires_permission="chat"),
     tool_meta(READ_FUNCTION_SCHEMA, read_only=True, side_effect="none", requires_permission="chat"),
     tool_meta(SEARCH_ACROSS_FILES_SCHEMA, read_only=True, side_effect="none", requires_permission="chat"),
+    tool_meta(TASK_PLAN_SCHEMA, read_only=False, side_effect="memory", requires_permission="chat"),
     tool_meta(AGENT_STATE_SCHEMA, read_only=False, side_effect="memory", requires_permission="chat"),
     tool_meta(EXPAND_WARM_SCHEMA, read_only=True, side_effect="none", requires_permission="retrieve_memory"),
     tool_meta(EXPAND_COLD_SCHEMA, read_only=True, side_effect="none", requires_permission="retrieve_memory"),
@@ -814,6 +816,8 @@ async def dispatch(
             result = await _handle_read_function(workspace_dir, args)
         elif name == "search_across_files":
             result = await _handle_search_across_files(workspace_dir, args)
+        elif name == "task_plan":
+            result = await _handle_task_plan(args)
         elif name == "agent_state":
             result = await _handle_agent_state(args)
         elif name == "delegate":
@@ -1102,6 +1106,12 @@ async def _handle_agent_state(args: dict) -> str:
     from app.llm.tools.agent_state_tool import handle_agent_state
 
     return await handle_agent_state(args)
+
+
+async def _handle_task_plan(args: dict) -> str:
+    from app.llm.tools.task_plan_tool import handle_task_plan
+
+    return await handle_task_plan(args)
 
 
 async def _handle_progress_note(workspace_dir: str, args: dict) -> str:

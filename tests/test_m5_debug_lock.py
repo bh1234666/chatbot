@@ -123,6 +123,8 @@ def test_debug_module():
         debug_payload_max_chars = 8000
         debug_color = False
         debug_verbose = False
+        debug_console = True
+        debug_prompt_cache_full_shape = True
         debug_log_dir = None
 
     fake_settings_mod = type(sys)("app.config")
@@ -170,6 +172,18 @@ def test_debug_module():
     check("output contains trace_id", "abc12345xyz" in out)
     check("output contains msg", "msg here" in out)
     check("output contains payload", '"中文"' in out)
+    _S.debug_verbose = False
+
+    _S.debug_console = False
+    _S.debug_verbose = True
+    captured = io.StringIO()
+    sys.stderr = captured
+    try:
+        log_fn("test.cat", "console disabled", {"a": "still file-log eligible"})
+    finally:
+        sys.stderr = old
+    check("debug console disabled suppresses stderr", captured.getvalue() == "")
+    _S.debug_console = True
     _S.debug_verbose = False
 
     # contextvar 跨 task 传递
@@ -246,7 +260,7 @@ def test_structure():
     # config 加了 debug 项
     cfg_src = (ROOT / "app/config.py").read_text(encoding="utf-8")
     for name in ["debug_mode", "debug_payload_max_chars", "debug_color",
-                 'validation_alias="DEBUG_MODE"']:
+                 "debug_console", 'validation_alias="DEBUG_MODE"']:
         check(f"config has {name!r}", name in cfg_src)
 
     # chat.py 接入锁

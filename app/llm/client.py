@@ -73,6 +73,40 @@ META_JUDGE_USER_TEMPLATE = (
 )
 
 
+def _helper_tool_args_are_write_like(tool_name: str, args_text: str) -> bool:
+    """Best-effort classifier for streamed helper tool args before JSON is complete."""
+    tool = (tool_name or "").strip()
+    if not tool:
+        return False
+    head = (args_text or "")[:4096].lower()
+    if tool == "workspace":
+        return bool(
+            re.search(r'"action"\s*:\s*"write"', head)
+            and re.search(r'"content"\s*:', head)
+        )
+    if tool == "office":
+        return bool(
+            re.search(
+                r'"action"\s*:\s*"(write|append|replace_section|replace_block|insert_block|replace_slide|insert_slide)"',
+                head,
+            )
+        )
+    return False
+
+
+def _helper_tool_arg_bloat_thresholds(tool_name: str, args_text: str) -> tuple[int, int, str]:
+    """Return warn/close thresholds for streamed helper tool arguments."""
+    # Keep the old general guard tight enough to catch runaway search/read/todo bodies.
+    helper_tool_arg_bloat_warn_at = 14_000
+    helper_tool_arg_bloat_close_at = 24_000
+    if _helper_tool_args_are_write_like(tool_name, args_text):
+        # Writing one coherent code/prose artifact can legitimately exceed 24K in
+        # JSON-escaped arguments. The tool result still has normal file-size and
+        # ownership checks, so allow a larger first physical window before recovery.
+        return helper_tool_arg_bloat_warn_at, 48_000, "write_like"
+    return helper_tool_arg_bloat_warn_at, helper_tool_arg_bloat_close_at, "general"
+
+
 def _meta_judge_user_payload(
     *,
     current_level: str,
@@ -173,6 +207,23 @@ def _log_prompt_cache_shape(
             )
         except Exception:
             pass
+        payload = {
+            "system_prompt_hash": shape["system_prompt_hash"],
+            "system_static_hash": shape["system_static_hash"],
+            "system_dynamic_hash": shape["system_dynamic_hash"],
+            "tool_schema_hash": shape["tool_schema_hash"],
+            "messages_hash": shape["messages_hash"],
+            "prompt_static_bytes": shape["prompt_static_bytes"],
+            "prompt_dynamic_bytes": shape["prompt_dynamic_bytes"],
+            "cacheable_prefix_bytes": shape["cacheable_prefix_bytes"],
+            "message_count": shape["message_count"],
+            "tool_count": shape["tool_count"],
+            "hash_chain": shape["hash_chain"],
+            "system_sections": shape.get("system_sections", []),
+            "message_sections": shape.get("message_sections", []),
+        }
+        if getattr(settings, "debug_prompt_cache_full_shape", False):
+            payload["messages"] = shape["messages"]
         debug.log(
             "llm.prompt_cache_shape",
             (
@@ -181,22 +232,7 @@ def _log_prompt_cache_shape(
                 f"cacheable_prefix={shape['cacheable_prefix_bytes']} "
                 f"system={shape['system_prompt_hash']} tools_hash={shape['tool_schema_hash']}"
             ),
-            {
-                "system_prompt_hash": shape["system_prompt_hash"],
-                "system_static_hash": shape["system_static_hash"],
-                "system_dynamic_hash": shape["system_dynamic_hash"],
-                "tool_schema_hash": shape["tool_schema_hash"],
-                "messages_hash": shape["messages_hash"],
-                "prompt_static_bytes": shape["prompt_static_bytes"],
-                "prompt_dynamic_bytes": shape["prompt_dynamic_bytes"],
-                "cacheable_prefix_bytes": shape["cacheable_prefix_bytes"],
-                "message_count": shape["message_count"],
-                "tool_count": shape["tool_count"],
-                "hash_chain": shape["hash_chain"],
-                "system_sections": shape.get("system_sections", []),
-                "message_sections": shape.get("message_sections", []),
-                "messages": shape["messages"],
-            },
+            payload,
         )
     except Exception:
         pass
@@ -955,6 +991,8 @@ async def _call_llm_streaming_with_idle(
     # 章节、写完整 matplotlib 脚本、生成长 .py 实现) 经常超过 12K,被阻断 → 续写
     # 非常碎片化。提高 close 阈值到 24K,warn 阈值到 14K。真正失控 (循环重复内容)
     # 在 24K 时用户也会看到, 但合法长内容能一次过。
+    # 2026-06-06: 写入类工具调用再给一次更大的物理窗口(48K),避免正常长 artifact
+    # 在 streaming 阶段丢失；非写入类仍按 24K 收敛。
     helper_tool_arg_bloat_warn_at = 14_000
     helper_tool_arg_bloat_close_at = 24_000
     helper_tool_arg_bloat_warned = False
@@ -1194,22 +1232,31 @@ async def _call_llm_streaming_with_idle(
                 if task_id is not None and collector.tool_calls:
                     _largest_tool = ""
                     _largest_args = 0
+                    _largest_args_text = ""
                     for _tc in collector.tool_calls.values():
                         _fn = _tc.get("function") or {}
                         _args_text = _fn.get("arguments", "") or ""
                         if len(_args_text) > _largest_args:
                             _largest_args = len(_args_text)
+                            _largest_args_text = _args_text
                             _largest_tool = str(_fn.get("name") or "")
-                    if _largest_args >= helper_tool_arg_bloat_warn_at and not helper_tool_arg_bloat_warned:
+                    (
+                        _bloat_warn_at,
+                        _bloat_close_at,
+                        _bloat_kind,
+                    ) = _helper_tool_arg_bloat_thresholds(_largest_tool, _largest_args_text)
+                    if _largest_args >= _bloat_warn_at and not helper_tool_arg_bloat_warned:
                         helper_tool_arg_bloat_warned = True
                         debug.warn(
                             f"Helper streaming tool args are very large at iter {iter_no}: "
-                            f"task={task_id} tool={_largest_tool} args={_largest_args} chars"
+                            f"task={task_id} tool={_largest_tool} args={_largest_args} "
+                            f"chars kind={_bloat_kind} close_at={_bloat_close_at}"
                         )
-                    if _largest_args >= helper_tool_arg_bloat_close_at:
+                    if _largest_args >= _bloat_close_at:
                         debug.warn(
                             f"Helper streaming tool args exceeded convergence limit at iter {iter_no}: "
-                            f"task={task_id} tool={_largest_tool} args={_largest_args} chars; closing stream"
+                            f"task={task_id} tool={_largest_tool} args={_largest_args} "
+                            f"chars kind={_bloat_kind} close_at={_bloat_close_at}; closing stream"
                         )
                         try:
                             await stream.close()
@@ -2378,7 +2425,7 @@ def _fold_old_tool_messages(
 def _emergency_compact_msgs(
     msgs: list[dict],
     *,
-    target_token_budget: int = 600_000,
+    target_token_budget: int = 128_000,
 ) -> int:
     """紧急压缩 messages,在接近 context 上限或 BadRequest 后调用。
 
@@ -2404,7 +2451,8 @@ def _emergency_compact_msgs(
     if est <= target_token_budget:
         return est
 
-    # Step 3: 最暴力 — 老 tool messages 全部替换为 1KB preview
+    # Step 3: 最后兜底 — 老 tool messages 折为可恢复摘要。
+    # 尽量保留路径、task_id、action、错误、输出首尾等事实,避免不可恢复硬截断。
     boundary = len(msgs)
     seen_assistants = 0
     for i in range(len(msgs) - 1, -1, -1):
@@ -2420,11 +2468,37 @@ def _emergency_compact_msgs(
             continue
         c = m.get("content", "")
         if isinstance(c, str) and len(c) > 200:
-            m["content"] = json.dumps(
-                {"_folded": True, "_emergency_truncated": True,
-                 "preview": c[:150]},
-                ensure_ascii=False,
-            )
+            folded_payload: dict[str, Any] = {
+                "_folded": True,
+                "_emergency_truncated": True,
+                "_orig_size": len(c),
+            }
+            try:
+                parsed = json.loads(c)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                for key in (
+                    "ok", "action", "path", "file", "target", "task_id",
+                    "terminal_reason", "_task_status", "error", "summary",
+                ):
+                    value = parsed.get(key)
+                    if value is not None:
+                        folded_payload[key] = value
+                for key in ("stdout", "content", "text", "message"):
+                    value = parsed.get(key)
+                    if isinstance(value, str) and value.strip():
+                        folded_payload[f"{key}_excerpt"] = (
+                            value[:500] if len(value) <= 1000 else value[:400] + "\n...\n" + value[-400:]
+                        )
+                        break
+                folded_payload["_recovery"] = (
+                    "Tool result was emergency-folded. Use preserved path/task/action facts, "
+                    "or re-read the smallest needed file/range if exact details are required."
+                )
+            else:
+                folded_payload["preview"] = c[:400] if len(c) <= 900 else c[:350] + "\n...\n" + c[-350:]
+            m["content"] = stable_prompt_json(folded_payload)
             m["_folded"] = True
 
     return _estimate_msgs_token_size(msgs)

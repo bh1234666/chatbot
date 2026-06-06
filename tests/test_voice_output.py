@@ -32,12 +32,18 @@ def test_voice_file_request_is_not_voice_reply():
 
 
 def test_orchestrator_marks_audio_generation_as_new_unless_user_reuses():
-    from app.core.orchestrator_entry import _is_new_audio_file_request
+    from app.core.orchestrator_entry import (
+        _is_audio_file_artifact_request,
+        _is_new_audio_file_request,
+    )
 
     assert _is_new_audio_file_request("测试，生成语音文件，内容为你好") is True
     assert _is_new_audio_file_request("合成一个 wav 文件") is True
+    assert _is_new_audio_file_request("测试，输出一段随机测试语音") is True
     assert _is_new_audio_file_request("重发刚才那个语音文件") is False
     assert _is_new_audio_file_request("复用现有 hello.wav，不用重新生成") is False
+    assert _is_audio_file_artifact_request("重发刚才那个语音文件") is True
+    assert _is_audio_file_artifact_request("用语音回复我") is False
 
 
 @pytest.mark.asyncio

@@ -2693,9 +2693,35 @@ def test_helper_tool_call_bloat_thresholds_stay_bounded():
     close = re.search(r"helper_tool_arg_bloat_close_at\s*=\s*([0-9_]+)", src)
 
     assert warn and close
-    assert int(warn.group(1).replace("_", "")) <= 8_000
-    assert int(close.group(1).replace("_", "")) <= 12_000
+    assert int(warn.group(1).replace("_", "")) == 14_000
+    assert int(close.group(1).replace("_", "")) == 24_000
     assert "helper_tool_call_bloat" in src
+
+
+def test_helper_tool_call_bloat_allows_larger_write_like_payloads():
+    from app.llm.client import _helper_tool_arg_bloat_thresholds
+
+    warn, close, kind = _helper_tool_arg_bloat_thresholds(
+        "workspace",
+        '{"action":"write","path":"report.md","content":"' + ("x" * 100),
+    )
+
+    assert warn == 14_000
+    assert close == 48_000
+    assert kind == "write_like"
+
+
+def test_helper_tool_call_bloat_keeps_general_payloads_bounded():
+    from app.llm.client import _helper_tool_arg_bloat_thresholds
+
+    warn, close, kind = _helper_tool_arg_bloat_thresholds(
+        "workspace",
+        '{"action":"locate","pattern":"' + ("x" * 100),
+    )
+
+    assert warn == 14_000
+    assert close == 24_000
+    assert kind == "general"
 
 
 def test_preflight_guard_preserves_full_helper_envelope_fields():
@@ -5263,6 +5289,7 @@ async def test_wait_window_running_helper_is_not_counted_as_failed(monkeypatch, 
     assert result["helpers_still_running"] == 1
     assert result["failed_count"] == 0
     assert result["incomplete_count"] == 0
+    assert "task_ok=false" in result["_ok_field_meaning"]
     assert [item["task_id"] for item in result["results"]] == ["fast_read"]
 
 
@@ -6565,6 +6592,10 @@ async def test_helper_report_format_repair_skips_resource_required_state(monkeyp
     assert result["ok"] is False
     assert result["terminal_reason"] == "resource_required"
     assert result["resource_required"]["suggested_helper_kind"] == "draw"
+    assert result["declared_but_missing"] == []
+    assert result["pending_declared_outputs"] == ["paper.docx"]
+    assert "Pending until requested resource is provided" in result["report"]
+    assert "Declared but not produced" not in result["report"]
 
 
 async def test_helpers_shared_outputs_are_handoff_not_user_visible(monkeypatch, tmp_path):
@@ -6690,6 +6721,52 @@ async def test_helper_outputs_check_accepts_readonly_shared_expected_via_writabl
         "delivered_writable_shared": "_helpers_shared/astar.py",
     }]
     assert "helper 对只读" in result["post_helper_usage_hint"]
+
+
+async def test_helper_outputs_check_accepts_declared_shared_output_directory(monkeypatch, tmp_path):
+    from app.llm.tools import delegate
+
+    helper_ws = tmp_path / "helper"
+    main_ws = tmp_path / "main"
+    helper_ws.mkdir(parents=True)
+    main_ws.mkdir()
+
+    async def fake_loop(*args, **kwargs):
+        data_dir = helper_ws / "_helpers_shared" / "test_data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "text_english_10kb.dat").write_bytes(b"a" * 1024)
+        (data_dir / "random_bytes_10kb.dat").write_bytes(b"b" * 1024)
+        return '```json\n{"files": ["_helpers_shared/test_data/"]}\n```', []
+
+    monkeypatch.setattr(delegate, "chat_with_tools_loop", fake_loop)
+    monkeypatch.setattr(delegate, "_copy_helper_debug_artifacts_to_main", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delegate, "_persist_pending_result", lambda *args, **kwargs: asyncio.sleep(0))
+
+    result = await delegate._run_one_helper(
+        task_id="framework",
+        prompt="Generate shared test data files.",
+        main_workspace=str(main_ws),
+        helper_workspace=str(helper_ws),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        resume=False,
+        local_abort=asyncio.Event(),
+        wait_for_register=asyncio.Event(),
+        user_lang="en",
+        kind="code",
+        mode="easy",
+        helper_think=False,
+        expected_outputs=["_helpers_shared/test_data/"],
+    )
+
+    assert result["ok"] is True
+    assert result["terminal_reason"] == "completed"
+    assert result["declared_but_missing"] == []
+    assert result["outputs_check"]["outputs_missing"] == []
+    assert result["outputs_check"]["outputs_complete"] is True
+    assert result["outputs_check"]["delivered_count"] >= 1
+    assert (main_ws / "_helpers_shared" / "test_data" / "text_english_10kb.dat").is_file()
 
 
 def test_declared_mapping_accepts_helper_prefixed_docx_delivery():
@@ -7406,6 +7483,7 @@ async def test_delegate_batch_success_resource_pair_still_requires_consumer_resu
     assert result["ok"] is True
     assert result["task_ok"] is False
     assert result["_task_status"] == "incomplete"
+    assert "task_ok=false" in result["_ok_field_meaning"]
     assert result["success_count"] == 1
     assert result["resource_required_count"] == 1
     assert result["incomplete_count"] == 1

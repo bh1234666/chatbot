@@ -285,6 +285,21 @@ def test_dream_llm_prompts_are_compact_and_not_mojibake():
         assert "鍥" not in prompt
 
 
+def test_d4_workspace_cleanup_prompt_formats_json_example():
+    prompt = d4_workspace_cleanup._LLM_PROMPT.format(
+        archive="archive",
+        group="group",
+        agent_mb=123,
+        aggressiveness="low",
+        n=1,
+        candidates="- task_id=orphan:old.txt, kind=orphan_file, age=10h, size=1MB",
+    )
+
+    assert '"decisions"' in prompt
+    assert "{agent_mb}" not in prompt
+    assert "orphan:old.txt" in prompt
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

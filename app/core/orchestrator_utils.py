@@ -320,12 +320,14 @@ def _plan_dict_from_round2_text(content: str) -> dict:
 
 
 def _clean_deliverable_filenames(deliverables: list[str]) -> list[str]:
-    """清理 deliverables 列表：去掉模型混入的文件名后描述文字，并过滤内部中间文件。
+    """清理 deliverables 列表：去掉模型混入的文件名后描述文字。
 
     模型常在 deliverables 里写 "paper.docx — 完整论文(209段)" 而不是纯文件名。
     各种分隔符模式依次尝试，提取文件名部分。不匹配的条目原样保留。
 
-    OCR 原始结果等内部中间文件在此被过滤，不应直接发给用户。
+    Do not remove model-selected files here. Boundary warnings are factual
+    evidence for a later model decision, while this function only normalizes
+    names.
     """
     import re
     _SEP = re.compile(r'\s*[—–\-]\s+')  # em dash / en dash / hyphen
@@ -338,22 +340,16 @@ def _clean_deliverable_filenames(deliverables: list[str]) -> list[str]:
         if m:
             candidate = d[:m.start()].strip()
             if '.' in candidate and '/' not in candidate:
-                if _is_internal_deliverable_file(candidate):
-                    continue
                 cleaned.append(candidate)
                 continue
         # 没有标准分隔符时检查是否是纯文件名(不含空格)
         if ' ' not in d and '.' in d:
-            if _is_internal_deliverable_file(d):
-                continue
             cleaned.append(d)
         elif ' ' in d:
             # "filename.docx description text" 取第一个含扩展名的词
             parts = d.split()
             fn = next((p for p in parts if '.' in p and 2 < len(p) < 200), None)
             if fn:
-                if _is_internal_deliverable_file(fn):
-                    continue
                 cleaned.append(fn)
             else:
                 cleaned.append(d)  # 无法解析,原样保留
@@ -761,7 +757,11 @@ def _is_internal_file(fname_low: str) -> bool:
         or "ocr" in basename and any(s in basename for s in ("question", "result", "raw", "report"))
     ):
         return True
-    return any(p in basename or p in fname_low for p in _AUTOFIX_INTERNAL_BLACKLIST_PATTERNS)
+    _, ext = os.path.splitext(basename)
+    patterns = _AUTOFIX_INTERNAL_BLACKLIST_PATTERNS
+    if ext in {".mp3", ".wav", ".ogg"}:
+        patterns = tuple(p for p in patterns if p not in {"_test_fix", "_test_v"})
+    return any(p in basename or p in fname_low for p in patterns)
 
 
 _INTERNAL_DELIVERABLE_DIRS = {
@@ -780,6 +780,7 @@ _INTERNAL_DELIVERABLE_BASENAMES = {
 _INTERNAL_DELIVERABLE_REGEXES = (
     re.compile(r"^\.helper_.*", re.IGNORECASE),
     re.compile(r"^helper_.*", re.IGNORECASE),
+    re.compile(r"^(?:.*_)?framework_contract.*\.(?:md|txt|json)$", re.IGNORECASE),
     re.compile(r"^_py_cmd_[0-9a-f]{6,}\.py$", re.IGNORECASE),
     re.compile(r".*__analysis_output\.txt$", re.IGNORECASE),
     re.compile(r".*_analysis_output\.txt$", re.IGNORECASE),
@@ -809,7 +810,9 @@ def _is_internal_deliverable_file(name: str) -> bool:
         return True
     if basename in _INTERNAL_DELIVERABLE_BASENAMES:
         return True
-    if any(part.startswith(".") for part in parts):
+    # `.temp/` is the controlled staging area for fresh artifacts before they
+    # are promoted. Keep other dot paths internal.
+    if any(part.startswith(".") and part != ".temp" for part in parts):
         return True
     if any(part in _INTERNAL_DELIVERABLE_DIRS or part.startswith("_delegate_") for part in parts[:-1]):
         return True

@@ -48,7 +48,7 @@ $GeneratedToolRuntimeItems = @(
     "mineru\.mineru_api_port",
     "mineru\.mineru_gpu.lock",
     "mineru\.mineru_service_start.lock",
-    "ominvioce\_cache",
+    # OmniVoice _cache contains offline TTS model weights required at runtime.
     "ominvioce\__pycache__",
     "ominvioce\_sample_cn_female.wav",
     "ominvioce\_sample_en_male.wav",

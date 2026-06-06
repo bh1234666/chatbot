@@ -10,7 +10,12 @@ import re
 from app.config import settings
 from app.schemas.api import ResponsePlan
 from app.core import debug
-from app.core.orchestrator_utils import _is_ocr_intermediate_image, _AUTOFIX_INTERNAL_BLACKLIST_PATTERNS, _is_internal_file
+from app.core.orchestrator_utils import (
+    _is_internal_deliverable_file,
+    _is_ocr_intermediate_image,
+    _AUTOFIX_INTERNAL_BLACKLIST_PATTERNS,
+    _is_internal_file,
+)
 from app.llm.tools import workspace as ws_tool
 
 log = logging.getLogger("app.core.orchestrator")
@@ -266,7 +271,7 @@ _AUTOFIX_DELIVERY_EXTS = {
     ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".txt", ".md", ".rtf",
     ".html", ".htm", ".json", ".xml", ".yaml", ".yml",
     ".zip", ".tar", ".gz", ".7z", ".rar",
-    ".mp3", ".mp4", ".wav",
+    ".mp3", ".mp4", ".wav", ".ogg",
     # 注:**不**含 .exe — chat.py 的 _BLOCKED_EXTENSIONS 一律 403 拒下载,
     # autofix 选了 .exe 等于白选(实测 trace 77310db6:autofix 选了
     # lz78_final_test.exe,download_file API 拒绝,用户拿不到)。
@@ -323,6 +328,7 @@ _AUTOFIX_FILE_INTENT_KEYWORDS = (   # 用户消息里暗示要文件交付的关
 # 2026-05-04 v19: 同分排序时,这些扩展名优先(它们是用户最终想要的核心交付物)
 _AUTOFIX_FINAL_DELIVERABLE_EXTS = {
     ".docx", ".pptx", ".xlsx", ".pdf", ".csv",
+    ".mp3", ".wav", ".ogg",
 }
 
 
@@ -438,7 +444,7 @@ def _add_mentioned_existing_deliverables(
     upload_prefixes = ("uploaded_files/", "uploaded_files\\", "group_files/", "group_files\\")
     for match in re.finditer(
         r"(?<![\w.-])([\w\u4e00-\u9fff][\w\u4e00-\u9fff .()\-\[\]]{0,120}\."
-        r"(?:docx|pptx|xlsx|pdf|md|txt|csv|json|png|jpg|jpeg|svg|zip|html))(?![\w.-])",
+        r"(?:docx|pptx|xlsx|pdf|md|txt|csv|json|png|jpg|jpeg|svg|zip|html|wav|mp3|ogg|m4a))(?![\w.-])",
         plan_text,
         re.IGNORECASE,
     ):
@@ -454,7 +460,7 @@ def _add_mentioned_existing_deliverables(
         if not base or base in current:
             continue
         low = base.lower()
-        if _is_internal_file(low) or any(p in low for p in _AUTOFIX_INTERNAL_BLACKLIST_PATTERNS):
+        if _is_internal_file(low):
             continue
         if base not in existing_by_base:
             continue
@@ -542,6 +548,8 @@ def _autofix_deliverables(
         basename_low = os.path.basename(fname_low)
         if _is_ocr_intermediate_image(fname_low):
             continue
+        if _is_internal_deliverable_file(fname):
+            continue
 
         # 临时文件直接跳过
         if any(p in fname for p in _AUTOFIX_SKIP_PATTERNS):
@@ -592,7 +600,10 @@ def _autofix_deliverables(
 
         # 二进制/结构化产物(非源码)倾向是用户最终想要的(.exe 已不在白名单,
         # 因为下载会被 chat.py 拒绝)
-        if ext in (".png", ".jpg", ".svg", ".pdf", ".xlsx", ".docx", ".pptx", ".ppt", ".csv", ".zip", ".html"):
+        if ext in (
+            ".png", ".jpg", ".svg", ".pdf", ".xlsx", ".docx", ".pptx",
+            ".ppt", ".csv", ".zip", ".html", ".mp3", ".wav", ".ogg",
+        ):
             score += 4
 
         # 用户明确说"要文件"

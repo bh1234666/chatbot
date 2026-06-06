@@ -966,17 +966,19 @@ async def _run_one_helper(
 
                 if _missing_dep_files:
                     dynamic_prompt_prefix_parts.append(
-                        "## Missing Dependency Check\n"
-                        "The task prompt references the following files, but they were not found in known previous helper outputs "
-                        "or the current workspace evidence:\n"
+                        "## Referenced File Availability Facts\n"
+                        "The task prompt mentions the following file names. They were not found in known previous helper outputs "
+                        "or current workspace evidence at helper start:\n"
                         + "\n".join(f"  - `{f}`" for f in sorted(_missing_dep_files)) +
-                        "\n\nConfirm existence with read/search before relying on them. If a dependency is absent, stop that dependent work "
-                        "and report the missing file plus the upstream resource needed, so the main process can provide it.\n\n"
-                        "引用文件缺失时先确认，缺失则报告所需前置资源。"
+                        "\n\nUse this as availability evidence, not as a conclusion about the task. "
+                        "If a name is an output target, create or update it as requested. If a name is required input evidence, "
+                        "confirm with read/search/fetch before relying on it; if it remains unavailable, report the exact missing "
+                        "input and the resource needed from the main process.\n\n"
+                        "这是文件可用性事实，不代表任务结论；若是目标文件则按要求创建，若是输入依赖则先确认再报告缺失资源。"
                     )
                     debug.log(
-                        f"delegate.{task_id}.p35_warn",
-                        f"P35: 警告 helper {len(_missing_dep_files)} 个依赖文件缺失: "
+                        f"delegate.{task_id}.p35_facts",
+                        f"P35: referenced file availability facts for {len(_missing_dep_files)} file(s): "
                         f"{_missing_dep_files[:5]}"
                     )
         except Exception:
@@ -1730,6 +1732,7 @@ async def _run_one_helper(
             is_race_aborted_twin=bool(
                 interrupted and mode == "hard" and str(task_id).endswith("_hard")
             ),
+            suppress_declared_missing=bool(main_resource_request),
             copy_unexpected_env_files=kind in {"read", "ocr"},
             helper_kind=kind,
         )
@@ -1997,6 +2000,16 @@ async def _run_one_helper(
                 _file_map or [],
             )
         )
+        _pending_declared_outputs = _declared_but_missing if main_resource_request else []
+        if main_resource_request and not _pending_declared_outputs:
+            _pending_declared_outputs = sorted(
+                str(name).replace("\\", "/").strip()
+                for name in (expected_outputs_for_copy or [])
+                if str(name).strip()
+                and str(name).replace("\\", "/").strip() not in _visible_name_set
+            )
+        if main_resource_request:
+            _declared_but_missing = []
         _delivered_but_not_declared = sorted(
             path for path in _user_visible_delivered
             if not _matches_declared_output_via_mapping(path, _declared_set, _file_map or [])
@@ -2019,6 +2032,11 @@ async def _run_one_helper(
             _report_lines.append(
                 f"Declared but not produced: {', '.join(_declared_but_missing[:10])}\n"
                 f"声明但未生成。"
+            )
+        if _pending_declared_outputs:
+            _report_lines.append(
+                f"Pending until requested resource is provided: {', '.join(_pending_declared_outputs[:10])}\n"
+                f"等待资源后继续生成。"
             )
         if _delivered_but_not_declared:
             _report_lines.append(
@@ -2123,6 +2141,8 @@ async def _run_one_helper(
         if main_resource_request:
             _result["frozen"] = True
             _result["resource_required"] = main_resource_request
+            if _pending_declared_outputs:
+                _result["pending_declared_outputs"] = _pending_declared_outputs
             _result["suggested_retry_kind"] = main_resource_request.get("suggested_helper_kind")
             _result["suggested_retry_mode"] = "easy"
 
@@ -2224,6 +2244,16 @@ async def _run_one_helper(
                 actual_norm = str(actual_path or "").replace("\\", "/").strip()
                 if not actual_norm:
                     return False
+                expected_dir = expected_norm.rstrip("/") + "/" if expected_norm.endswith("/") else ""
+                if expected_dir:
+                    if actual_norm.startswith(expected_dir) and actual_norm != expected_dir.rstrip("/"):
+                        return True
+                    if expected_dir.startswith("_shared/"):
+                        shared_rel = expected_dir[len("_shared/"):]
+                        writable_shared_dir = f"_helpers_shared/{shared_rel}"
+                        if actual_norm.startswith(writable_shared_dir) and actual_norm != writable_shared_dir.rstrip("/"):
+                            return True
+                    return False
                 actual_base = os.path.basename(actual_norm)
                 if (
                     actual_norm == expected_norm
@@ -2241,10 +2271,24 @@ async def _run_one_helper(
 
             for _exp in expected_outputs:
                 _exp_clean = _exp.strip().lstrip("./").lstrip("\\")
-                _exp_base = os.path.basename(_exp_clean)
                 _exp_norm = _exp_clean.replace("\\", "/")
+                _exp_is_dir = _exp_norm.endswith("/")
+                _exp_base = os.path.basename(_exp_norm.rstrip("/")) if _exp_is_dir else os.path.basename(_exp_clean)
                 _found_path = None
-                if _exp_norm == "_env" or _exp_norm.startswith("_env/"):
+                if _exp_is_dir:
+                    _found_path = next(
+                        (
+                            f for f in sorted(_all_copied_paths)
+                            if _matches_expected_output_path(f, _exp_norm, _exp_base)
+                        ),
+                        None,
+                    )
+                    if _found_path and _exp_norm.startswith("_shared/") and _found_path.startswith("_helpers_shared/"):
+                        _shared_protocol_matches.append({
+                            "expected_readonly": _exp_norm,
+                            "delivered_writable_shared": os.path.dirname(_found_path).replace("\\", "/") + "/",
+                        })
+                elif _exp_norm == "_env" or _exp_norm.startswith("_env/"):
                     _env_abs = os.path.join(main_workspace, *_exp_norm.split("/"))
                     if _exp_norm in _env_copied_paths and os.path.isfile(_env_abs):
                         _env_matched_files.append((_exp, _exp_norm))
@@ -2255,7 +2299,9 @@ async def _run_one_helper(
                     if _env_equivalent in _env_copied_paths and os.path.isfile(_env_abs):
                         _env_matched_files.append((_exp, _env_equivalent))
                         continue
-                if _exp_clean in _delivered_paths:
+                if _found_path:
+                    pass
+                elif _exp_clean in _delivered_paths:
                     _found_path = _exp_clean
                 elif _exp_base in _delivered_basenames:
                     _found_path = next(

@@ -997,55 +997,88 @@ AGENT_STATE_SCHEMA = {
 }
 
 
+TASK_PLAN_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "task_plan",
+        "description": (
+            "Maintain the active task plan snapshot for the main process. Use it after reading memory, files, "
+            "toolchain cache, or agent_state when the active task becomes clearer than the latest user turn alone. "
+            "It updates the current thread plan and mirrors compact facts into the structured task ledger; it does "
+            "not verify artifacts or replace final JSON."
+            "\n\n维护当前主线任务快照；读取记忆、文件或续作证据后可更新。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["status", "update"],
+                    "description": "Use status to read the current snapshot; update to revise the active task plan.\n\n读取或更新当前任务快照。",
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "Resolved active task goal. It may be based on current turn plus prior memory/tool evidence.\n\n解析后的当前主线任务目标。",
+                },
+                "key_points": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Compact facts, acceptance notes, or evidence points for the active task.\n\n当前任务事实或验收要点。",
+                },
+                "deliverables": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Expected current-task user-facing deliverables, if known. Omit uncertain historical files.\n\n预期本任务交付物。",
+                },
+                "acceptance": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Checkable completion criteria for the active task.\n\n可检查验收标准。",
+                },
+                "evidence_required": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Evidence needed before finalizing this active task.\n\n最终交付前所需证据。",
+                },
+                "risks": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Known ambiguity or stale-context risks.\n\n已知歧义或旧上下文风险。",
+                },
+                "current_stage": {
+                    "type": "string",
+                    "description": "Current stage such as resolving_task, reading_memory, executing, verifying, or finalizing.\n\n当前阶段。",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Brief factual reason for the update, such as memory/file evidence that changed the active task.\n\n更新原因。",
+                },
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
 DELEGATE_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "delegate",
         "description": (
-            "Run and manage helper tasks in isolated workspaces. The main process owns goals, dependency order, monitoring, "
-            "acceptance, and final synthesis; helpers do the substantial work.\n"
+            "Run and manage helper tasks in isolated workspaces. The main process owns goals, dependency order, monitoring, acceptance, and final synthesis; helpers do substantial bounded work.\n"
             "\n"
             "## Kinds and modes\n"
-            "`kind` describes task nature. `mode` describes difficulty/resource strength.\n"
-            "- `code`: implementation, debugging, compiling, benchmarks, data analysis, algorithms, HTML/scripts, project statistics that need commands or scripts, and executable file-preparation steps before reading.\n"
-            "- `read`: source-material reading and evidence extraction from text files, prepared archive contents, images, PDFs, Office files, screenshots, forms, and scanned or visual content; writes internal `.txt` evidence.\n"
-            "- `edit`: user-facing document and text assembly for docx/pptx/xlsx/markdown/json/yaml/txt; it should not gather broad source evidence or implement program source code.\n"
-            "- `draw`: generate final PNG/chart/diagram files from data or clear specs.\n"
-            "- `tts`: audio generation resource helper.\n"
-            "- `verify`: adversarial checking and evidence reports for existing artifacts.\n"
-            "- Use `mode='easy'` for ordinary work and `mode='hard'` for high difficulty, recovery, or stronger reasoning.\n"
-            "\n按任务本质选 kind，按难度和重试强度选 mode。\n"
+            "`kind` is the product/tool family; `mode` is difficulty/resource strength. Use code for implementation/commands/benchmarks, read for source-material evidence extraction, edit for final documents/text artifacts, draw for charts/images, tts for audio artifacts, verify for read-only review, and inventory/project_map/file_summary/impact_review for project analysis. Use hard only for difficult same-kind work or recovery.\n"
+            "\n先按产物选择 kind，再按难度选择 mode。\n"
             "\n"
-            "## When to delegate\n"
-            "Delegate implementation, drawing, Office output work, TTS, reading/extraction, verification, substantial file work, and independent exploration. "
-            "Split multiple algorithms, implementations, parameters, seeds, modules, files, or artifacts into parallel helpers. Keep strict dependencies serial.\n"
-            "For broad multi-part work, first create a compact shared framework contract: goal, interfaces or schema, outline, evidence map, acceptance checks, ownership boundaries, and merge order. "
-            "The framework must include an exact output matrix for every downstream consumer: helper task_id, kind, mode, input_files, expected_outputs, acceptance checks, and the final merge/apply target. "
-            "The first framework task defines slots, dependencies, ownership, and acceptance; later helpers produce implementation bodies, long scripts, experiments, evidence-backed claims, citations, tables with final values, charts, and final assembly. "
-            "`_helpers_shared/...` files are handoff evidence for later helpers; final user-facing artifact or project files must be assembled into explicit non-shared workspace files or `_env/...` staged project paths before acceptance. "
-            "Then delegate bounded slices such as modules, chapters, data shards, source ranges, algorithms, experiments, or verification targets. "
-            "Produce long code, documents, reports, extracted evidence, and analysis in inspectable segments instead of one monolithic write.\n"
-            "For long file lists or many similar helpers, write the list/contract to a workspace manifest and keep delegate prompts compact. "
-            "Use `framework` and `input_files` for shared context, and split very bulky fan-out into small batches so tool-call JSON stays valid.\n"
-            "\n主进程负责编排和验收，重工作交给 helper；大型任务先建紧凑框架契约，只定义槽位、归属和验收，再分片并行和合并验收。\n"
+            "## Delegation\n"
+            "Delegate substantial implementation, reading/extraction, Office output, drawing, TTS, verification, broad file work, and independent exploration. Split independent modules, algorithms, sources, chapters, data shards, or artifacts; keep strict dependencies serial. For broad multi-part work, create a compact framework contract first: goal, interfaces/schema, evidence map, output matrix, ownership, checks, and merge order. Pass shared context through `framework` and concrete evidence through `input_files`; keep helper prompts compact.\n"
+            "\n大任务先定契约和证据，再按独立边界派发 helper；共享上下文放 framework，具体输入放 input_files。\n"
             "\n"
-            "## Benchmark and comparison discipline\n"
-            "For comparisons, first define a shared benchmark spec: CSV schema, algorithm labels, timing and memory method, repetitions, seed, data distribution, and scale limits. "
-            "Estimate runtime by complexity before large runs, calibrate with small probes, and use smaller scales or extrapolation notes for slow algorithms. "
-            "Before summarizing, check that units, labels, and order-of-magnitude behavior match the evidence.\n"
-            "\n横向比较先统一规格和运行预算，再汇总证据。\n"
-            "\n"
-            "## Continuation and branching\n"
-            "Use the same `task_id` with `resume=true` for interrupted work, missing outputs, or repair of the same task. "
-            "Change task_id only for a genuinely different subtask or after the old helper completed and its workspace is no longer needed. "
-            "Use `fork_from` to branch several variants from one completed helper workspace.\n"
-            "\n同一任务续作复用 task_id；多变体探索用 fork_from。\n"
-            "\n"
-            "## Monitoring and acceptance\n"
-            "Set `wait_window_sec` for long tasks. Use still_running heartbeats, recent_tools, last_thought, outputs_check, file_map, verify_verdict, and repair_recommendation to decide whether to wait, resume, collect, verify, or cooperatively interrupt. "
-            "If results are incomplete and the user did not interrupt, continue or escalate before finalizing. If recovery is not useful, report only verified partial results and the exact remaining gap. "
-            "In environment tasks, `main_available_files` and `copy_stats.env_copied_files` mean `_env/...` changes are already available in the main workspace.\n"
-            "\n按心跳、产物完整性和验证证据决策；未完成但可恢复时先续作或升级。"
+            "## Continuation and acceptance\n"
+            "Use the same task_id with resume=true for interrupted, incomplete, or repair work on the same boundary. Use fork_from for variants from a completed workspace. Monitor heartbeats, outputs_check, file_map, verify_verdict, quality_warnings, and repair hints before deciding to wait, resume, collect, verify, interrupt, or escalate. In environment tasks, main_available_files and copy_stats.env_copied_files expose usable `_env/...` paths in the main workspace.\n"
+            "\n同一边界用同 task_id 续作；验收前查看产物、映射、质量警告和修复提示。"
         ),
         "parameters": {
             "type": "object",
@@ -1099,30 +1132,23 @@ DELEGATE_TOOL_SCHEMA = {
                             "prompt": {
                                 "type": "string",
                                 "description": (
-                                    "Focused helper prompt. State goal, required inputs, expected outputs, acceptance checks, "
-                                    "and recovery/resource conditions. If the task belongs to a framework-first workflow, "
-                                    "include the shared framework contract, the exact slice boundary, segment output names, local checks, "
-                                    "and how to report conflicts or gaps. If resume=true, include the prior progress summary "
-                                    "and the remaining work for the same task.\n"
-                                    "\n"
-                                    "Helper prompts should be compact, specific, and verifiable. Pass the current goal, necessary "
-                                    "inputs, output paths, constraints, and 3-8 checkable acceptance points. For reversible, "
-                                    "serialization, compression, or conversion work, include round-trip and byte/hash comparison "
-                                    "standards when relevant. Keep broad history, persona text, unrelated helper reports, and "
-                                    "tool manuals out of the helper prompt.\n"
-                                    "\nhelper prompt 应聚焦、可验收；大型任务写明共享契约、分片边界、分段产物和本地检查；框架任务只写结构契约，续作复用同一任务并说明剩余工作。"
+                                    "Focused helper request: goal, inputs, owned output paths, constraints, recovery/resource conditions, "
+                                    "and 3-8 checkable acceptance points. For framework-first work, state the exact slice boundary and "
+                                    "local checks while putting shared structure in `framework`. For resume=true, include prior progress "
+                                    "and remaining work for the same task. Keep broad history, persona text, unrelated helper reports, "
+                                    "and tool manuals out.\n\n"
+                                    "helper prompt 应聚焦、可验收；共享结构放 framework，prompt 只写本分片目标、输入、产物和检查。"
                                 ),
                             },
                             "framework": {
                                 "type": ["string", "object"],
                                 "description": (
-                                    "Shared framework contract for this helper batch or slice. Provide this for broad or multi-part work after the main process has established the framework. "
-                                    "It should state goal, interfaces or schema, outline, evidence/source map, ownership boundary, validation checks, expected segment outputs, and merge order. "
-                                    "For comparable algorithms, chapters, documents, or experiments, include an exact output matrix: each downstream helper task_id, kind, mode, input_files, expected_outputs, and final merge/apply target. "
-                                    "Keep this field structural and portable; put evidence, final values, citations, conclusions, implementation details, and long section text in producer outputs instead. "
-                                    "`_helpers_shared/...` entries are internal handoff files; the final user-facing artifact must be a non-shared workspace file or an `_env/...` project path before acceptance. "
-                                    "Each slice helper should receive the same relevant framework plus its own narrow prompt; a dedicated framework/spec helper may create the contract first.\n\n"
-                                    "共享框架契约字段；大型任务先建立只含结构、槽位、归属和验收的框架，再随分片 helper 一起传入。"
+                                    "Shared structural contract for broad or multi-part work: goal, interfaces/schema, outline, "
+                                    "evidence map, ownership, validation checks, output matrix, and merge/apply order. Keep this "
+                                    "field structural; evidence, final values, citations, implementation bodies, long prose, charts, "
+                                    "and final assembly belong in producer outputs. `_helpers_shared/...` is handoff evidence, not "
+                                    "a final user-facing artifact.\n\n"
+                                    "共享框架只放结构、槽位、归属、验收和合并顺序；实质内容由分片产物承载。"
                                 ),
                             },
                             "resume": {
@@ -1155,7 +1181,6 @@ DELEGATE_TOOL_SCHEMA = {
                                 "description": (
                                     "Choose the helper base kind from the work product, not from difficulty. "
                                     "`mode` controls resource strength; `kind` controls the tool family and deliverable boundary.\n\n"
-                                    "Base kinds:\n"
                                     "- `code`: source implementation, debugging, build/test/benchmark commands, reusable scripts, data computation, algorithmic analysis, generated CSV/JSON evidence, executable file-preparation steps before reading, and project scaffold/shared-contract files that must be written or smoke-tested.\n"
                                     "- `read`: source-material reading and evidence extraction from text files, prepared archive contents, images, PDFs, Office files, screenshots, forms, and scanned or visual content. It writes internal `.txt` evidence for the main thread.\n"
                                     "- `edit`: polished document or structured-file assembly such as .docx/.pptx/.xlsx/Markdown/JSON/YAML/TXT. It consumes verified evidence and existing images; it does not gather broad source evidence, implement source code, or create charts.\n"
@@ -1163,16 +1188,8 @@ DELEGATE_TOOL_SCHEMA = {
                                     "- `draw`: image/chart production from data or a precise visual specification. Use `verify` for judging existing images and `code` for reusable charting applications.\n"
                                     "- `tts`: audio synthesis resources; report the produced audio path without changing voice policy.\n"
                                     "- `inventory`: environment project first-pass inventory: directory shape, file types, README/entry/config/test hints, lightweight statistics, and unread source-material groups.\n"
-                                    "Planning rules:\n"
-                                    "- Keep the user's full goal covered: every requested deliverable, evidence source, and acceptance check must be owned by a helper or by the main thread.\n"
-                                    "- Fill each task as a helper request envelope: `kind`, `mode`, `framework`, `input_files`, focused `prompt`, `expected_outputs`, and `acceptance_checks`. Use concrete `_env/...` paths for project files.\n"
-                                    "- Split executable preparation from reading: a code helper may unpack or convert files, while read helpers summarize source material and write internal evidence.\n"
-                                    "- For many Office/PDF/image/text source files, fan out focused `read` helpers by source group or batch before downstream code/edit work. Script or library wording stays read when scripts are only the reading method.\n"
-                                    "- For mixed work, build a pipeline instead of forcing one helper to cross tool families: computation/benchmarks in `code`, charts in `draw`, final document assembly in `edit`, acceptance review in `verify`.\n"
-                                    "- If a helper is interrupted while making useful progress, resume the same `task_id` with the same base kind; upgrade to `mode='hard'` only when the narrow task shows repeated errors, weak reasoning, or missing capability.\n"
-                                    "- Treat failed or cancelled helper output as evidence to inspect or repair. Present it as completed only after a matching helper or verification step confirms it.\n"
-                                    "- Reading Office/PDF/image/text source material belongs to `read`; final document assembly belongs to `edit`; programming and command-running work belongs to `code`; difficulty upgrades preserve the base kind.\n\n"
-                                    "按产物性质选 kind，按难度选 mode。大量材料先并行 read 提证据，再由 code/edit 消费；失败结果先修复或验证再采纳。"
+                                    "Every requested deliverable, evidence source, and acceptance check needs an owner. For mixed work, pipeline by product: read evidence, code computation, draw charts, edit final documents, verify acceptance. Resume useful interrupted work with the same task_id and base kind.\n\n"
+                                    "按产物性质选 kind，按难度选 mode；混合任务按证据、计算、图表、文档和验收分工。"
                                 ),
                             },
                             "mode": {
@@ -1314,177 +1331,25 @@ OFFICE_TOOL_SCHEMA = {
     "function": {
         "name": "office",
         "description": (
-            "Office document read/write/edit. Auto-detects format from file extension.\n"
+            "Office document read/write/edit. Auto-detects DOCX/PPTX/XLSX behavior from the file extension. On ok=false, read the error and change the next call rather than retrying the same arguments.\n"
             "\n"
-            "## Error responses\n"
-            "On failure returns: {\"ok\": false, \"error\": \"<what went wrong>\"}\n"
-            "READ the error message — it tells you exactly what to fix. Do NOT retry the same broken call.\n"
+            "## Actions\n"
+            "- read, extract_images, ocr_images: extract document text, structure, media metadata, image files, or embedded-image OCR. Page large DOCX bodies with start_block/end_block/max_blocks; save large OCR output with save_to and read it by ranges.\n"
+            "- write, append: create or extend a document. DOCX uses blocks, PPTX uses slides, XLSX uses sheets.\n"
+            "- replace_section, replace_block, delete_block, insert_block: targeted DOCX edits. Use block indexes from office(action='read'). Targeted block/slide edits require an exact non-negative `block_index`/index.\n"
+            "- replace_slide, insert_slide, delete_slide: targeted PPTX edits.\n"
+            "- update_cells: targeted XLSX edits.\n"
+            "- insert_image: append one image to DOCX.\n"
+            "- verify_numbers, verify_rigor: DOCX/PPTX numeric and rigor checks against CSV/source data. `verify_integrity` is XLSX-only.\n"
             "\n"
-            "## Workflow for large documents (P150 自适应粒度)\n"
-            "本工具采用自适应粒度: 初始允许单次 write/append 最多 96 个 blocks,\n"
-            "单 block.text 最多 5000 字, 单次调用总文本最多 30000 字。\n"
-            "若 LLM tool-call JSON 解析失败,系统会自动把上限折半(12 封底),\n"
-            "并在下次调用的 arg_size_warning 中告知新上限。\n"
+            "## Formats\n"
+            "Valid DOCX block types are `heading`, `paragraph`, `list`, `table`, `image`, `equation`, and `page_break`; plain prose is `paragraph`, bullets are `list`, and Table rows must contain at least one non-empty cell. Image paths must already exist in the workspace. If document text references a figure/chart, embed the corresponding image block or markdown image and then verify structure/figure consistency.\n"
+            "PPTX layouts include title, section, title_content, two_column, image, table, and blank. XLSX sheets use rows, optional header/freeze_header/column_widths, and formulas as strings such as '=SUM(A1:A10)'.\n"
             "\n"
-            "推荐做法:\n"
-            "1. **一次写完整章节**(含 heading + paragraphs + image + table),减少 LLM round-trip。\n"
-            "   论文/报告类文档常见: 一次 write 整篇骨架 + 一次 append 每个长章节。\n"
-            "2. 仅在响应中看到 arg_size_warning.adaptive_shrinks_so_far > 0 时才拆小。\n"
-            "3. **避免无谓的 replace_section**: 写之前想清楚结构;若同一 heading 反复 replace\n"
-            "   3 次以上,说明心智模型有偏差,应该 read 整个文档一次,然后整段 append 重写。\n"
-            "4. 文档已有主体、表格和图片后,只做一次最终 read/inspect 验收；没有明确事实错误就交付,不要为润色反复 append/read/replace。\n"
+            "## Large And Specialized Work\n"
+            "Initial large write/append calls allow generous block/text limits; if the tool returns arg_size_warning, use the reported current limit for the next call. For formulas, data-rigor verification parameters, and detailed Office recipes, load `read_skill('office-recipes')` when those details affect the next action.\n"
             "\n"
-            "## Actions (17 total)\n"
-            "### Read & Inspect\n"
-            "- read: Extract text, tables, headings, image metadata from document. For large .docx files, use start_block/end_block/max_blocks to page the body without loading every paragraph at once.\n"
-            "- extract_images: Export embedded images as .png/.jpg files to workspace\n"
-            "- ocr_images: OCR embedded images independently from document text. Use image_offset/max_images to batch large documents, and save_to to write OCR text into a .txt/.md file for later read_file paging.\n"
-            "  Use this when read showed image_count>0. Defaults: max_images=30, max_size_mb=50.\n"
-            "### Create & Append\n"
-            "- write: Create new document (overwrites if exists). Requires blocks/slides/sheets.\n"
-            "- append: Add content to end of existing document\n"
-            "### Incremental Edit — .docx (use block_index from read output)\n"
-            "- replace_section: Replace content under a heading. Params: heading_text, blocks, keep_heading?\n"
-            "- replace_block: Replace block at 0-based index. Params: index, blocks\n"
-            "- delete_block: Delete N blocks from index. Params: index, count?\n"
-            "- insert_block: Insert blocks before index. Params: index, blocks\n"
-            "### Incremental Edit — .pptx\n"
-            "- replace_slide: Replace slide at index. Params: index, slide (or slides)\n"
-            "- insert_slide: Insert slides before index. Params: index, slides\n"
-            "- delete_slide: Delete N slides from index. Params: index, count?\n"
-            "### Incremental Edit — .xlsx\n"
-            "- update_cells: Update specific cells. Params: updates[{sheet, ref, value}, ...]\n"
-            "### Image\n"
-            "- insert_image: Append single image to .docx. Params: image_path, width_inches?, caption?\n"
-            "### Data Rigor Verification (P161/P162, see separate section below)\n"
-            "- verify_numbers (.docx, .pptx): absolute number cross-check vs CSV\n"
-            "- verify_rigor (.docx): 9-in-1 comprehensive rigor checker\n"
-            "- verify_integrity (.xlsx): cross-sheet consistency + formula cached_value sanity\n"
-            "\n"
-            "## .docx block types\n"
-            "{type:'heading', level:1-6, text:'...'}\n"
-            "{type:'paragraph', text:'...', bold?, italic?, align?:'left|center|right|justify', font_size_pt?}\n"
-            "{type:'list', items:[...], ordered?:true|false}\n"
-            "{type:'table', rows:[[...]], header?:true, style?:'Light Grid Accent 1'}\n"
-            "{type:'image', path:'...', width_inches?:6.0, caption?:'...'}\n"
-            "{type:'equation', latex:'...', display?:false}  ← Word 原生公式 (see Formula section)\n"
-            "{type:'page_break'}\n"
-            "\n"
-            "## .pptx slide layouts\n"
-            "title:        {title, subtitle?}\n"
-            "section:      {title, subtitle?}  ← use subtitle, NOT body\n"
-            "title_content:{title, body:['bullet1','bullet2',...]}\n"
-            "two_column:   {title, left:[...], right:[...]}\n"
-            "image:        {title?, image:{path, width_inches?, caption?}}  ← top-level image, NOT in body\n"
-            "table:        {title?, table:{rows:[[...]], header?}}\n"
-            "blank:        {title?, text:'...'} or {title?, body:[{type:'text'|'bullets'|'image'|'table',...}]}\n"
-            "\n"
-            "## .xlsx sheet format\n"
-            "{name:'Sheet1', rows:[[...]], header?:true, freeze_header?:true, column_widths?:[...]}\n"
-            "Cells accept formula strings like '=SUM(A1:A10)'.\n"
-            "append to existing sheet name → error unless replace_if_exists:true.\n"
-            "\n"
-            "## Rules\n"
-            "- All image paths must already exist in workspace before use\n"
-            "- Use office read/append/replace/update actions for .docx/.pptx/.xlsx instead of read_file or multi_edit.\n"
-            "- Text and pictures can be read separately: use office(read, start_block/end_block/max_blocks) for body text, and office(ocr_images, image_offset/max_images/save_to) for image text. Then use read_file ranges on the saved OCR text.\n"
-            "- **CRITICAL — Image embedding**: When writing a .docx/.pptx that references charts,\n"
-            "  you MUST use type:'image' blocks to embed every chart PNG. Do NOT just generate\n"
-            "  standalone .png files — the user expects a complete document with embedded visuals.\n"
-            "  After generating chart*.png with python/matplotlib, immediately call office with\n"
-            "  {type:'image', path:'chart_xxx.png'} blocks.\n"
-            "- **Figure–text consistency**: If your paragraph text says '图 N 展示了 X', the very\n"
-            "  next blocks must include {type:'image', path:...} for that figure. After writing,\n"
-            "  call office(action='read') to verify every '图 N' reference has matching image.\n"
-            "  (read output's figure_consistency field flags mismatches automatically.)\n"
-            "- **Auto image embedding (.docx)**: markdown image syntax ![alt](path.png) in paragraph\n"
-            "  text auto-converts to embedded image.\n"
-            "- .docx/.pptx → pass blocks/slides; .xlsx → pass sheets\n"
-            "- Use office tool instead of writing python-docx/pptx/openpyxl scripts — faster & more reliable\n"
-            "\n"
-            "## Formula support (.docx) — P151 OMML extended\n"
-            "**方式 1 — inline $...$ / display $$...$$ 在 paragraph 文本中**: \n"
-            "  简单公式自动转 Unicode (10^4 → 10⁴), 复杂公式自动降级为 PNG。\n"
-            "**方式 2 — 显式 equation block (Word 原生公式, 可编辑可缩放, 推荐)**:\n"
-            "  {type:'equation', latex:'10^4', display:false}  ← inline 大小\n"
-            "  {type:'equation', latex:'\\\\sum_{i=1}^n x_i', display:true}  ← 居中放大\n"
-            "  优先尝试 OMML, 不支持的公式自动降级 PNG。\n"
-            "\n"
-            "### Supported (OMML 原生, 可编辑)\n"
-            "  ✓ ^/_ 上下标 (任意嵌套)\n"
-            "  ✓ \\\\frac, \\\\dfrac, \\\\tfrac (支持嵌套, P151 修复)\n"
-            "  ✓ \\\\sqrt{x}, \\\\sqrt[n]{x} (支持嵌套)\n"
-            "  ✓ \\\\sum, \\\\int, \\\\iint, \\\\iiint, \\\\oint, \\\\prod, \\\\coprod, \\\\bigcup, \\\\bigcap\n"
-            "     (带可选 _{}^{} 上下限, P151 新加)\n"
-            "  ✓ \\\\lim, \\\\binom (P151 新加)\n"
-            "  ✓ 希腊字母 \\\\alpha..\\\\omega \\\\Alpha..\\\\Omega\n"
-            "  ✓ 运算符 \\\\pm \\\\times \\\\cdot \\\\div \\\\leq \\\\geq \\\\neq \\\\approx \\\\equiv \\\\to \\\\infty\n"
-            "  ✓ 关系/集合 \\\\in \\\\notin \\\\subset \\\\supset \\\\cup \\\\cap \\\\emptyset\n"
-            "  ✓ 逻辑 \\\\forall \\\\exists \\\\Rightarrow \\\\Leftrightarrow \\\\land \\\\lor \\\\neg\n"
-            "  ✓ 函数名 \\\\sin \\\\cos \\\\tan \\\\log \\\\ln \\\\exp \\\\max \\\\min \\\\sup \\\\inf (转直立体文本)\n"
-            "  ✓ 间距 \\\\, \\\\; \\\\quad \\\\qquad   |   \\\\left/\\\\right 自动去除\n"
-            "### Fallback to PNG (matplotlib mathtext, 位图不可编辑)\n"
-            "  \\\\stackrel, \\\\overline, \\\\underline 多数情况下能渲染\n"
-            "### NOT supported (P160 preflight 会明确报错)\n"
-            "  ✗ \\\\begin{align/cases/pmatrix/matrix/...} 环境 — 拆成多个 inline equation block\n"
-            "  ✗ \\\\text{中文} — 中文应在普通 paragraph 里, 不要塞进公式\n"
-            "  ✗ 自定义 \\\\newcommand / \\\\def\n"
-            "Examples:\n"
-            "  paragraph: 'The quadratic formula is $x = \\\\frac{-b \\\\pm \\\\sqrt{b^2-4ac}}{2a}$.'\n"
-            "  equation block: {type:'equation', latex:'\\\\sum_{i=1}^n \\\\frac{1}{i^2} = \\\\frac{\\\\pi^2}{6}', display:true}\n"
-            "\n"
-            "## Data Rigor Verification (P161/P162) — for data-driven documents\n"
-            "**触发条件**: 任务产物是数据驱动文档 (benchmark / 实验论文 / 财务分析 / 对比研究等)\n"
-            "且工作区有 .csv / .xlsx 数据源。**强制**在交付前调一次 verify_rigor 验全绿。\n"
-            "\n"
-            "### verify_numbers (.docx & .pptx)\n"
-            "Absolute number cross-check. Params:\n"
-            "- csv_paths: list[str], 必填\n"
-            "- tolerance: float = 0.05 (5% 相对误差)\n"
-            "Returns: mismatches[] with paragraph_idx / slide_idx + best_csv_match.\n"
-            "Use case: 快速排查论文里凭印象写的绝对数字与 CSV 不符。\n"
-            "\n"
-            "### verify_rigor (.docx) — 9-in-1 comprehensive checker\n"
-            "All params of verify_numbers, plus:\n"
-            "- pivot_col (e.g. 'algorithm'), pivot_values (e.g. ['ASMT','RBTREE','AVL','BPTREE','SKIPLIST'])\n"
-            "- pivot_aliases (dict): {'BPTREE': ['B+树','B+ 树']} — 中英文/缩写互通\n"
-            "- comparison_assertions (RECOMMENDED, strongest ratio verification):\n"
-            "    [{context_keyword:'比红黑树快', csv_filter:{operation:'batch_del_small',\n"
-            "      N:'1000000', distribution:'random'}, baseline_pivot:'RBTREE',\n"
-            "      target_pivot:'ASMT', claimed_ratio:9.2, value_col:'time_ms', tolerance:0.1}, ...]\n"
-            "    工具检查: (a) context_keyword 在 docx 存在, (b) CSV 锁定 baseline/target 行,\n"
-            "    (c) 算 baseline/target ratio 对比 claimed_ratio。捕获 '47 倍' 这种编造。\n"
-            "- internal_facts (regex-based 跨段一致性):\n"
-            "    [{name:'batch_del_large vs RBTREE',\n"
-            "      pattern:r'batch[_]?del[_]?large[^比。]{0,80}比红黑树.{0,15}?快\\s*约?\\s*(\\d+(?:\\.\\d+)?)\\s*倍',\n"
-            "      expected_value:2.24, tolerance:0.05}, ...]\n"
-            "    工具按 regex 抓数字与期望值对比。捕获 abstract/body/conclusion 同事实点数字不一致。\n"
-            "    用 [^比。] 边界字符类防止跨语句匹配。\n"
-            "- expect_reproducibility_metadata (bool, default False): set True for benchmark papers.\n"
-            "    检查论文是否含 random_seed / repeat_count / environment / input_distribution。\n"
-            "- scaling_n_col / scaling_value_col / scaling_group_cols / scaling_super_linear_threshold:\n"
-            "    跨 N 复杂度观察 (O(N log N) 期望 vs 实测)。\n"
-            "\n"
-            "9 sub-checks (all 0 = ✅ ready to ship):\n"
-            "  L1 number_check   绝对数字 vs CSV\n"
-            "  L2 ratio_check    比率论断 (X 倍) vs CSV pairwise\n"
-            "  L3 cherry_pick    对比段漏了某 pivot 值\n"
-            "  L4 unit_consistency  单位混用 (ms/s/μs/ns)\n"
-            "  L5 assertion_check 结构化断言违反 ← 最强\n"
-            "  L6 methodology_check 方法学声明 (3 次/中位数/std) vs CSV 列\n"
-            "  L7 scaling_check  跨 N 复杂度观察 (observational)\n"
-            "  L8 internal_consistency  跨段 regex 一致性\n"
-            "  L9 reproducibility 复现元数据\n"
-            "\n"
-            "### verify_integrity (.xlsx)\n"
-            "Cross-sheet consistency + formula cached_value sanity. Params:\n"
-            "- key_columns (e.g. ['region']), value_columns (e.g. ['revenue']) — 同 key 的 value\n"
-            "  在不同 sheet 出现时必须一致。捕获 财务模型 link 漏更新类错误。\n"
-            "- check_formulas (default True): 验证 formula 单元格的 cached value 非空,\n"
-            "  避免 openpyxl 写完没经 Excel 重算保存导致下游读 0。\n"
-            "\n"
-            "### Iteration\n"
-            "verify_* 报错 → replace_section/replace_block 修 → 再调一次 → 直到全绿。"
+            "Office 工具处理 DOCX/PPTX/XLSX 容器；schema 保留动作、格式和验收边界，长文档分段、嵌图、公式和数据严谨性细节按需读取 `office-recipes`。"
         ),
         "parameters": {
             "type": "object",

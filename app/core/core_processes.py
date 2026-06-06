@@ -180,6 +180,22 @@ class ProcessHandle:
         if self.proc_type == PROC_TYPE_SUBPROCESS:
             d["pid"] = self.pid
             d["command"] = (self.command or "")[:100]
+            if self.pid:
+                try:
+                    import psutil
+
+                    root = psutil.Process(self.pid)
+                    procs = [root] + root.children(recursive=True)
+                    rss = 0
+                    for proc in procs:
+                        try:
+                            rss += int(proc.memory_info().rss)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                    d["rss_gib"] = round(rss / (1024 * 1024 * 1024), 3)
+                    d["process_tree_count"] = len(procs)
+                except Exception:
+                    pass
         else:
             d["task_id"] = self.helper_task_id
             d["helper_kind"] = self.helper_kind

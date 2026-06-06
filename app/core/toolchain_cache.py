@@ -5,6 +5,7 @@ import os
 import re
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,11 @@ MAX_ENTRY_CHARS = 24_000
 
 _LOCK = threading.RLock()
 _CONTINUED_TRACES: set[str] = set()
+_EXPANDED_SCHEMA_TOOLS: dict[str, set[str]] = {}
+_SLIM_TOOL_VIEW_CACHE: dict[int, list[dict[str, Any]]] = {}
+
+_MAX_TOOL_DESCRIPTION_CHARS = 220
+_MAX_PROPERTY_DESCRIPTION_CHARS = 120
 
 
 def _safe_segment(value: str) -> str:
@@ -364,16 +370,167 @@ def reset_trace(trace_id: str | None = None) -> None:
         return
     with _LOCK:
         _CONTINUED_TRACES.discard(trace_id)
+        _EXPANDED_SCHEMA_TOOLS.pop(trace_id, None)
+
+
+def mark_tool_schema_retry(tool_name: str, reason: str = "", trace_id: str | None = None) -> None:
+    """Expand one tool schema on the next LLM turn after an argument/schema error."""
+    name = str(tool_name or "").strip()
+    trace_id = trace_id or debug.current_trace_id()
+    if not name or not trace_id:
+        return
+    with _LOCK:
+        expanded = _EXPANDED_SCHEMA_TOOLS.setdefault(trace_id, set())
+        expanded.add(name)
+    debug.log(
+        "toolchain_cache.schema_expand",
+        f"expanded full schema for {name!r} after tool error",
+        {"trace_id": trace_id, "reason": str(reason or "")[:300]},
+    )
+
+
+def mark_tool_schema_success(tool_name: str, trace_id: str | None = None) -> None:
+    """Remove transient full-schema expansion after a successful call."""
+    name = str(tool_name or "").strip()
+    trace_id = trace_id or debug.current_trace_id()
+    if not name or not trace_id:
+        return
+    with _LOCK:
+        expanded = _EXPANDED_SCHEMA_TOOLS.get(trace_id)
+        if not expanded or name not in expanded:
+            return
+        expanded.discard(name)
+        if not expanded:
+            _EXPANDED_SCHEMA_TOOLS.pop(trace_id, None)
+    debug.log(
+        "toolchain_cache.schema_expand_cleared",
+        f"cleared full schema expansion for {name!r} after successful call",
+        {"trace_id": trace_id},
+    )
+
+
+def expanded_schema_tools(trace_id: str | None = None) -> set[str]:
+    trace_id = trace_id or debug.current_trace_id()
+    if not trace_id:
+        return set()
+    with _LOCK:
+        return set(_EXPANDED_SCHEMA_TOOLS.get(trace_id, set()))
+
+
+def _compact_description(text: Any, limit: int) -> str:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return ""
+    first_sentence = re.split(r"(?<=[.!?。！？])\s+", raw, maxsplit=1)[0].strip()
+    compact = first_sentence or raw
+    if len(compact) > limit:
+        compact = compact[: max(0, limit - 1)].rstrip() + "…"
+    return compact
+
+
+def _slim_parameters_schema(schema: Any) -> Any:
+    """Preserve callable shape while trimming model-visible prose."""
+    if not isinstance(schema, dict):
+        return schema
+    cloned = deepcopy(schema)
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        if "description" in node:
+            desc = _compact_description(node.get("description"), _MAX_PROPERTY_DESCRIPTION_CHARS)
+            if desc:
+                node["description"] = desc
+            else:
+                node.pop("description", None)
+        for key in ("properties", "$defs", "definitions"):
+            children = node.get(key)
+            if isinstance(children, dict):
+                for child in children.values():
+                    _walk(child)
+        for key in ("items", "additionalProperties"):
+            _walk(node.get(key))
+        for key in ("anyOf", "oneOf", "allOf"):
+            variants = node.get(key)
+            if isinstance(variants, list):
+                for child in variants:
+                    _walk(child)
+
+    _walk(cloned)
+    return cloned
+
+
+def _slim_tool_schema(tool: dict[str, Any]) -> dict[str, Any]:
+    cloned = deepcopy(tool)
+    fn = cloned.get("function")
+    if not isinstance(fn, dict):
+        return cloned
+    name = str(fn.get("name") or "tool")
+    desc = _compact_description(fn.get("description"), _MAX_TOOL_DESCRIPTION_CHARS)
+    fn["description"] = desc or f"{name}: available tool. Use its parameters exactly."
+    if "parameters" in fn:
+        fn["parameters"] = _slim_parameters_schema(fn.get("parameters"))
+    return cloned
+
+
+def _tool_name(tool: dict[str, Any]) -> str:
+    fn = tool.get("function") if isinstance(tool, dict) else None
+    return str((fn or {}).get("name") or "")
+
+
+def tool_schema_retry_guidance(
+    tools: list[dict[str, Any]],
+    trace_id: str | None = None,
+) -> str:
+    """Build a transient full-schema hint without changing the tools array.
+
+    This text is meant to be appended only to the single LLM request that needs
+    it, not stored in the durable message history. That keeps the prefix-critical
+    `system_static + tool_schema` cache segments stable while still giving the
+    model full local facts for a retry.
+
+    仅作为单次动态尾部提示注入；不改变 tools schema 前缀。
+    """
+    expanded = expanded_schema_tools(trace_id)
+    if not expanded or not tools:
+        return ""
+    selected: list[dict[str, Any]] = []
+    for tool in tools:
+        if _tool_name(tool) in expanded:
+            selected.append(tool)
+    if not selected:
+        return ""
+    payload = {
+        "reason": "Previous call(s) for these tools had argument/schema-shaped errors.",
+        "scope": "Use these full schemas only to repair the next call. The normal tool list is unchanged.",
+        "tools": selected,
+    }
+    return (
+        "## Tool Schema Retry Facts\n"
+        "The previous tool result for the listed tool(s) reported an argument, JSON, validation, action, or schema-shaped error. "
+        "For this retry only, here are the full schemas for those tool(s). Use them as factual reference for the next tool call; "
+        "the callable tool set and normal compact schema remain unchanged.\n\n"
+        "工具 schema 临时事实：仅用于修正下一次调用；正常工具列表仍保持紧凑稳定。\n\n"
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    )
 
 
 def filter_tools_for_trace(tools: list[dict[str, Any]], trace_id: str | None = None) -> list[dict[str, Any]]:
-    """Return the stable tool schema list for this trace.
+    """Return the stable compact schema view for this trace.
 
-    The continuation tool is single-use, but hiding it after use changes the
-    tool-array prefix and hurts provider prefix-cache reuse. The execution path
-    in continue_chain remains the authority: repeated calls return a structured
-    toolchain_already_continued_this_round error.
+    Default calls keep every tool available but trim long descriptive prose.
+    Full-schema retry facts are injected separately through
+    tool_schema_retry_guidance(), as a dynamic one-call message overlay, so this
+    function does not change the prefix-critical tool schema hash.
 
-    续链工具保持 schema 稳定；重复调用由执行层返回错误。
+    默认保留全部工具能力,只压缩说明文字；参数/必填/枚举结构仍保留。
     """
-    return tools
+    if not tools:
+        return tools
+    key_base = id(tools)
+    cached = _SLIM_TOOL_VIEW_CACHE.get(key_base)
+    if cached is not None:
+        return cached
+    slim = [_slim_tool_schema(tool) for tool in tools]
+    _SLIM_TOOL_VIEW_CACHE[key_base] = slim
+    return slim

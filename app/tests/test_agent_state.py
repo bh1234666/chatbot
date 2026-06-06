@@ -1,3 +1,5 @@
+import json
+
 from app.core import agent_state
 from app.core import debug
 
@@ -9,6 +11,41 @@ def test_agent_state_tool_registered_once():
     tool_names = [tool["function"]["name"] for tool in ROUND2_TOOLS]
     assert meta_names.count("agent_state") == 1
     assert tool_names.count("agent_state") == 1
+    assert meta_names.count("task_plan") == 1
+    assert tool_names.count("task_plan") == 1
+
+
+async def test_task_plan_tool_updates_thread_context_and_agent_state():
+    from app.core import debug
+    from app.core.core_processes import ThreadContext, set_current_thread_context, reset_current_thread_context, get_current_thread_context
+    from app.llm.tools.task_plan_tool import handle_task_plan
+
+    trace_id = "trace_task_plan_update"
+    debug.set_trace_id(trace_id)
+    agent_state.reset_trace(trace_id)
+    token = set_current_thread_context(ThreadContext(user_message="继续", role_label="main"))
+    try:
+        raw = await handle_task_plan({
+            "action": "update",
+            "goal": "完成两个月前的数据报告任务",
+            "key_points": ["memory c123 identifies the old task"],
+            "deliverables": ["final_report.docx"],
+            "current_stage": "reading_memory",
+            "reason": "expanded memory clarified what continue refers to",
+        })
+        data = json.loads(raw)
+        assert data["ok"] is True
+        ctx = get_current_thread_context()
+        assert ctx.plan_intent == "完成两个月前的数据报告任务"
+        assert ctx.plan_key_points == ["memory c123 identifies the old task"]
+        assert ctx.plan_deliverables == ["final_report.docx"]
+        contract = data["contract"]
+        assert contract["task_id"] == "main"
+        assert contract["goal"] == "完成两个月前的数据报告任务"
+        assert contract["current_stage"] == "reading_memory"
+    finally:
+        reset_current_thread_context(token)
+        agent_state.reset_trace(trace_id)
 
 
 def test_resource_request_becomes_ready_when_artifact_ready():

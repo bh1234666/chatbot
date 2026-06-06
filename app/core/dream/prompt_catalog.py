@@ -170,11 +170,11 @@ Rules:
 D4_WORKSPACE_CLEANUP_PROMPT = """\
 You decide cleanup actions for one agent workspace.
 Return strict JSON:
-{
+{{
   "decisions": [
-    {"task_id": "...", "action": "keep|partial_delete|delete", "reason": "..."}
+    {{"task_id": "...", "action": "keep|partial_delete|delete", "reason": "..."}}
   ]
-}
+}}
 
 Context:
 - Workspace size: {agent_mb} MB for archive={archive}, group={group}.

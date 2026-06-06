@@ -43,7 +43,7 @@ PROCESSES_TOOL_SCHEMA = {
             "  last_heartbeat_age_sec, heartbeat_status(fresh|slow|stale|no_heartbeat_yet),\n"
             "  what_doing(current action), estimated_remaining_sec(estimated seconds remaining),\n"
             "  wait_or_continue(wait=keep waiting|check=inspect actively|kill=termination suggested)\n"
-            "For subprocesses: pid, command\n"
+            "For subprocesses: pid, command, rss_gib, process_tree_count when available\n"
             "\n进程工具用于查看或协作中断自己负责的 helper/子进程。\n"
         ),
         "parameters": {

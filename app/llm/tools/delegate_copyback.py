@@ -155,6 +155,7 @@ def _copy_results_to_main(
     allow_shared_merge: bool = True,
     expected_outputs: list[str] | None = None,
     is_race_aborted_twin: bool = False,
+    suppress_declared_missing: bool = False,
     copy_unexpected_env_files: bool = False,
     helper_kind: str = "",
 ) -> tuple[list[str], dict, list[dict]]:
@@ -212,6 +213,28 @@ def _copy_results_to_main(
         _declared_bases.add(os.path.basename(_decl_norm))
         _declared_by_base.setdefault(os.path.basename(_decl_norm), _decl_norm)
 
+    def _declared_dir_prefix(raw: object) -> str | None:
+        if not isinstance(raw, str):
+            return None
+        norm = raw.replace("\\", "/").strip().lstrip("./")
+        if not norm:
+            return None
+        if norm.endswith("/"):
+            return norm.rstrip("/") + "/"
+        # Treat extensionless _env/_shared/_helpers_shared paths as directory declarations.
+        # This remains conservative for ordinary bare names such as "report" because those
+        # can be legitimate file names without extensions.
+        head = norm.split("/", 1)[0]
+        if "/" in norm and head in {"_env", "_shared", "_helpers_shared"} and not os.path.splitext(os.path.basename(norm))[1]:
+            return norm.rstrip("/") + "/"
+        if norm in {"_env", "_shared", "_helpers_shared"}:
+            return norm.rstrip("/") + "/"
+        return None
+
+    _declared_dir_prefixes = {
+        prefix for prefix in (_declared_dir_prefix(x) for x in declared_files or set()) if prefix
+    }
+
     candidates: list[tuple[str, str, int, bool]] = []  # (name, src_path, size, is_source)
     # Merge helper _helpers_shared/ outputs back into the main workspace.
     # These files keep their paths so later helpers can see shared resources during workspace copy.
@@ -241,6 +264,11 @@ def _copy_results_to_main(
                         _declared_shared_name in _declared_norms
                         or rel_name_posix in _declared_norms
                         or rel_base in _declared_bases
+                        or any(
+                            _declared_shared_name.startswith(_prefix)
+                            or rel_name_posix.startswith(_prefix)
+                            for _prefix in _declared_dir_prefixes
+                        )
                     )
                     if (
                         rel_root == "."
@@ -565,6 +593,37 @@ def _copy_results_to_main(
                     continue
                 _decl_base = os.path.basename(_decl_norm)
                 _decl_ext = os.path.splitext(_decl_base)[1]
+                if allow_shared_merge and helpers_shared_src and _decl_base:
+                    _shared_rel_candidates: list[str] = []
+                    _shared_rel_exact = ""
+                    if _decl_norm.startswith("_helpers_shared/"):
+                        _shared_rel_exact = _decl_norm[len("_helpers_shared/"):]
+                    elif _decl_norm.startswith("_shared/"):
+                        _shared_rel_exact = _decl_norm[len("_shared/"):]
+                    elif "/" in _decl_norm:
+                        _shared_rel_exact = _decl_norm
+                    if _shared_rel_exact:
+                        _shared_src_exact = os.path.join(helpers_shared_src, _shared_rel_exact.replace("/", os.sep))
+                        if os.path.isfile(_shared_src_exact):
+                            _shared_rel_candidates.append(_shared_rel_exact)
+                    if not _shared_rel_candidates and os.path.isdir(helpers_shared_src):
+                        for _root, _dirs, _files in os.walk(helpers_shared_src):
+                            for _file in _files:
+                                if _file == _decl_base:
+                                    _shared_rel_candidates.append(
+                                        os.path.relpath(os.path.join(_root, _file), helpers_shared_src).replace(os.sep, "/")
+                                    )
+                            if len(_shared_rel_candidates) > 1:
+                                break
+                    if len(_shared_rel_candidates) == 1:
+                        _shared_name = f"_helpers_shared/{_shared_rel_candidates[0]}"
+                        if _shared_name in copied:
+                            remaining_missing.remove(_decl)
+                            debug.log(
+                                f"delegate.{task_id}.declared_shared_satisfied",
+                                f"declared output {_decl!r} was already satisfied by merged shared file {_shared_name!r}",
+                            )
+                            continue
                 if _decl_norm.startswith("_helpers_shared/"):
                     _shared_rel = _decl_norm[len("_helpers_shared/"):]
                     _shared_src = os.path.join(helpers_shared_src, _shared_rel.replace("/", os.sep))
@@ -578,6 +637,40 @@ def _copy_results_to_main(
                         debug.log(
                             f"delegate.{task_id}.declared_shared",
                             f"declared shared output {_decl!r} matched helpers_shared file {_shared_rel!r}",
+                        )
+                        continue
+                _decl_dir = _declared_dir_prefix(_decl_norm)
+                if _decl_dir:
+                    _dir_matches: list[tuple[str, str, int, bool]] = []
+                    for cand in candidates:
+                        _cand_norm = str(cand[0] or "").replace("\\", "/").strip().lstrip("./")
+                        if cand[0] in matched_candidate_names:
+                            continue
+                        if _cand_norm.startswith(_decl_dir) and _cand_norm != _decl_dir.rstrip("/"):
+                            _dir_matches.append(cand)
+                    if _decl_dir.startswith("_helpers_shared/"):
+                        _shared_rel_dir = _decl_dir[len("_helpers_shared/"):]
+                        _shared_dir = os.path.join(helpers_shared_src, _shared_rel_dir.replace("/", os.sep))
+                        if os.path.isdir(_shared_dir):
+                            for _root, _dirs, _files in os.walk(_shared_dir):
+                                for _file in _files:
+                                    _shared_src = os.path.join(_root, _file)
+                                    try:
+                                        _shared_size = os.path.getsize(_shared_src)
+                                    except OSError:
+                                        continue
+                                    _rel = os.path.relpath(_shared_src, helpers_shared_src).replace(os.sep, "/")
+                                    _shared_name = f"_helpers_shared/{_rel}"
+                                    if any(_shared_name == existing[0] for existing in _dir_matches):
+                                        continue
+                                    _dir_matches.append((_shared_name, _shared_src, _shared_size, False))
+                    if _dir_matches:
+                        remapped_candidates.extend(_dir_matches)
+                        matched_candidate_names.update(n for n, _, _, _ in _dir_matches)
+                        remaining_missing.remove(_decl)
+                        debug.log(
+                            f"delegate.{task_id}.declared_dir",
+                            f"declared output directory {_decl!r} matched {len(_dir_matches)} file(s)",
                         )
                         continue
                 if not _decl_base or not _decl_ext:
@@ -622,6 +715,12 @@ def _copy_results_to_main(
                 debug.log(
                     f"delegate.{task_id}.twin_aborted_no_output",
                     f"race-aborted twin did not produce {sorted(missing)} "
+                )
+            elif suppress_declared_missing:
+                debug.log(
+                    f"delegate.{task_id}.declared_pending",
+                    f"helper declared {sorted(missing)} but this run is waiting on an external resource; "
+                    f"treat as pending outputs rather than missing copyback files",
                 )
             else:
                 debug.log(

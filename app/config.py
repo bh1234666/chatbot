@@ -126,6 +126,16 @@ class Settings(BaseSettings):
         default=4 * 1024 * 1024 * 1024,
         validation_alias="WORKSPACE_AGENT_MAX_BYTES",
     )
+    # workspace/env 子进程总内存预算。默认 16GiB，防止 benchmark/生成脚本并发撑爆 OS。
+    workspace_run_memory_limit_bytes: int = Field(
+        default=16 * 1024 * 1024 * 1024,
+        validation_alias="WORKSPACE_RUN_MEMORY_LIMIT_BYTES",
+    )
+    # 系统剩余内存低于该值时，主进程会按顺序中断 workspace/env 子进程并把事实返回给 LLM。
+    workspace_run_min_available_memory_bytes: int = Field(
+        default=1024 * 1024 * 1024,
+        validation_alias="WORKSPACE_RUN_MIN_AVAILABLE_MEMORY_BYTES",
+    )
 
     # ── Debug ──
     # 开启时将 debug 事件送给廉价模型总结为一句话状态报告，仅输出状态不输出 payload。
@@ -142,6 +152,13 @@ class Settings(BaseSettings):
     debug_model: str = ""  # 空字符串表示 fallback 到 lite_model_name
     # debug 输出中单个 payload 的最大字符数（防止超长 prompt 把终端刷爆）
     debug_payload_max_chars: int = 8000
+    # 控制台 debug 输出。默认只在 stderr 是交互终端时输出；后台/管道场景下避免同步写 stderr 阻塞请求。
+    debug_console: bool = Field(default=False, validation_alias="DEBUG_CONSOLE")
+    # 是否在 prompt cache shape 日志中写入完整 per-message 结构。质量优化阶段默认保留完整内容。
+    debug_prompt_cache_full_shape: bool = Field(
+        default=True,
+        validation_alias="DEBUG_PROMPT_CACHE_FULL_SHAPE",
+    )
     # debug 输出是否使用 ANSI 颜色（仅当 stderr 是 tty 时生效）
     debug_color: bool = True
 

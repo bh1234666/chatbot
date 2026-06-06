@@ -306,7 +306,8 @@ def test_round2_prompt_keeps_main_thread_as_contract_manager_for_long_source_mat
     prompt = context.ROUND2_SYSTEM_TEMPLATE
 
     assert "Preserve the task contract throughout the toolchain" in prompt
-    assert "record that contract with `agent_state` before fan-out" in prompt
+    assert "Use `task_plan` for active-task goal/plan changes" in prompt
+    assert "use `agent_state` for long or multi-helper work" in prompt
     assert "keep full extracted content in helper-owned evidence files" in prompt
     assert "compact coverage summaries, counts, section maps, line ranges" in prompt
     assert "For source-driven organization or expansion, preserve the user's coverage contract" in prompt
@@ -321,6 +322,19 @@ def test_round2_prompt_keeps_framework_contracts_structural():
     assert "It defines slots and acceptance, not the substantive content of those slots" in prompt
     assert "research claims, citations, conclusions, tables with final values" in prompt
     assert "正文、引用、结论、实验和最终文件交给后续分片 helper" in prompt
+
+
+def test_round2_prompt_separates_history_from_current_mainline():
+    from app.core import context
+
+    prompt = context.ROUND2_SYSTEM_TEMPLATE
+
+    assert "Maintain a current-task mainline" in prompt
+    assert "Conversation history, recent activity, workspace listings" in prompt
+    assert "historical filenames as old/context files" in prompt
+    assert "task_plan(action=\"update\")" in prompt
+    assert "historical task outputs" in prompt
+    assert "framework contracts" in prompt
 
 
 def test_round2_keeps_tool_schema_stable_instead_of_trimming_by_task_signal():
@@ -338,13 +352,17 @@ def test_round2_keeps_toolchain_policy_in_system_and_request_anchor_in_user_tail
     from app.core import orchestrator
 
     src = inspect.getsource(orchestrator._round2)
+    anchor_src = inspect.getsource(orchestrator._build_active_task_contract_anchor)
 
     assert "## Toolchain Continuation" in src
-    assert "## Current Request Contract Anchor" in src
+    assert "_build_active_task_contract_anchor" in src
+    assert "## Active Task Contract Anchor" in anchor_src
     assert "_append_round2_dynamic_user_tail" in src
-    assert "Current user request:" in src
-    assert "full extracts in helper evidence files" in src
-    assert "当前用户需求是本轮工具链和最终计划的验收锚点" in src
+    assert "Current user turn:" in anchor_src
+    assert "The active task is the latest explicit user task unless" in anchor_src
+    assert "current turn is a continuation" in anchor_src
+    assert "prior plan snapshots" in anchor_src
+    assert "当前主线任务不总等于最后一句话" in anchor_src
 
     dynamic_tail_src = inspect.getsource(orchestrator._append_round2_dynamic_user_tail)
     assert "without mutating the system prefix" in dynamic_tail_src

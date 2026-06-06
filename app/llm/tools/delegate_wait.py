@@ -49,6 +49,15 @@ def _normalize_guard_result(result) -> tuple[bool, str, list, list, dict]:
     )
 
 
+def _zero_result_wait_extension_seconds(wait_window_sec: float) -> float:
+    """Return the one-time extension when helpers are alive but no report exists yet."""
+    try:
+        window = float(wait_window_sec)
+    except (TypeError, ValueError):
+        window = 90.0
+    return min(max(window * 2.0, 180.0), 300.0)
+
+
 def _sync_delegate_action_globals() -> None:
     from app.llm.tools import delegate as _delegate
     from app.llm.tools import delegate_actions as _actions
@@ -1100,7 +1109,7 @@ async def _dynamic_wait_loop(
                 and not _deadline_extended
                 and pending  # 还有 helper 在跑
             ):
-                _extend = min(wait_window_sec, 300.0)
+                _extend = _zero_result_wait_extension_seconds(wait_window_sec)
                 deadline = _t.monotonic() + _extend
                 _deadline_extended = True
                 debug.log(

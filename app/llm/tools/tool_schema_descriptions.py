@@ -319,6 +319,26 @@ def _apply_english_schema_descriptions() -> None:
     _set_prop_description(AGENT_STATE_SCHEMA, "reason", "Decision reason for marking a resource request ready, refused, or closed.", "资源请求状态决策原因。")
     _set_prop_description(AGENT_STATE_SCHEMA, "satisfied_by", "Concrete resource paths that satisfy a resource request.", "满足资源请求的路径。")
 
+    _set_tool_description(
+        TASK_PLAN_SCHEMA,
+        (
+            "Maintain the active task plan snapshot for the main process. Use it after reading memory, files, "
+            "continued toolchain context, or agent_state when the active task changes or becomes clearer than the "
+            "latest user turn alone. This updates the thread plan and mirrors compact facts into agent_state; it "
+            "does not verify artifacts or replace final JSON."
+        ),
+        "维护当前主线任务快照；读取记忆、文件或续作证据后可更新。",
+    )
+    _set_prop_description(TASK_PLAN_SCHEMA, "action", "Read or update the active task plan snapshot.", "读取或更新当前任务快照。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "goal", "Resolved active task goal.", "解析后的当前主线任务目标。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "key_points", "Compact current-task facts or acceptance notes.", "当前任务事实或验收要点。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "deliverables", "Expected current-task user-facing deliverables, if known.", "预期本任务交付物。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "acceptance", "Checkable completion criteria for the active task.", "可检查验收标准。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "evidence_required", "Evidence needed before finalizing this active task.", "最终交付前所需证据。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "risks", "Known ambiguity or stale-context risks.", "已知歧义或旧上下文风险。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "current_stage", "Current active-task stage.", "当前阶段。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "reason", "Brief factual reason for the update.", "更新原因。")
+
 
     _set_tool_description(
         DELEGATE_TOOL_SCHEMA,

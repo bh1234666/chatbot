@@ -26,6 +26,12 @@ from app.core.runtime_mode import current_environment
 from app.llm.tools import workspace as ws_tool
 from app.llm.tools.command_risk import analyze_command
 from app.llm.tools import environment_resources as _env_resources
+from app.llm.tools.memory_guard import (
+    WorkspaceMemoryGuard,
+    memory_limit_error,
+    preflight_memory_check,
+    workspace_memory_limits,
+)
 from app.llm.tools.process_utils import _kill_process_tree
 from app.llm.tools.workspace import _translate_windows_command
 
@@ -1998,6 +2004,24 @@ async def _handle_run(args: dict) -> dict:
     _normalized_command = _normalize_env_command(command, cwd)
     command, normalized_from, normalized_temp_script = _normalized_command
     normalized_cleanup_paths = _normalized_command.cleanup_paths
+    _memory_preflight = preflight_memory_check(command)
+    if _memory_preflight is not None:
+        if temp_script_path:
+            try:
+                temp_script_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if normalized_temp_script:
+            try:
+                normalized_temp_script.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for probe_script in normalized_cleanup_paths:
+            try:
+                probe_script.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return _memory_preflight
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     preexec_fn = os.setsid if sys.platform != "win32" else None
     trace_id = debug.current_trace_id() or ""
@@ -2029,6 +2053,20 @@ async def _handle_run(args: dict) -> dict:
         preexec_fn=preexec_fn,
     )
     await env_monitor.attach_process(command_id, proc, proc.pid)
+    _limit_bytes, _min_available_bytes = workspace_memory_limits()
+
+    def _memory_guard_kill_tree(pid: int, _proc=proc) -> None:
+        _kill_process_tree(pid, proc_obj=_proc)
+
+    memory_guard = WorkspaceMemoryGuard(
+        pid=proc.pid,
+        proc_id=f"env:{command_id}",
+        command=command,
+        kill_tree=_memory_guard_kill_tree,
+        limit_bytes=_limit_bytes,
+        min_available_bytes=_min_available_bytes,
+        scope="env_run",
+    ).start()
     communicate_task = asyncio.create_task(proc.communicate())
     abort_task = asyncio.create_task(env_monitor.wait_abort(command_id))
     try:
@@ -2061,34 +2099,52 @@ async def _handle_run(args: dict) -> dict:
             except Exception:
                 pass
     finally:
+        await memory_guard.stop()
         await _cancel_and_drain_task(abort_task)
         if communicate_task.cancelled():
             await _cancel_and_drain_task(communicate_task)
         _close_subprocess_transport(proc)
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
-    result = {
-        "ok": (proc.returncode == 0 and not timed_out and not (status == "aborted")),
-        "command_id": command_id,
-        "command": command,
-        "cwd": _rel_to_root(cwd),
-        "returncode": proc.returncode,
-        "timed_out": timed_out,
-        "aborted": status == "aborted",
-        "elapsed_sec": round(time.monotonic() - start, 3),
-        "stdout": stdout[:30000],
-        "stderr": stderr[:20000],
-        "truncated": len(stdout) > 30000 or len(stderr) > 20000,
-    }
-    fix_hint = _env_run_fix_hint(
-        command,
-        stdout,
-        stderr,
-        python_code_used=bool(temp_script_path),
-        source_text=python_code if temp_script_path else "",
-    )
-    if fix_hint:
-        result["FIX_HINT"] = fix_hint
+    if memory_guard.triggered:
+        status = "memory_limit"
+        timed_out = False
+        result = memory_limit_error(memory_guard.triggered, stdout=stdout, stderr=stderr)
+        result.update({
+            "command_id": command_id,
+            "command": command,
+            "cwd": _rel_to_root(cwd),
+            "returncode": proc.returncode,
+            "timed_out": False,
+            "aborted": False,
+            "elapsed_sec": round(time.monotonic() - start, 3),
+            "stdout": stdout[:30000],
+            "stderr": stderr[:20000],
+            "truncated": len(stdout) > 30000 or len(stderr) > 20000,
+        })
+    else:
+        result = {
+            "ok": (proc.returncode == 0 and not timed_out and not (status == "aborted")),
+            "command_id": command_id,
+            "command": command,
+            "cwd": _rel_to_root(cwd),
+            "returncode": proc.returncode,
+            "timed_out": timed_out,
+            "aborted": status == "aborted",
+            "elapsed_sec": round(time.monotonic() - start, 3),
+            "stdout": stdout[:30000],
+            "stderr": stderr[:20000],
+            "truncated": len(stdout) > 30000 or len(stderr) > 20000,
+        }
+        fix_hint = _env_run_fix_hint(
+            command,
+            stdout,
+            stderr,
+            python_code_used=bool(temp_script_path),
+            source_text=python_code if temp_script_path else "",
+        )
+        if fix_hint:
+            result["FIX_HINT"] = fix_hint
     if normalized_from:
         result["normalized_from"] = "python -c"
         result["script_path"] = normalized_from

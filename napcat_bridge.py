@@ -890,6 +890,17 @@ async def _send_generated_files(
                     "blocked file skipped (not delivered): group=%s name=%s reason=%s",
                     group_id, fname, decision.reason,
                 )
+                try:
+                    await client.post(
+                        f"{NAPCAT_URL}/send_group_msg",
+                        json={
+                            "group_id": int(group_id),
+                            "message": f"[文件未发送] {fname}\n原因：{decision.reason}",
+                        },
+                        timeout=10.0,
+                    )
+                except Exception:
+                    log.exception("blocked-file notice failed: group=%s name=%s", group_id, fname)
             elif local_path and os.path.isfile(local_path):
                 # 其他文件：用本地路径上传到群文件
                 resp = await client.post(

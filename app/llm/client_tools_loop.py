@@ -70,6 +70,48 @@ def _tool_result_explicit_success(result: str) -> bool:
         return False
 
 
+def _tool_result_schema_retry_reason(tool_name: str, result: str) -> str | None:
+    """Return a compact reason when a tool error likely needs its full schema.
+
+    This only observes facts from the tool result. It does not decide the next
+    action for the model; it only makes the full schema temporarily available
+    on the next turn so the model can retry with better local facts.
+    """
+    try:
+        data = json.loads(result) if isinstance(result, str) else result
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("ok") is True or data.get("success") is True:
+        return None
+    error_code = str(data.get("error") or data.get("code") or "").strip().lower()
+    if error_code in {
+        "tool_not_available_in_this_context",
+        "toolchain_already_continued_this_round",
+    }:
+        return None
+    text_parts: list[str] = []
+    for key in (
+        "error", "code", "message", "hint", "fix_hint", "delegate_hint",
+        "args_parse_error", "validation_error", "reason",
+    ):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            text_parts.append(value.strip())
+    haystack = " ".join(text_parts).lower()
+    schema_terms = (
+        "schema", "argument", "arguments", "parameter", "parameters",
+        "required", "missing", "invalid action", "unknown action",
+        "validation", "validate", "json", "enum", "unexpected field",
+        "tool_call_args_json_broken", "invalid_action", "unknown_action",
+    )
+    if error_code == "tool_call_args_json_broken" or any(term in haystack for term in schema_terms):
+        reason = error_code or haystack[:160] or f"{tool_name} argument error"
+        return reason[:300]
+    return None
+
+
 def _artifact_acceptance_key(tool_name: str, args: dict, result: str) -> str | None:
     """Return a stable artifact key for repeated artifact-acceptance checks.
 
@@ -1112,19 +1154,19 @@ async def chat_with_tools_loop(
     # 实测 trace 822f2aaa: bptree helper iter 80+ 时上下文 400-500K,模型对早期
     # decisions / 自己的 todo list / 自己写的代码"看不见"——这正是 0.6 MRCR 区段。
     # 旧阈值让上下文飙到 600K+ 才压缩,等模型已经"失明"才救场。
-    # 新阈值放在绿区(≤256K)末端,主动维护:
-    #   _PROACTIVE: 100K — 提早开始软压(老 tool result fold)
-    #   _SOFT:     180K — 常规压缩,target ~120K
-    #   _HARD:     250K — 紧急压缩,target ~150K (退出红区)
-    #   _PANIC:    400K — 抢救,target ~200K (兜底,不该常态触发)
+    # 新阈值放在 256K 基准内主动维护:
+    #   _PROACTIVE: 60K  — 提早开始软压(老 tool result fold)
+    #   _SOFT:     120K — 常规压缩,target ~90K
+    #   _HARD:     180K — 紧急压缩,target ~110K
+    #   _PANIC:    240K — 256K 前最后抢救,target ~140K
     # 1M 物理上限只在高资源 helper / veryhard (Think Max) 等少数场景接近。
     # 2026-05-11 实测调整 (主进程起始 53KB, 跑长后工具链膨胀快):
-    # PROACTIVE 从 100K → 80K, 让主进程跑 ~5 iter 就开始压老 tool result,
-    # 给注入的 ledger/recall/hint 消息腾空间,工具链是主要压缩目标(对话不动)。
-    _TOKEN_BUDGET_PROACTIVE = 80_000    # 80K: 主进程跑 5 iter 后即触发, 压老工具链
-    _TOKEN_BUDGET_SOFT = 180_000        # 软警戒线 — 常规压缩
-    _TOKEN_BUDGET_HARD = 250_000        # 主动 emergency compact (退红区)
-    _TOKEN_BUDGET_PANIC = 400_000       # 兜底紧急,极端情况
+    # 2026-06-06: 用户将主进程目标上限调为 256K,因此把所有门限继续前移。
+    # 压缩仍先走语义 fold / 冗余 fold, emergency compact 只作为后段恢复。
+    _TOKEN_BUDGET_PROACTIVE = 60_000     # 早期软压老工具链
+    _TOKEN_BUDGET_SOFT = 120_000         # 软警戒线 — 常规压缩
+    _TOKEN_BUDGET_HARD = 180_000         # 主动 emergency compact
+    _TOKEN_BUDGET_PANIC = 240_000        # 256K 基准前的兜底抢救
 
     # 2026-05-12 P44: 工具结果预算 (参考 Claude Code applyToolResultBudget)
     # 不同 tool 的合理输出上限不同:
@@ -1693,21 +1735,25 @@ async def chat_with_tools_loop(
                 _fold_completed_task_window(msgs)
             except Exception as e:
                 debug.log("llm.tools.task_boundary_fold.error", str(e))
+            try:
+                _soft_compact_redundant_tool_results(msgs)
+            except Exception:
+                log.exception("pre-budget soft compact failed (non-fatal)")
 
             est_tokens = _estimate_msgs_token_size(msgs)
             # 2026-05-11 A1: 四级渐进压缩,不硬截只软退化
             if est_tokens >= _TOKEN_BUDGET_PANIC:
                 debug.warn(
                     f"token budget PANIC: est={est_tokens} >= {_TOKEN_BUDGET_PANIC} "
-                    f"(检索红区上限); emergency compact target 200K"
+                    f"(near 256K baseline); emergency compact target 140K"
                 )
-                _emergency_compact_msgs(msgs, target_token_budget=200_000)
+                _emergency_compact_msgs(msgs, target_token_budget=140_000)
             elif est_tokens >= _TOKEN_BUDGET_HARD:
                 debug.warn(
                     f"token budget HARD: est={est_tokens} >= {_TOKEN_BUDGET_HARD} "
-                    f"(绿区末端); emergency compact target 150K"
+                    f"(above 256K baseline comfort zone); emergency compact target 110K"
                 )
-                _emergency_compact_msgs(msgs, target_token_budget=150_000)
+                _emergency_compact_msgs(msgs, target_token_budget=110_000)
             elif est_tokens >= _TOKEN_BUDGET_SOFT:
                 # 软警戒线 — 激进 fold (keep_recent 收到 2,force size 降到 8K)
                 _fold_old_tool_messages(msgs, keep_recent_iters=2,
@@ -1747,7 +1793,7 @@ async def chat_with_tools_loop(
                 )
                 if _should_routine_fold:
                     _fold_n = _fold_old_tool_messages(msgs, keep_recent_iters=4,
-                                                       force_fold_size=24 * 1024)
+                                                       force_fold_size=20 * 1024)
                     _last_routine_fold_est = est_tokens
                     if _fold_n and current_helper_proc_id() is None:
                         debug.log(
@@ -1879,8 +1925,22 @@ async def chat_with_tools_loop(
             try:
                 from app.core import toolchain_cache as _toolchain_cache
                 _tools_for_iter = _toolchain_cache.filter_tools_for_trace(tools)
+                _schema_retry_guidance = _toolchain_cache.tool_schema_retry_guidance(tools)
             except Exception:
                 _tools_for_iter = tools
+                _schema_retry_guidance = ""
+            if _schema_retry_guidance:
+                _msgs_for_iter = msgs + [{
+                    "role": "user",
+                    "content": _schema_retry_guidance,
+                }]
+                debug.log(
+                    "llm.tools.schema_retry_guidance",
+                    f"injecting transient full-schema guidance at iter {it} "
+                    f"(chars={len(_schema_retry_guidance)})",
+                )
+            else:
+                _msgs_for_iter = msgs
             _tool_choice_for_iter = None
             if _force_delegate_for_retry_gap and _tools_for_iter:
                 has_delegate_tool = any(
@@ -1908,7 +1968,7 @@ async def chat_with_tools_loop(
                     the_client=_the_client,
                     model=model,
                     provider=model_spec.provider if model_spec else None,
-                    msgs=msgs,
+                    msgs=_msgs_for_iter,
                     tools=_tools_for_iter,
                     extra_body=extra_body,
                     abort_event=abort_event,
@@ -1970,13 +2030,13 @@ async def chat_with_tools_loop(
                 )
                 _tag = _log_nonstream_prompt_shape(
                     suffix="legacy_nonstream",
-                    call_messages=msgs,
+                    call_messages=_msgs_for_iter,
                     call_tools=_tools_for_iter,
                 )
                 _resp = await _retry(
                     lambda: _the_client.chat.completions.create(
                         model=model,
-                        messages=msgs,
+                        messages=_msgs_for_iter,
                         tools=_tools_for_iter,
                         stream=False,
                         extra_body=extra_body,
@@ -2038,7 +2098,7 @@ async def chat_with_tools_loop(
                             "llm.tools.recovery_attempt",
                             f"context length err -> emergency compact + retry iter {it}"
                         )
-                        new_size = _emergency_compact_msgs(msgs, target_token_budget=500_000)
+                        new_size = _emergency_compact_msgs(msgs, target_token_budget=160_000)
                         debug.log(
                             "llm.tools.context_recovery",
                             f"compacted msgs to ~{new_size} tokens; retrying iter {it}",
@@ -2122,7 +2182,7 @@ async def chat_with_tools_loop(
                     if is_likely_schema_err and _tools_for_iter:
                         debug.log(
                             "llm.tools.recovery_attempt",
-                            f"4xx with tools -> retry without tools iter {it} "
+                            f"4xx/schema with compact tools -> retry without tools iter {it} "
                             f"(model will output plan directly)"
                         )
                         try:
@@ -2139,7 +2199,6 @@ async def chat_with_tools_loop(
                                 lambda: _fb_client.chat.completions.create(
                                     model=model,
                                     messages=msgs,
-                                    # 不带 tools,让模型直接输出 plan JSON
                                     stream=False,
                                     extra_body=extra_body,
                                 ),
@@ -2153,7 +2212,6 @@ async def chat_with_tools_loop(
                                 f"no-tools fallback also failed at iter {it}: "
                                 f"{type(exc2).__name__}: {str(exc2)[:200]}"
                             )
-                            # 都失败,让原异常往上冒
                             raise exc
 
                     debug.log(
@@ -3247,6 +3305,23 @@ async def chat_with_tools_loop(
                 results.append(_rr)
             if results:
                 _executed_tool_result_count += len(results)
+                try:
+                    from app.core import toolchain_cache as _toolchain_cache
+                    _schema_retry_reasons: dict[str, str] = {}
+                    _schema_success_tools: set[str] = set()
+                    for _, _name, _result, _args in results:
+                        if _tool_result_explicit_success(_result):
+                            _schema_success_tools.add(_name)
+                            continue
+                        _reason = _tool_result_schema_retry_reason(_name, _result)
+                        if _reason:
+                            _schema_retry_reasons[_name] = _reason
+                    for _name in _schema_success_tools.difference(_schema_retry_reasons.keys()):
+                        _toolchain_cache.mark_tool_schema_success(_name)
+                    for _name, _reason in _schema_retry_reasons.items():
+                        _toolchain_cache.mark_tool_schema_retry(_name, _reason)
+                except Exception:
+                    log.exception("tool schema expansion state update failed (non-fatal)")
                 if task_id is not None:
                     _read_like_tools = {
                         "read_file",
@@ -3993,9 +4068,18 @@ async def chat_with_tools_loop(
                 """过滤 helper 内部摘要 / 元数据 / 共享脚手架,这些不是用户 deliverable。"""
                 if not name:
                     return True
+                base = name.replace("\\", "/").split("/")[-1].lower()
                 # 隐藏元数据文件:.helper_xxx_full_report.txt / .helpers_displayed_name.json /
                 # .user_fetched_files.json / .rewrite_count.json / .session_manifest.json 等
                 if name.startswith("."):
+                    return True
+                if base.startswith("."):
+                    return True
+                # Tool-layer extraction is not an LLM decision, so keep it conservative
+                # around helper probes and generated command scripts.
+                if base.startswith("helper_"):
+                    return True
+                if _re.match(r"^_py_cmd_[0-9a-f]{6,}\.py$", base):
                     return True
                 # 共享脚手架,不是产物
                 if name.startswith("_helpers_shared/") or name.startswith("_shared/"):
@@ -4004,27 +4088,69 @@ async def chat_with_tools_loop(
                     return True
                 return False
 
+            _file_ext_re = _re.compile(
+                r"\.(?:c|cpp|h|hpp|py|md|txt|json|docx|pptx|xlsx|pdf|png|jpg|jpeg|gif|webp|bmp|svg|html|css|js|ts|zip|csv|wav|mp3|ogg|m4a)$",
+                _re.IGNORECASE,
+            )
+
+            def _add_recent_file(value: object) -> None:
+                if not isinstance(value, str):
+                    return
+                text = value.strip().strip("`'\"")
+                if not text or not _file_ext_re.search(text):
+                    return
+                bn = text.replace("\\", "/").split("/")[-1]
+                if not _is_internal_file(bn):
+                    recent_files.append(bn)
+
+            def _walk_file_values(value: object, *, key: str = "") -> None:
+                file_keys = {
+                    "saved_path", "path", "file", "filename", "output", "outputs",
+                    "output_file", "output_files", "files", "deliverable",
+                    "deliverables", "committed_files",
+                }
+                if isinstance(value, dict):
+                    for k, v in value.items():
+                        child_key = str(k)
+                        if child_key in file_keys:
+                            if isinstance(v, list):
+                                for item in v:
+                                    _walk_file_values(item, key=child_key)
+                            else:
+                                _walk_file_values(v, key=child_key)
+                        elif isinstance(v, (dict, list)):
+                            _walk_file_values(v, key=child_key)
+                    return
+                if isinstance(value, list):
+                    for item in value:
+                        _walk_file_values(item, key=key)
+                    return
+                if key in file_keys:
+                    _add_recent_file(value)
+
             recent_files = []
             for m in msgs[-30:]:
                 if m.get("role") != "tool":
                     continue
                 content = str(m.get("content", ""))
+                try:
+                    parsed_tool_result = json.loads(content)
+                except Exception:
+                    parsed_tool_result = None
+                if parsed_tool_result is not None:
+                    _walk_file_values(parsed_tool_result)
                 for match in _re.finditer(r'"saved_path":\s*"([^"]+)"', content):
-                    bn = match.group(1).split("/")[-1].split("\\")[-1]
-                    if not _is_internal_file(bn):
-                        recent_files.append(bn)
+                    _add_recent_file(match.group(1))
                 if "committed_files" in content or '"files"' in content or '"outputs"' in content:
                     for match in _re.finditer(
                         r'"(?:committed_files|files|outputs)":\s*\[([^\]]+)\]',
                         content,
                     ):
                         for file_match in _re.finditer(
-                            r'"([^"]+\.(?:c|cpp|h|py|md|txt|json|docx|pptx|xlsx|pdf|png|jpg|svg|html|css|js|ts))"',
+                            r'"([^"]+\.(?:c|cpp|h|hpp|py|md|txt|json|docx|pptx|xlsx|pdf|png|jpg|jpeg|gif|webp|bmp|svg|html|css|js|ts|zip|csv|wav|mp3|ogg|m4a))"',
                             match.group(1),
                         ):
-                            bn = file_match.group(1).split("/")[-1].split("\\")[-1]
-                            if not _is_internal_file(bn):
-                                recent_files.append(bn)
+                            _add_recent_file(file_match.group(1))
             recent_files = list(dict.fromkeys(recent_files))[:8]
 
             # 3. 提取最近 helper 报告(若有 delegate 调用,helper 的 report 是核心分析)

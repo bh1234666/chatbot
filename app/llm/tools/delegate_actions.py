@@ -3773,6 +3773,11 @@ async def handle_delegate(
         response["_task_status"] = (
             "incomplete" if helpers_still_running or incomplete_count else "no_successful_helper"
         )
+        response["_ok_field_meaning"] = (
+            "ok=true means the delegate tool returned this runtime snapshot. "
+            "task_ok=false means the delegated work is not yet a verified completed task.\n\n"
+            "ok 表示工具返回了运行快照；task_ok 才表示委托任务是否完成。"
+        )
         response["_evidence_policy"] = (
             "Helper reports with ok=false, interrupted=true, stuck=true, "
             "terminal_reason=resource_required, terminal_reason=quality_blocked, blocking quality warnings, "

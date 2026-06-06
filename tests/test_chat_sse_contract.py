@@ -1175,7 +1175,7 @@ async def test_round2_sends_static_system_prefix_before_dynamic_user_tail(monkey
     )
     assert "## Toolchain Continuation" in stable_prefix
     assert "## You are the orchestrator, not the worker" in stable_prefix
-    assert "Current Request Contract Anchor" not in stable_prefix
+    assert "Active Task Contract Anchor" not in stable_prefix
     assert "A.csv" not in stable_prefix
-    assert "Current Request Contract Anchor" in dynamic_tail
+    assert "Active Task Contract Anchor" in dynamic_tail
     assert "A.csv" in dynamic_tail

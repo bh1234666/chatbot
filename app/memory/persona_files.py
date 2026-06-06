@@ -34,6 +34,16 @@ class PersonaFile:
     content: str     # 完整人设文本
 
 
+_ROUND2_SECTION_HEADERS = (
+    "round2 behavior",
+    "round2 planning",
+    "round2 instructions",
+    "round2 注入",
+    "round2 行为",
+    "round2 规划",
+)
+
+
 def _split_meta_content(text: str) -> tuple[dict[str, str], str]:
     """解析文件头部 metadata 和正文。"""
     meta: dict[str, str] = {}
@@ -49,6 +59,61 @@ def _split_meta_content(text: str) -> tuple[dict[str, str], str]:
                 key, _, val = line.partition(":")
                 meta[key.strip()] = val.strip()
     return meta, content.strip()
+
+
+def _markdown_section(content: str, header_names: tuple[str, ...]) -> str:
+    """Return a Markdown `## ...` section body by normalized heading name."""
+    text = content or ""
+    if not text.strip():
+        return ""
+    wanted = {h.strip().lower() for h in header_names if h.strip()}
+    pattern = re.compile(r"(?m)^(?P<marks>#{2,6})\s*(?P<title>.+?)\s*$")
+    matches = list(pattern.finditer(text))
+    for idx, match in enumerate(matches):
+        title = re.sub(r"\s+", " ", match.group("title").strip()).lower()
+        if title not in wanted:
+            continue
+        level = len(match.group("marks"))
+        start = match.end()
+        end = len(text)
+        for next_match in matches[idx + 1:]:
+            if len(next_match.group("marks")) <= level:
+                end = next_match.start()
+                break
+        return text[start:end].strip()
+    return ""
+
+
+def _strip_markdown_sections(content: str, header_names: tuple[str, ...]) -> str:
+    """Remove selected Markdown sections for robust stale persona matching."""
+    text = content or ""
+    if not text.strip():
+        return text
+    wanted = {h.strip().lower() for h in header_names if h.strip()}
+    pattern = re.compile(r"(?m)^(?P<marks>#{2,6})\s*(?P<title>.+?)\s*$")
+    matches = list(pattern.finditer(text))
+    remove_ranges: list[tuple[int, int]] = []
+    for idx, match in enumerate(matches):
+        title = re.sub(r"\s+", " ", match.group("title").strip()).lower()
+        if title not in wanted:
+            continue
+        level = len(match.group("marks"))
+        start = match.start()
+        end = len(text)
+        for next_match in matches[idx + 1:]:
+            if len(next_match.group("marks")) <= level:
+                end = next_match.start()
+                break
+        remove_ranges.append((start, end))
+    if not remove_ranges:
+        return text
+    out: list[str] = []
+    cursor = 0
+    for start, end in remove_ranges:
+        out.append(text[cursor:start])
+        cursor = end
+    out.append(text[cursor:])
+    return "\n".join(part.rstrip() for part in "".join(out).splitlines()).strip()
 
 
 def list_personas() -> list[PersonaMeta]:
@@ -202,7 +267,18 @@ def _matches_persona_content(target: str, raw: str, content: str) -> bool:
     if not target:
         return False
     target_tokens = _persona_ascii_tokens(target)
-    for candidate in [raw, content, *_mojibake_variants(raw), *_mojibake_variants(content)]:
+    stripped_raw = _strip_markdown_sections(raw, _ROUND2_SECTION_HEADERS)
+    stripped_content = _strip_markdown_sections(content, _ROUND2_SECTION_HEADERS)
+    for candidate in [
+        raw,
+        content,
+        stripped_raw,
+        stripped_content,
+        *_mojibake_variants(raw),
+        *_mojibake_variants(content),
+        *_mojibake_variants(stripped_raw),
+        *_mojibake_variants(stripped_content),
+    ]:
         normalized = _persona_match_target(candidate)
         if not normalized:
             continue
@@ -216,6 +292,83 @@ def _matches_persona_content(target: str, raw: str, content: str) -> bool:
         if target_tokens and len(target_tokens & candidate_tokens) >= 3:
             return True
     return False
+
+
+def _round2_instruct_from_raw(raw: str, default: str = "") -> str:
+    meta, content = _split_meta_content(raw or "")
+    direct = (meta.get("round2_instruct") or meta.get("round2_instruction") or "").strip()
+    if direct:
+        return direct
+    section = _markdown_section(content, _ROUND2_SECTION_HEADERS)
+    return section.strip() or default
+
+
+def _semantic_round2_fallback(content: str) -> str:
+    """Extract behavior-relevant sections without arbitrary prefix truncation."""
+    selected: list[str] = []
+    for header in (
+        "identity",
+        "mission",
+        "operating style",
+        "operating path",
+        "character",
+        "personality",
+        "style",
+        "boundaries",
+        "evidence standard",
+        "reporting style",
+        "中文概括",
+        "chinese summary",
+    ):
+        section = _markdown_section(content, (header,))
+        if section:
+            selected.append(f"## {header.title()}\n{section}")
+    text = "\n\n".join(selected).strip()
+    if len(text) > 1800:
+        # This fallback is a semantic section cap, not a first-N-chars persona slice.
+        text = text[:1800].rsplit("\n", 1)[0].rstrip()
+    return text
+
+
+def persona_round2_instruct_by_content(persona: str, default: str = "") -> str:
+    """Resolve the persona's Round2 planning/behavior rules.
+
+    Persona body text is for Round3 voice. Round2 needs a compact behavior
+    contract: willingness boundaries, delegation attitude, status/progress style,
+    and refusal policy. Prefer a dedicated `## Round2 Behavior` section in the
+    persona file; fall back to semantic sections only for custom/stale personas.
+    """
+    if not persona:
+        return default
+    raw_direct = _round2_instruct_from_raw(persona, "")
+    if raw_direct:
+        return raw_direct
+
+    meta, content = _split_meta_content(persona)
+    if _PERSONAS_DIR.exists():
+        pf = _load_persona_by_declared_identity(persona, meta, content)
+        if pf:
+            try:
+                raw = (_PERSONAS_DIR / pf.meta.filename).read_text(encoding="utf-8")
+                resolved = _round2_instruct_from_raw(raw, "")
+                if resolved:
+                    return resolved
+            except Exception:
+                pass
+        target = _persona_match_target(_strip_markdown_sections(content or persona, _ROUND2_SECTION_HEADERS))
+        if target:
+            for f in sorted(_PERSONAS_DIR.glob("*.md")):
+                try:
+                    raw = f.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+                _, file_content = _split_meta_content(raw)
+                if _matches_persona_content(target, raw, file_content):
+                    resolved = _round2_instruct_from_raw(raw, "")
+                    if resolved:
+                        return resolved
+    fallback = _semantic_round2_fallback(content or persona)
+    return fallback or default
 
 
 def resolve_persona_file_by_content(persona: str) -> PersonaFile | None:

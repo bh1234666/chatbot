@@ -66,6 +66,9 @@ def test_voice_instruct_resolves_from_persona_file_metadata_when_body_only():
     assert persona_files.persona_voice_instruct_by_content(pf.content) == (
         "male, young adult, moderate pitch"
     )
+    round2 = persona_files.persona_round2_instruct_by_content(pf.content)
+    assert "Accept normal user tasks" in round2
+    assert "execution-focused collaborator" not in round2
 
 
 def test_voice_instruct_resolves_from_short_identity_persona():
@@ -85,6 +88,7 @@ def test_voice_instruct_resolves_from_short_identity_persona():
     )
     assert persona_files.persona_voice_preference_by_content(short_persona, -1) == 0.2
     assert persona_files.persona_intermediate_feedback_preference_by_content(short_persona, -1) == 0.9
+    assert "Accept normal user tasks" in persona_files.persona_round2_instruct_by_content(short_persona)
 
 
 def test_persona_label_resolves_current_file_for_stale_archive_body():
@@ -107,3 +111,15 @@ def test_persona_label_resolves_current_file_for_stale_archive_body():
     )
     assert persona_files.persona_voice_preference_by_content(pf.content, -1) == 0.5
     assert persona_files.persona_intermediate_feedback_preference_by_content(pf.content, -1) == 0.1
+
+
+def test_round2_persona_rules_resolve_dedicated_behavior_section():
+    from app.memory import persona_files
+
+    tough = persona_files.load_persona("嘴臭混混")
+    assert tough is not None
+    round2 = persona_files.persona_round2_instruct_by_content(tough.content)
+
+    assert "normally refuses direct orders" in round2
+    assert "30-year-old street tough" not in round2
+    assert len(round2) < len(tough.content)

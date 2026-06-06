@@ -127,6 +127,87 @@ def _append_round2_dynamic_user_tail(messages: list[dict], content: str) -> None
     messages.append({"role": "user", "content": block})
 
 
+def _clip_middle_text(text: str, limit: int) -> str:
+    """Keep the start and end of long task text while preserving a fixed budget."""
+    value = (text or "").strip()
+    if limit <= 0 or len(value) <= limit:
+        return value
+    head = max(1, limit // 2)
+    tail = max(1, limit - head - 64)
+    return value[:head] + "\n[...middle omitted for task-anchor budget...]\n" + value[-tail:]
+
+
+def _build_active_task_contract_anchor(
+    *,
+    current_user_turn: str,
+    tendency: TendencyAnalysis | None = None,
+    prior_plan: ResponsePlan | None = None,
+) -> str:
+    """Build the mandatory active-task anchor injected into every Round 2 run.
+
+    The active task is not always the latest user text: a turn like "continue",
+    "fix it", or "finish the previous report" depends on prior plan/toolchain
+    evidence. This block states that fact without symbolically deciding the
+    task for the model.
+    """
+    current_user_turn = _clip_middle_text(current_user_turn or "", 5200)
+    sections: list[str] = [
+        "## Active Task Contract Anchor",
+        "Mandatory focus block for this planning run. Preserve this as the active-task reference when using tools, delegating helpers, continuing cached work, reviewing deliverables, and writing final JSON.",
+        "",
+        "Current user turn:",
+        current_user_turn or "(empty current user turn)",
+        "",
+        "Active task resolution facts:",
+        "- The active task is the latest explicit user task unless the current turn is a continuation, correction, retry, completion, or follow-up instruction.",
+        "- For short follow-ups such as continue, fix, retry, finish, complete the previous task, or complete the task from when X happened, resolve the active task from this turn plus prior plan snapshots, toolchain cache, agent_state contracts, recent execution records, and concrete tool evidence.",
+        "- Conversation history, recent activity, workspace listings, and previous delivery lists are background evidence. They can identify the active task when the user refers back to it, but they do not add deliverables by themselves.",
+        "- Before final JSON, compare deliverables and key_points against the resolved active task and the verified evidence for that task.",
+    ]
+
+    plan_bits: list[str] = []
+    if prior_plan is not None:
+        if prior_plan.intent:
+            plan_bits.append("intent=" + str(prior_plan.intent)[:600])
+        if prior_plan.key_points:
+            plan_bits.append(
+                "key_points=" + json.dumps(list(prior_plan.key_points)[:12], ensure_ascii=False)
+            )
+        if prior_plan.deliverables:
+            plan_bits.append(
+                "deliverables=" + json.dumps(list(prior_plan.deliverables)[:12], ensure_ascii=False)
+            )
+    if plan_bits:
+        sections.extend(["", "Prior active-task plan snapshot:", *plan_bits])
+
+    if tendency is not None:
+        try:
+            tendency_facts = {
+                "complexity": getattr(tendency, "complexity", None),
+                "needs_tools": getattr(tendency, "needs_tools", None),
+                "needs_recall": getattr(tendency, "needs_recall", None),
+                "parallelizable": getattr(tendency, "parallelizable", None),
+                "is_coding_task": getattr(tendency, "is_coding_task", None),
+                "is_document_task": getattr(tendency, "is_document_task", None),
+                "rationale": getattr(tendency, "rationale", None),
+            }
+            tendency_facts = {k: v for k, v in tendency_facts.items() if v not in (None, "", [])}
+            if tendency_facts:
+                sections.extend([
+                    "",
+                    "Round1 routing facts:",
+                    json.dumps(tendency_facts, ensure_ascii=False, sort_keys=True)[:1200],
+                ])
+        except Exception:
+            pass
+
+    sections.extend([
+        "",
+        "当前主线任务不总等于最后一句话；如果当前回合是继续、修复、重试、完成上次/某时任务，就用当前回合结合 prior plan、toolchain cache、agent_state、最近执行记录和工具证据确定主线。历史文件名和旧交付清单只是证据，不会自动成为本次交付物。",
+    ])
+    return "\n".join(sections)
+
+
 def _insert_round2_system_messages_before_user(
     messages: list[dict],
     system_messages: list[dict],
@@ -1438,18 +1519,22 @@ async def _round2(
     _round2_system_messages: list[dict] = []
 
     if persona:
-        # persona 通常很长(几千字),round2 不需要全部 — 只要**核心倾向 + 拒绝边界**。
-        # 取前 ~600 字作为精简版。
-        _persona_excerpt = _strip_voice_instruct((persona or "").strip())
-        if len(_persona_excerpt) > 600:
-            _persona_excerpt = _persona_excerpt[:600] + "..."
+        # Round2 不消费完整人设正文,而消费 persona 文件中专门写给规划层的行为准则。
+        # 这样避免把叙事设定/口癖硬截断成决策依据,也让拒绝边界和执行倾向更稳定。
+        try:
+            from app.memory.persona_files import persona_round2_instruct_by_content
+            _persona_round2_rules = persona_round2_instruct_by_content(persona or "")
+        except Exception:
+            _persona_round2_rules = ""
+        if not _persona_round2_rules:
+            _persona_round2_rules = _strip_voice_instruct((persona or "").strip())
         _round2_system_messages.append({
             "role": "system",
             "content": (
                 "## Highest-Priority Persona Decision\n"
                 "\n"
-                "### Persona Core\n"
-                f"{_persona_excerpt}\n"
+                "### Persona Round2 Behavior Rules\n"
+                f"{_persona_round2_rules}\n"
                 "\n"
                 "### Decision Order\n"
                 "Before planning tools, decide from the persona whether this character would handle the request and what tone it would use. "
@@ -1502,46 +1587,14 @@ async def _round2(
     })
     _insert_round2_system_messages_before_user(msgs, _round2_system_messages)
 
-    _current_request_anchor = (user_message_text or "").strip()
-    if _current_request_anchor:
-        if len(_current_request_anchor) > 6000:
-            _current_request_anchor = (
-                _current_request_anchor[:3000]
-                + "\n[...current request middle omitted for prompt stability...]\n"
-                + _current_request_anchor[-2500:]
-            )
-        _anchor_plan_bits: list[str] = []
-        _intent = str(getattr(tendency, "intent", "") or "").strip()
-        if _intent:
-            _anchor_plan_bits.append(f"intent={_intent[:600]}")
-        _key_points = list(getattr(tendency, "key_points", None) or [])
-        if _key_points:
-            _anchor_plan_bits.append(
-                "key_points=" + json.dumps(_key_points[:12], ensure_ascii=False)
-            )
-        _deliverables = list(getattr(tendency, "deliverables", None) or [])
-        if _deliverables:
-            _anchor_plan_bits.append(
-                "deliverables=" + json.dumps(_deliverables[:12], ensure_ascii=False)
-            )
-        _anchor_plan_text = (
-            "\n\nCurrent plan snapshot:\n" + "\n".join(_anchor_plan_bits)
-            if _anchor_plan_bits else ""
-        )
-        _append_round2_dynamic_user_tail(
-            msgs,
-            (
-                "## Current Request Contract Anchor\n"
-                "This is the current user request that all tool use, helper delegation, recovery, and final synthesis must satisfy. "
-                "Treat earlier history, helper convenience, tool output volume, and previous-round artifacts as supporting evidence only. "
-                "Before each milestone handoff and before final JSON, compare ready evidence, coverage summaries, artifacts, and unresolved gaps against this request. "
-                "For long source material, keep full extracts in helper evidence files and bring compact summaries, line ranges, paths, counts, and acceptance status back to the main thread.\n\n"
-                "Current user request:\n"
-                f"{_current_request_anchor}"
-                f"{_anchor_plan_text}\n\n"
-                "当前用户需求是本轮工具链和最终计划的验收锚点；长材料留在 helper 证据文件，主线程只接收摘要、路径、范围、数量和覆盖状态。"
-            ),
-        )
+    _append_round2_dynamic_user_tail(
+        msgs,
+        _build_active_task_contract_anchor(
+            current_user_turn=user_message_text or "",
+            tendency=tendency,
+            prior_plan=prior_plan,
+        ),
+    )
 
     # _dispatcher 只是为了把 (archive_id, group_id, user_id, workspace_dir)
     # 注入到工具上下文(避免暴露给模型)。统计/反馈/升级判断都不在这里。
@@ -2029,6 +2082,37 @@ async def _round2(
             role_label="main",
         )
         _thread_token = _proc_set_thread_ctx(_thread_ctx)
+        try:
+            from app.core import agent_state as _agent_state
+            _active_goal_seed = (user_message_text or _initial_intent or "current active task").strip()
+            _agent_state.upsert_task_contract(
+                trace_id=_trace_id,
+                task_id="main",
+                goal=_active_goal_seed[:1200],
+                acceptance=[
+                    "Resolve the active task from the current user turn plus prior plan/toolchain/agent_state evidence when the turn is a continuation or follow-up.",
+                    "Keep history, workspace listings, and previous delivery lists as evidence; do not let them expand deliverables by themselves.",
+                    "List only user-facing artifacts verified against the resolved active task.",
+                ],
+                evidence_required=[
+                    "current user turn",
+                    "prior plan/toolchain/agent_state facts when the turn refers back",
+                    "verified tool or helper evidence for final deliverables",
+                ],
+                deliverables=_initial_dlv,
+                risks=[
+                    "Short continuation turns may need prior task context.",
+                    "Historical filenames can look like current deliverables if not compared with the active task.",
+                ],
+                current_stage="round2_started",
+            )
+            debug.log(
+                "agent_state.active_task.seeded",
+                "seeded mandatory active-task contract",
+                {"goal": _active_goal_seed[:300], "prior_deliverables": _initial_dlv[:10]},
+            )
+        except Exception:
+            log.exception("agent_state active-task seed failed (non-fatal)")
 
         await _preflight_fresh_ocr_helper()
         _toolchain_start_idx = len(msgs)
@@ -2464,7 +2548,7 @@ async def _round2(
                         )
                         log.info(
                             "full chain upgrade (%s priority): %s",
-                            trigger_priority, second.get("reason"),
+                            trigger_priority, str(second.get("reason", ""))[:200],
                         )
                     else:
                         debug.log(
@@ -2474,7 +2558,7 @@ async def _round2(
                         )
                         log.info(
                             "full chain assessment (%s) declined upgrade: %s",
-                            trigger_priority, second.get("reason", ""),
+                            trigger_priority, str(second.get("reason", ""))[:200],
                         )
                 except Exception:
                     log.exception(
@@ -2670,6 +2754,25 @@ async def _round2(
         )
 
     _apply_user_output_constraints(plan, user_message_for_fallback)
+    try:
+        await _proc_update_thread_plan(
+            intent=plan.intent or "",
+            key_points=list(plan.key_points or []),
+            deliverables=list(plan.deliverables or []),
+        )
+        from app.core import agent_state as _agent_state
+        _agent_state.upsert_task_contract(
+            trace_id=debug.current_trace_id() or "unknown",
+            task_id="main",
+            goal=(plan.intent or user_message_text or user_message_for_fallback or "current active task")[:1200],
+            acceptance=list(plan.key_points or [])[:12],
+            evidence_required=None,
+            deliverables=list(plan.deliverables or []),
+            risks=None,
+            current_stage="round2_final_plan",
+        )
+    except Exception:
+        log.exception("active task final plan sync failed (non-fatal)")
 
     debug.log("round2.checkpoint", "_round2 returning plan")
     return plan

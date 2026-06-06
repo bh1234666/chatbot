@@ -7,6 +7,7 @@ License: MIT
 """
 import logging
 import os
+import sys
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +22,24 @@ from app.api import archives, personas, chat, observe, memory, bot as bot_api, g
 
 
 log = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    """Configure stdlib logging without risking blocked stderr pipes."""
+    handlers: list[logging.Handler] = []
+    if settings.debug_console:
+        handlers.append(logging.StreamHandler())
+    else:
+        log_dir = settings.debug_log_dir or "logs"
+        os.makedirs(log_dir, exist_ok=True)
+        app_log = Path(log_dir) / f"app_{os.getpid()}.log"
+        handlers.append(logging.FileHandler(app_log, encoding="utf-8"))
+    logging.basicConfig(
+        level=settings.log_level,
+        format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
 
 
 def _install_asyncio_noise_filter() -> None:
@@ -305,10 +324,7 @@ async def _run_migrations_sqlite() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logging.basicConfig(
-        level=settings.log_level,
-        format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
-    )
+    _configure_logging()
     for noisy in ("httpx", "httpcore", "openai", "aiosqlite", "asyncpg", "uvicorn.access"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     _install_asyncio_noise_filter()

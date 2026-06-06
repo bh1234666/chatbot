@@ -66,16 +66,94 @@ def test_filter_tools_keeps_schema_stable_after_trace_used():
     debug.set_trace_id(trace_id)
     toolchain_cache.reset_trace(trace_id)
     tools = [
-        {"type": "function", "function": {"name": "continue_toolchain"}},
-        {"type": "function", "function": {"name": "delegate"}},
+        {
+            "type": "function",
+            "function": {
+                "name": "continue_toolchain",
+                "description": "resume " + ("long details " * 40),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delegate",
+                "description": "delegate " + ("long details " * 40),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
     ]
-    assert len(toolchain_cache.filter_tools_for_trace(tools, trace_id)) == 2
+    first = toolchain_cache.filter_tools_for_trace(tools, trace_id)
+    assert len(first) == 2
+    assert first is toolchain_cache.filter_tools_for_trace(tools, trace_id)
+    assert len(first[0]["function"]["description"]) < len(tools[0]["function"]["description"])
 
     toolchain_cache._CONTINUED_TRACES.add(trace_id)
     filtered = toolchain_cache.filter_tools_for_trace(tools, trace_id)
-    assert filtered is tools
+    assert filtered is first
     assert [t["function"]["name"] for t in filtered] == ["continue_toolchain", "delegate"]
     toolchain_cache.reset_trace(trace_id)
+
+
+def test_tool_schema_retry_guidance_does_not_change_tool_schema_view():
+    from app.core.prompt_cache_observer import describe_prompt_cache_input
+
+    trace_id = "trace_schema_expand"
+    toolchain_cache.reset_trace(trace_id)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace",
+                "description": "workspace tool. " + ("Detailed usage sentence. " * 30),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "Choose one action. " + ("Long action details. " * 20),
+                            "enum": ["read", "write"],
+                        }
+                    },
+                    "required": ["action"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delegate",
+                "description": "delegate helper work. " + ("Detailed usage sentence. " * 30),
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+    ]
+
+    slim = toolchain_cache.filter_tools_for_trace(tools, trace_id)
+    before_shape = describe_prompt_cache_input(messages=[], tools=slim)
+    assert slim[0]["function"]["description"] != tools[0]["function"]["description"]
+    assert slim[0]["function"]["parameters"]["properties"]["action"]["enum"] == ["read", "write"]
+    assert len(slim[0]["function"]["parameters"]["properties"]["action"]["description"]) < (
+        len(tools[0]["function"]["parameters"]["properties"]["action"]["description"])
+    )
+
+    toolchain_cache.mark_tool_schema_retry("workspace", "missing required action", trace_id)
+    still_slim = toolchain_cache.filter_tools_for_trace(tools, trace_id)
+    after_shape = describe_prompt_cache_input(messages=[], tools=still_slim)
+    assert still_slim is slim
+    assert after_shape["tool_schema_hash"] == before_shape["tool_schema_hash"]
+    assert after_shape["tool_schema_bytes"] == before_shape["tool_schema_bytes"]
+
+    guidance = toolchain_cache.tool_schema_retry_guidance(tools, trace_id)
+    assert "Tool Schema Retry Facts" in guidance
+    assert tools[0]["function"]["description"] in guidance
+    assert tools[1]["function"]["description"] not in guidance
+
+    toolchain_cache.mark_tool_schema_success("workspace", trace_id)
+    slim_again = toolchain_cache.filter_tools_for_trace(tools, trace_id)
+    assert slim_again is slim
+    assert "workspace" not in toolchain_cache.expanded_schema_tools(trace_id)
+    assert toolchain_cache.tool_schema_retry_guidance(tools, trace_id) == ""
 
 
 def test_toolchain_summary_includes_structured_agent_state():
