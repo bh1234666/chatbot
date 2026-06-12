@@ -185,6 +185,6 @@ def test_round2_prompt_contains_complex_acceptance_closure():
 
     assert "acceptance points" in ROUND2_SYSTEM_TEMPLATE
     assert "verified files" in ROUND2_SYSTEM_TEMPLATE
-    assert "failure signals" in ROUND2_SYSTEM_TEMPLATE
-    assert "验收闭环" in ROUND2_SYSTEM_TEMPLATE
-    assert "失败续作" in ROUND2_SYSTEM_TEMPLATE
+    assert "A failing verifier/check command is acceptance evidence" in ROUND2_SYSTEM_TEMPLATE
+    assert "missing, interrupted, failed, or partial" in ROUND2_SYSTEM_TEMPLATE
+    assert "helper 干净完成则信任其自验" in ROUND2_SYSTEM_TEMPLATE

@@ -254,7 +254,7 @@ def classify_workflow_feedback_event(payload: dict) -> str | None:
     if kind == "helper_progress":
         status = str(payload.get("heartbeat_status") or "").lower()
         wait_or_continue = str(payload.get("wait_or_continue") or "").lower()
-        if wait_or_continue in {"stuck", "kill"} or payload.get("_runaway"):
+        if wait_or_continue in {"stuck", "kill", "intervene"} or payload.get("_runaway"):
             return "stuck"
         if status in {"stale", "missing"}:
             return "long_silence"
@@ -364,12 +364,12 @@ def summarize_workflow_feedback_event(payload: dict) -> str:
     if kind == "helper_progress":
         heartbeat = str(payload.get("heartbeat_status") or "").strip()
         wait_or_continue = str(payload.get("wait_or_continue") or "").strip()
-        state = wait_or_continue if wait_or_continue in {"stuck", "kill"} else (heartbeat or wait_or_continue or "running")
+        state = wait_or_continue if wait_or_continue in {"stuck", "kill", "intervene"} else (heartbeat or wait_or_continue or "running")
         runaway_reason = str(payload.get("_runaway_reason") or "").strip()
         parts = [
             "event_fact=helper_progress",
             f"state={state}",
-            "event_fact=helper_runaway_or_stuck" if wait_or_continue in {"stuck", "kill"} or payload.get("_runaway") else "",
+            "event_fact=helper_runaway_or_stuck" if wait_or_continue in {"stuck", "kill", "intervene"} or payload.get("_runaway") else "",
             f"runaway_reason={runaway_reason}" if runaway_reason else "",
             f"helper_task={task_id}" if task_id else "",
             f"helper_kind={helper_kind}" if helper_kind else "",
@@ -378,13 +378,14 @@ def summarize_workflow_feedback_event(payload: dict) -> str:
             f"recent_tools={tools}" if tools else "",
             f"note={last_note}" if last_note else "",
             f"thought={last_thought}" if last_thought else "",
-            "truth_scope=state=kill or state=stuck means the helper is not healthy progress; describe recovery, termination, or replanning instead of normal progress.\n\nkill/stuck 是异常分支事实。",
-            "wording_hint=for kill/stuck say an abnormal branch is being handled, recovered, stopped, or split; otherwise use still working, checking, or waiting wording.\n\n异常分支说恢复或重规划。",
+            "truth_scope=state=intervene/stuck means the helper is not healthy progress; describe recovery, interruption, waiting-with-reason, or replanning instead of normal progress.\n\nintervene/stuck 是异常分支事实。",
+            "wording_hint=for intervene/stuck say an abnormal branch is being handled, recovered, stopped, split, or explicitly waited on; otherwise use still working, checking, or waiting wording.\n\n异常分支说恢复或重规划。",
         ]
         return "\n".join(p for p in parts if p)
 
     if kind in {"main_tool_done", "tool_done"}:
         tool = str(payload.get("tool") or "").strip()
+        status = str(payload.get("status") or "done").strip() or "done"
         preview = str(payload.get("result_preview") or "").strip()
         delegate_summary = ""
         todo_summary = ""
@@ -404,7 +405,7 @@ def summarize_workflow_feedback_event(payload: dict) -> str:
                 todo_summary = _summarize_todo_write_result_payload(parsed)
         parts = [
             f"event_fact={kind}",
-            "state=done",
+            f"state={status}",
             f"tool={tool}" if tool else "",
             f"elapsed={elapsed_text}" if elapsed_text else "",
             delegate_summary,
@@ -514,8 +515,8 @@ def _summarize_delegate_result_payload(result: dict) -> str:
         f"error={error}" if error else "",
         f"reason={reason[:500]}" if reason else "",
         f"instruction={instruction[:500]}" if instruction else "",
-        "event_fact=helper_blocked_before_start" if preflight_guard or error in {"framework_first_required", "task_kind_mismatch", "task_split_required"} else "",
-        "state=blocked_not_running" if preflight_guard or error in {"framework_first_required", "task_kind_mismatch", "task_split_required"} else "",
+        "event_fact=helper_blocked_before_start" if preflight_guard or error == "guard_blocked" else "",
+        "state=blocked_not_running" if preflight_guard or error == "guard_blocked" else "",
         f"requested={requested}",
         f"returned_result_count={returned}",
         f"success_count={success}",
@@ -850,7 +851,12 @@ def validate_intermediate_feedback_message(
         if has_completed and not has_recovery_word:
             return False, "failed_or_missing_delegate_described_as_complete"
 
-    if "event_fact=helper_runaway_or_stuck" in facts or "state=kill" in facts or "state=stuck" in facts:
+    if (
+        "event_fact=helper_runaway_or_stuck" in facts
+        or "state=kill" in facts
+        or "state=intervene" in facts
+        or "state=stuck" in facts
+    ):
         has_recovery_word = any(
             word in msg
             for word in (

@@ -189,7 +189,7 @@ async def test_auto_continue_check_time_limit_skips_model(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_auto_continue_check_detects_unfinished_offer_even_if_model_is_uncertain(monkeypatch):
+async def test_auto_continue_check_respects_uncertain_model_despite_unfinished_words(monkeypatch):
     from app.api import chat
     from app.llm import model_pool
     from app.schemas.api import AutoContinueCheckRequest
@@ -212,13 +212,13 @@ async def test_auto_continue_check_detects_unfinished_offer_even_if_model_is_unc
     )
     result = await chat.auto_continue_check(req)
 
-    assert result.should_continue is True
-    assert result.confidence >= 0.72
-    assert result.reason == "assistant_reply_indicates_requested_work_is_not_finished"
+    assert result.should_continue is False
+    assert result.confidence == pytest.approx(0.1)
+    assert result.reason == ""
 
 
 @pytest.mark.asyncio
-async def test_auto_continue_check_detects_implementation_reply_that_only_prepares(monkeypatch):
+async def test_auto_continue_check_respects_model_for_preparation_reply(monkeypatch):
     from app.api import chat
     from app.llm import model_pool
     from app.schemas.api import AutoContinueCheckRequest
@@ -241,13 +241,13 @@ async def test_auto_continue_check_detects_implementation_reply_that_only_prepar
     )
     result = await chat.auto_continue_check(req)
 
-    assert result.should_continue is True
-    assert result.confidence >= 0.70
-    assert result.reason == "implementation_request_reply_is_only_preparation"
+    assert result.should_continue is False
+    assert result.confidence == pytest.approx(0.6)
+    assert result.reason == "not an actual implementation"
 
 
 @pytest.mark.asyncio
-async def test_auto_continue_check_detects_staged_work_can_continue(monkeypatch):
+async def test_auto_continue_check_respects_model_for_staged_work_reply(monkeypatch):
     from app.api import chat
     from app.llm import model_pool
     from app.schemas.api import AutoContinueCheckRequest
@@ -270,9 +270,9 @@ async def test_auto_continue_check_detects_staged_work_can_continue(monkeypatch)
     )
     result = await chat.auto_continue_check(req)
 
-    assert result.should_continue is True
-    assert result.confidence >= 0.68
-    assert result.reason == "assistant_reply_indicates_staged_work_can_continue"
+    assert result.should_continue is False
+    assert result.confidence == pytest.approx(0.1)
+    assert result.reason == "Both user message and assistant reply are question marks"
 
 
 @pytest.mark.asyncio

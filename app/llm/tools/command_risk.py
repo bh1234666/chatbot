@@ -51,6 +51,10 @@ CMD_DESTRUCTIVE_OPS = {
     "copy", "xcopy", "robocopy",
 }
 
+UNIX_DESTRUCTIVE_OPS = {
+    "cp", "mv", "rm", "rmdir", "mkdir", "install", "rsync", "ln", "tee",
+}
+
 CMD_READ_OPS = {
     "dir", "type", "find", "findstr", "more", "sort", "comp", "fc", "where", "tree",
     "echo", "set", "cd", "chdir", "date", "time", "ver", "vol", "cls", "title", "color",
@@ -61,12 +65,19 @@ CMD_READ_OPS = {
 GCC_BLOCKED_FLAGS = {"-fplugin", "-wrapper", "-specs"}
 
 PATH_RE = re.compile(
-    r'([A-Za-z]:[\\/][^\s"\'&|><;]+)'
+    r'(?<![A-Za-z0-9])([A-Za-z]:[\\/](?![\\/])[^\s"\'&|><;]+)'
+    r'|(?<![\w.])(/[A-Za-z][A-Za-z0-9_.-]*/[^\s"\'&|><;]*)'
     r'|(?:^|\s)(\.\.[\\/][^\s"\'&|><;]+)'
     r'|"([^"]*?[\\/][^"]*?)"'
     r"|'([^']*?[\\/][^']*?)'"
 )
 REDIRECT_RE = re.compile(r'[>]{1,2}\s*([^\s&|<>;]+)')
+STRICT_FILESYSTEM_REF_RE = re.compile(
+    r'(?<![A-Za-z0-9])([A-Za-z]:[\\/](?![\\/])[^\s"\'&|><;),]+)'
+    r'|(?<![\w.:])(/[A-Za-z]/[^\s"\'&|><;),]+)'
+    r'|(?:^|[\s"\'(=])(\.\.[\\/][^\s"\'&|><;),]+)'
+)
+STAGED_PROJECT_REF_RE = re.compile(r"(?<![\w./-])(_env/[A-Za-z0-9_./@+=,-]+)")
 
 # 2026-06-05: redirect-outside 错误附 recovery hint。
 # 病因(实测 trace 373640 16:55:30 / 17:11:15 / 17:45:14):
@@ -120,6 +131,13 @@ def _helper_scope_reason(command: str, ws_dir: str, *, read_only: bool) -> str:
 
 def _iter_path_tokens(command: str):
     for match in PATH_RE.finditer(command):
+        for group in match.groups():
+            if group:
+                yield group.strip("\"'")
+
+
+def _iter_strict_filesystem_refs(command: str):
+    for match in STRICT_FILESYSTEM_REF_RE.finditer(command):
         for group in match.groups():
             if group:
                 yield group.strip("\"'")
@@ -210,6 +228,128 @@ def helper_sandbox_copy_error(command: str, *, is_main_thread: bool = True) -> s
     return None
 
 
+def _in_environment_mode() -> bool:
+    try:
+        from app.core.runtime_mode import is_environment_mode
+
+        return is_environment_mode()
+    except Exception:
+        return False
+
+
+def _workspace_relative_token(path_str: str, ws_dir: str) -> str:
+    text = str(path_str or "").strip().strip("\"'").replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    if text.startswith("_env/") or text == "_env":
+        return text
+    if not text:
+        return ""
+    try:
+        path = _command_path(text)
+        workspace = Path(ws_dir).resolve()
+        resolved = path.resolve() if path.is_absolute() else (workspace / path).resolve()
+        rel = resolved.relative_to(workspace)
+        return str(rel).replace("\\", "/")
+    except (OSError, ValueError):
+        return text
+
+
+def _is_staged_project_token(path_str: str, ws_dir: str) -> bool:
+    rel = _workspace_relative_token(path_str, ws_dir).strip("/")
+    return rel.startswith("_env/") and len(rel) > len("_env/")
+
+
+def _mentions_staged_project_copy(command: str, ws_dir: str) -> bool:
+    if any(_is_staged_project_token(token, ws_dir) for token in _iter_path_tokens(command)):
+        return True
+    return any(_is_staged_project_token(match.group(1), ws_dir) for match in STAGED_PROJECT_REF_RE.finditer(command or ""))
+
+
+def _main_thread_env_project_copy_reason(command: str) -> str:
+    sample = (command or "").strip()
+    if len(sample) > 240:
+        sample = sample[:240] + "..."
+    return (
+        "Fact: this main-workflow command appears to write a staged project copy under `_env/...`. "
+        "`_env/...` can later be applied to the real project, so source/project edits should be helper-owned "
+        "with declared expected_outputs and acceptance checks. The main workflow should inspect/diff/apply the "
+        "helper result and run the matching project/runtime acceptance checks when relevant. "
+        f"Command preview: {sample!r}\n\n"
+        "事实：该主流程命令看起来会写入 `_env/...` 暂存项目副本；helper 产出、主流程 diff/apply/验收是当前项目流程边界。"
+    )
+
+
+def _command_writes_staged_project_copy(command: str, ws_dir: str) -> bool:
+    normalized = (command or "").replace("\\", "/")
+    lower = normalized.lower()
+    if "_env/" not in lower:
+        return False
+
+    for match in REDIRECT_RE.finditer(command):
+        if _is_staged_project_token(match.group(1), ws_dir):
+            return True
+
+    destructive_ops = (
+        "copy", "xcopy", "robocopy", "move", "ren", "rename",
+        "cp", "mv", "install", "rsync", "tee",
+    )
+    if any(re.search(r"\b" + op + r"\b", lower) for op in destructive_ops):
+        tokens = list(_iter_path_tokens(command))
+        if any(_is_staged_project_token(token, ws_dir) for token in tokens) or _mentions_staged_project_copy(command, ws_dir):
+            return True
+
+    script_write_markers = (
+        ".write(",
+        "write_text(",
+        "write_bytes(",
+        "open(",
+        "pathlib.path(",
+        "fs.writefilesync(",
+        "fs.appendfilesync(",
+        "fs.promises.writefile(",
+        "fs.promises.appendfile(",
+        "file_put_contents(",
+    )
+    mode_markers = (
+        "'w'", '"w"', "'a'", '"a"', "'x'", '"x"',
+        "'wb'", '"wb"', "'ab'", '"ab"', "'xb'", '"xb"',
+        "mode='w'", 'mode="w"', "mode='a'", 'mode="a"', "mode='x'", 'mode="x"',
+    )
+    has_script_write = any(marker in lower for marker in script_write_markers)
+    has_write_mode = any(marker in lower for marker in mode_markers)
+    has_shell_inplace = bool(re.search(r"\b(sed|perl)\b[^&|;]*\s-i\b", lower))
+    if (
+        has_script_write
+        and (
+            has_write_mode
+            or ".write(" in lower
+            or "write_text(" in lower
+            or "write_bytes(" in lower
+        )
+    ) or has_shell_inplace:
+        return _mentions_staged_project_copy(command, ws_dir)
+
+    return False
+
+
+def _main_thread_env_project_copy_write_decision(
+    command: str,
+    ws_dir: str,
+    *,
+    is_main_thread: bool,
+) -> CommandRiskDecision | None:
+    if not is_main_thread or not _in_environment_mode():
+        return None
+    if not _command_writes_staged_project_copy(command, ws_dir):
+        return None
+    return CommandRiskDecision(
+        False,
+        _main_thread_env_project_copy_reason(command),
+        "main_thread_env_project_edit_should_delegate",
+    )
+
+
 def analyze_command(command: str, ws_dir: str, *, is_main_thread: bool = True) -> CommandRiskDecision:
     cmd_lower = command.lower()
     for keyword in DANGEROUS_KEYWORDS:
@@ -226,6 +366,19 @@ def analyze_command(command: str, ws_dir: str, *, is_main_thread: bool = True) -
             _main_thread_helper_sandbox_copy_reason(),
             "helper_sandbox_copy",
         )
+
+    env_project_write_decision = _main_thread_env_project_copy_write_decision(
+        command,
+        ws_dir,
+        is_main_thread=is_main_thread,
+    )
+    if env_project_write_decision is not None:
+        return env_project_write_decision
+
+    if not is_main_thread:
+        helper_scope_decision = _analyze_helper_scope_any_command(command, ws_dir)
+        if helper_scope_decision is not None:
+            return helper_scope_decision
 
     parts = command.split()
     first_exe = _first_executable(parts)
@@ -260,6 +413,55 @@ def analyze_command(command: str, ws_dir: str, *, is_main_thread: bool = True) -
         return _analyze_gcc(command, ws_dir)
     if exe in CMD_READ_OPS or exe in CMD_DESTRUCTIVE_OPS:
         return _analyze_bare_cmd_builtin(command, ws_dir, is_main_thread=is_main_thread)
+    if exe in UNIX_DESTRUCTIVE_OPS:
+        return _analyze_unix_destructive(command, ws_dir, is_main_thread=is_main_thread)
+    if has_redirect_to_outside(command, ws_dir):
+        return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
+    return CommandRiskDecision(True)
+
+
+def _analyze_helper_scope_any_command(command: str, ws_dir: str) -> CommandRiskDecision | None:
+    for path in _iter_strict_filesystem_refs(command):
+        if _is_allowed_null_sink(path):
+            continue
+        if is_abs_outside(path, ws_dir):
+            return CommandRiskDecision(
+                False,
+                _helper_scope_reason(command, ws_dir, read_only=_looks_read_only_command(command)),
+                "helper_scope",
+            )
+    return None
+
+
+def _looks_read_only_command(command: str) -> bool:
+    lowered = command.lower()
+    write_markers = (
+        "'w'", '"w"', "'a'", '"a"', "'x'", '"x"',
+        "write_text(", ".write(", "shutil.copy", "copyfile(",
+        "os.replace(", "os.rename(", ".rename(", ".replace(",
+        ">>", " >",
+    )
+    return not any(marker in lowered for marker in write_markers)
+
+
+def _analyze_unix_destructive(command: str, ws_dir: str, *, is_main_thread: bool) -> CommandRiskDecision:
+    parts = command.split()
+    first_token = parts[0].lower().rstrip("/") if parts else ""
+    for path in extract_paths(command):
+        if _is_allowed_null_sink(path):
+            continue
+        if is_abs_outside(path, ws_dir):
+            if not is_main_thread:
+                return CommandRiskDecision(
+                    False,
+                    _helper_scope_reason(command, ws_dir, read_only=False),
+                    "helper_scope",
+                )
+            return CommandRiskDecision(
+                False,
+                f"security blocked: refusing {first_token} outside workspace ({path}).\n安全策略拦截沙箱外文件操作。",
+                "outside_destructive",
+            )
     if has_redirect_to_outside(command, ws_dir):
         return CommandRiskDecision(False, _REDIRECT_OUTSIDE_MSG, "outside_redirect")
     return CommandRiskDecision(True)
@@ -387,7 +589,11 @@ def extract_paths(command: str) -> list[str]:
 
 
 def is_abs_outside(path_str: str, ws_dir: str) -> bool:
-    path = Path(path_str)
+    if _is_allowed_null_sink(path_str):
+        return False
+    path = _command_path(path_str)
+    if _is_unix_root_without_drive(path_str):
+        return True
     if path.is_absolute():
         try:
             resolved = path.resolve()
@@ -408,8 +614,8 @@ def has_redirect_to_outside(command: str, ws_dir: str) -> bool:
     match = REDIRECT_RE.search(command)
     if not match:
         return False
-    dest = match.group(1).strip("\"'")
-    if dest.replace("\\", "/").lower() in {"/dev/null", "nul", "null"}:
+    dest = match.group(1).strip("\"'").rstrip(";")
+    if _is_allowed_null_sink(dest):
         return False
     return is_abs_outside(dest, ws_dir)
 
@@ -419,7 +625,11 @@ def touches_prev_or_outside(command: str, ws_dir: str) -> bool:
     for path_str in _iter_path_tokens(command):
         if not path_str:
             continue
-        path = Path(path_str)
+        if _is_allowed_null_sink(path_str):
+            continue
+        if _is_unix_root_without_drive(path_str):
+            return True
+        path = _command_path(path_str)
         try:
             resolved = path.resolve() if path.is_absolute() else (workspace / path).resolve()
         except (OSError, ValueError):
@@ -434,3 +644,24 @@ def touches_prev_or_outside(command: str, ws_dir: str) -> bool:
         if ".prev" in parts:
             return True
     return re.search(r"\b\.prev[/\\]", command) is not None
+
+
+def _is_allowed_null_sink(path_str: str) -> bool:
+    return str(path_str or "").replace("\\", "/").lower().rstrip(";") in {"/dev/null", "nul", "null"}
+
+
+def _command_path(path_str: str) -> Path:
+    text = str(path_str or "").strip("\"'")
+    match = re.match(r"^/([A-Za-z])/(.*)$", text)
+    if match:
+        return Path(f"{match.group(1).upper()}:/{match.group(2)}")
+    return Path(text)
+
+
+def _is_unix_root_without_drive(path_str: str) -> bool:
+    text = str(path_str or "").replace("\\", "/")
+    if not text.startswith("/"):
+        return False
+    if _is_allowed_null_sink(text):
+        return False
+    return re.match(r"^/[A-Za-z]/", text) is None

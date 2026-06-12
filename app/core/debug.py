@@ -196,20 +196,28 @@ def section(title: str) -> None:
     _write_file("section", title)
 
 
-def error(msg: str) -> None:
+def _severity_message(head: str, detail: str | None = None) -> str:
+    if detail is None:
+        return str(head)
+    return f"{head}: {detail}"
+
+
+def error(msg: str, detail: str | None = None, payload: Any | None = None) -> None:
     """立即输出错误。控制台+文件。"""
     if not settings.debug_mode:
         return
-    _emit_console("ERROR", msg, None, color="31")
-    _write_file("ERROR", msg)
+    text = _severity_message(msg, detail)
+    _emit_console("ERROR", text, payload, color="31")
+    _write_file("ERROR", text, payload)
 
 
-def warn(msg: str) -> None:
+def warn(msg: str, detail: str | None = None, payload: Any | None = None) -> None:
     """立即输出警告。控制台+文件。"""
     if not settings.debug_mode:
         return
-    _emit_console("WARN", msg, None, color="33")
-    _write_file("WARN", msg)
+    text = _severity_message(msg, detail)
+    _emit_console("WARN", text, payload, color="33")
+    _write_file("WARN", text, payload)
 
 
 def status(msg: str) -> None:
@@ -304,14 +312,14 @@ def _get_log_file() -> TextIO | None:
     global _log_file, _log_file_path
     if _log_file is not None:
         return _log_file
-    if not settings.debug_log_dir:
-        return None
-    os.makedirs(settings.debug_log_dir, exist_ok=True)
+    log_dir = settings.debug_log_dir or "logs"
+    os.makedirs(log_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    _log_file_path = os.path.join(settings.debug_log_dir, f"debug_{ts}_{os.getpid()}.log")
+    _log_file_path = os.path.join(log_dir, f"debug_{ts}_{os.getpid()}.log")
     # buffering=1 = 行缓冲，每次换行即写入磁盘，配合 flush() 实现实时写入
     _log_file = open(_log_file_path, "w", encoding="utf-8", buffering=1)
     _log_file.write(f"# Debug log started at {datetime.now().isoformat()}\n")
+    _log_file.flush()
     try:
         from app.llm.model_pool import resolve_task
         _main = resolve_task("round3_normal")

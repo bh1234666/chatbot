@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from app.llm.tools.delegate import _detect_helper_produced_inputs, _sanitize_and_validate_tasks
@@ -45,7 +43,7 @@ def test_detect_helper_produced_inputs(prompt, input_files, expected_outputs, ex
 
 
 @pytest.mark.asyncio
-async def test_sanitize_blocks_read_helper_against_helper_produced(tmp_path):
+async def test_sanitize_reports_read_helper_against_helper_produced_to_guard(tmp_path):
     args = {
         "tasks": [
             {
@@ -64,14 +62,16 @@ async def test_sanitize_blocks_read_helper_against_helper_produced(tmp_path):
         group_id="grp_test",
         user_id="usr_test",
     )
-    assert isinstance(result, str)
-    parsed = json.loads(result)
-    assert parsed.get("ok") is False
-    assert parsed.get("error") == "read_helper_targets_helper_produced_artifacts"
-    blocked = parsed.get("blocked_inputs") or []
+    assert not isinstance(result, str)
+    observations = result[0].get("guard_observations") or []
+    fact = next(
+        item for item in observations
+        if item.get("issue") == "read_helper_targets_helper_produced_artifacts"
+    )
+    blocked = fact.get("inputs") or []
     assert any("framework_contract" in b for b in blocked)
     assert any("rbt_analysis" in b for b in blocked)
-    assert "resume" in parsed.get("hint", "").lower()
+    assert "guard should decide" in fact.get("details", "")
 
 
 @pytest.mark.asyncio

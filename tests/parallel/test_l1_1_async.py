@@ -85,6 +85,29 @@ async def test_dynamic_wait_loop_guard_wakeup_is_not_timeout():
 
 
 @pytest.mark.asyncio
+async def test_dynamic_wait_loop_zero_result_final_grace_catches_near_complete(monkeypatch):
+    from app.llm.tools import delegate_wait
+    from app.llm.tools.delegate import _dynamic_wait_loop
+
+    monkeypatch.setattr(delegate_wait, "_zero_result_wait_extension_seconds", lambda _wait: 0.005)
+    monkeypatch.setattr(delegate_wait, "_zero_result_final_grace_seconds", lambda _wait: 0.1)
+
+    async def _helper():
+        await asyncio.sleep(0.03)
+        return {"task_id": "near_done", "ok": True}
+
+    result = await _dynamic_wait_loop(
+        [asyncio.create_task(_helper())],
+        asyncio.Queue(),
+        wait_window_sec=0.005,
+        min_results_to_return=None,
+    )
+
+    assert isinstance(result, list)
+    assert result == [{"task_id": "near_done", "ok": True}]
+
+
+@pytest.mark.asyncio
 async def test_pending_result_store_and_consume():
     """基础:存了能取,取了再取拿不到。"""
     trace_id = "test_trace"
@@ -100,6 +123,51 @@ async def test_pending_result_store_and_consume():
 
     r2 = await _consume_pending_result(trace_id, task_id)
     assert r2 is None
+
+
+@pytest.mark.asyncio
+async def test_duplicate_completed_response_recovers_clean_helper_facts(tmp_path):
+    from app.llm.tools.delegate_actions import _already_completed_delegate_response
+
+    trace_id = "trace_duplicate_completed_recovery"
+    task_id = "patch_report_client"
+    fake_task = asyncio.create_task(asyncio.sleep(0))
+    await _store_pending_result(
+        trace_id,
+        task_id,
+        {
+            "task_id": task_id,
+            "ok": True,
+            "terminal_reason": "completed",
+            "files": ["report_client.py", "api_notes.md"],
+            "outputs_check": {
+                "outputs_complete": True,
+                "producer_self_verified": True,
+                "outputs_missing": [],
+                "quality_warnings": [],
+            },
+        },
+        fake_task,
+    )
+    await _consume_pending_result(trace_id, task_id)
+
+    result = await _already_completed_delegate_response(
+        trace_id=trace_id,
+        main_owner=f"main:{trace_id}",
+        main_workspace=str(tmp_path),
+        task_ids=[task_id],
+        note="already done",
+    )
+
+    assert result["already_completed"] is True
+    assert result["task_ok"] is True
+    assert result["helpers_completed"] == 1
+    assert result["success_count"] == 1
+    assert result["_stage_status"] == "clean_helper_batch"
+    assert result["results"][0]["_post_helper_action"] == "output_json_directly"
+    assert "producer-self-verified" in result["_stage_evidence_facts"]
+    assert "_action_required" not in result
+    assert "final synthesis" in result["_completion_guidance"]
 
 
 @pytest.mark.asyncio
@@ -144,7 +212,7 @@ async def test_poll_zero_blocking():
 
     start = time.monotonic()
     result_str = await _handle_delegate_poll(
-        {"task_ids": ["nonexistent"]},
+        {"task_ids": ["nonexistent"], "wait_window_sec": 5},
         main_owner="main:trace_x", trace_id="trace_x",
     )
     elapsed = time.monotonic() - start
@@ -152,6 +220,8 @@ async def test_poll_zero_blocking():
     assert elapsed < 1.0
     data = json.loads(result_str)
     assert data["ok"]
+    assert data["wait_window_ignored"] is True
+    assert "collect" in data["wait_window_note"]
     polled = data["polled"][0]
     assert polled["status"] == "unknown"
     assert "delegate(action='status')" in polled["hint"]
@@ -191,7 +261,7 @@ async def test_poll_reports_completed_task_from_ledger_after_collect():
     assert polled["status"] == "done_collected_or_historical"
     assert polled["outputs_complete"] is True
     assert polled["collect_now"] is False
-    assert "do not respawn unless outputs are missing" in polled["hint"]
+    assert "producer evidence" in polled["hint"]
 
 
 @pytest.mark.asyncio

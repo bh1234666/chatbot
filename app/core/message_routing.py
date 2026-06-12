@@ -114,7 +114,21 @@ _ARTIFACT_CREATE_VERBS = tuple(map(_u, (
 )))
 _ARTIFACT_CREATE_VERBS_EN = (
     "create", "generate", "make", "write", "save", "export", "render",
-    "draw", "synthesize",
+    "draw", "synthesize", "copy", "record", "note", "assemble",
+    "prepare", "draft", "compose",
+)
+_ARTIFACT_CREATE_PHRASES_EN_RE = re.compile(
+    r"\b(?:put\s+together|write\s+up|turn\s+.+?\s+into)\b",
+    re.IGNORECASE,
+)
+_PERSISTENT_STATE_VERBS = tuple(map(_u, (
+    r"\u8bb0\u4e0b", r"\u8bb0\u4e00\u4e0b", r"\u8bb0\u4f4f",
+    r"\u8bb0\u5f55", r"\u6284\u4e0b", r"\u7559\u4e0b",
+    r"\u5b58\u4e00\u4e0b", r"\u5907\u4efd", r"\u590d\u5236",
+)))
+_PERSISTENT_STATE_VERBS_EN_RE = re.compile(
+    r"\b(?:jot\s+down|write\s+down|note\s+down|record|save|copy|keep\s+a\s+note|make\s+a\s+note)\b",
+    re.IGNORECASE,
 )
 _ARTIFACT_FILE_RE = re.compile(
     r"(?:^|[\s`'\"“”‘’（(：:])[\w\u4e00-\u9fff][\w\u4e00-\u9fff ._()（）-]{0,80}"
@@ -125,8 +139,15 @@ _ARTIFACT_NOUNS = tuple(map(_u, (
     r"\u6587\u4ef6", r"\u6587\u6863", r"\u62a5\u544a", r"\u8bba\u6587",
     r"\u7b14\u8bb0", r"\u8868\u683c", r"\u56fe\u8868", r"\u56fe\u7247",
     r"\u6298\u7ebf\u56fe", r"\u67f1\u72b6\u56fe", r"\u97f3\u9891",
-    r"\u8bed\u97f3\u6587\u4ef6",
+    r"\u8bed\u97f3\u6587\u4ef6", r"\u8bf4\u660e\u7a3f", r"\u89e3\u91ca\u7a3f",
+    r"\u7efc\u8ff0", r"\u6458\u8981",
 )))
+_ARTIFACT_NOUNS_EN_RE = re.compile(
+    r"\b(?:report|paper|document|doc|note|brief|guide|explainer|write-?up|"
+    r"article|summary|synthesis|overview|handout|worksheet|table|chart|"
+    r"image|audio|transcript)\b",
+    re.IGNORECASE,
+)
 _OFFICE_DOC_RE = re.compile(
     r"\.(?:docx|pptx|xlsx|pdf)\b|"
     r"(?:docx|pptx|xlsx|excel|ppt|pdf)|"
@@ -505,13 +526,20 @@ def has_artifact_creation_intent(message: str) -> bool:
         return False
     lower = text.lower()
     compact = re.sub(r"\s+", "", lower)
+    if any(v in text for v in _PERSISTENT_STATE_VERBS) or _PERSISTENT_STATE_VERBS_EN_RE.search(text):
+        return True
     has_create_verb = (
         any(v in text for v in _ARTIFACT_CREATE_VERBS)
         or any(re.search(rf"\b{re.escape(v)}\b", lower) for v in _ARTIFACT_CREATE_VERBS_EN)
+        or bool(_ARTIFACT_CREATE_PHRASES_EN_RE.search(text))
     )
     if not has_create_verb:
         return False
-    return bool(_ARTIFACT_FILE_RE.search(text) or any(noun in compact for noun in _ARTIFACT_NOUNS))
+    return bool(
+        _ARTIFACT_FILE_RE.search(text)
+        or any(noun in compact for noun in _ARTIFACT_NOUNS)
+        or _ARTIFACT_NOUNS_EN_RE.search(text)
+    )
 
 
 def is_office_document_creation_intent(message: str) -> bool:
@@ -519,6 +547,47 @@ def is_office_document_creation_intent(message: str) -> bool:
     if not has_artifact_creation_intent(message):
         return False
     return bool(_OFFICE_DOC_RE.search(message or ""))
+
+
+def observed_route_text_facts(message: str) -> list[str]:
+    """Return lightweight observed text facts for the Round 1 LLM.
+
+    The strings describe what was matched in the latest message. They avoid
+    naming a route, tool need, or task type so the model keeps the decision.
+
+    只陈述文本匹配事实，不替模型命名任务类型或工具需求。
+    """
+    text = (message or "").strip()
+    if not text:
+        return []
+    facts: list[str] = []
+    if is_direct_short_reply_request(text):
+        facts.append("observed_text_fact: latest message matches an explicit literal/short-reply wording pattern.")
+    lower = text.lower()
+    english_tool_concept = bool(
+        re.search(r"\b(?:what\s+is|explain|define|describe|introduce)\b", lower)
+        and any(term in lower for term in _TOOL_CONCEPT_TERMS if term.isascii())
+    )
+    if is_tool_concept_question(text) or english_tool_concept:
+        matched_terms = sorted({term for term in _TOOL_CONCEPT_TERMS if term in lower or term in text})
+        term_text = ", ".join(matched_terms[:4]) or "tool/technology term"
+        facts.append(f"observed_text_fact: latest message contains explanatory wording plus term(s): {term_text}.")
+    if has_context_followup_intent(text):
+        facts.append("observed_text_fact: latest message is short and matches a continuation/pronoun/follow-up wording pattern.")
+    if has_implicit_recall_intent(text):
+        facts.append("observed_text_fact: latest message contains earlier/shared/stored-material reference wording.")
+    if has_image_intent_in_msg(text):
+        facts.append("observed_text_fact: latest message contains image/visual/OCR-related wording or media markers.")
+    if has_artifact_creation_intent(text):
+        facts.append("observed_text_fact: latest message contains creation/persistence wording together with a file/output noun, extension, or reusable written-product noun.")
+    if is_office_document_creation_intent(text):
+        facts.append("observed_text_fact: latest message contains Office/PDF/document extension or document-output wording.")
+    return facts[:8]
+
+
+def route_candidate_facts(message: str) -> list[str]:
+    """Backward-compatible alias for observed_route_text_facts."""
+    return observed_route_text_facts(message)
 
 
 def is_light_workspace_list_with_literal_reply(message: str) -> bool:

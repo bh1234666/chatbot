@@ -27,13 +27,12 @@ log = logging.getLogger(__name__)
 def _configure_logging() -> None:
     """Configure stdlib logging without risking blocked stderr pipes."""
     handlers: list[logging.Handler] = []
+    log_dir = settings.debug_log_dir or "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    app_log = Path(log_dir) / f"app_{os.getpid()}.log"
+    handlers.append(logging.FileHandler(app_log, encoding="utf-8"))
     if settings.debug_console:
         handlers.append(logging.StreamHandler())
-    else:
-        log_dir = settings.debug_log_dir or "logs"
-        os.makedirs(log_dir, exist_ok=True)
-        app_log = Path(log_dir) / f"app_{os.getpid()}.log"
-        handlers.append(logging.FileHandler(app_log, encoding="utf-8"))
     logging.basicConfig(
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s :: %(message)s",
@@ -414,6 +413,34 @@ async def lifespan(app: FastAPI):
             log.info("dream supervisor started")
         except Exception:
             log.exception("dream supervisor failed to start; service continues without dream")
+
+    # 2026-06-10 Round 6: LLM warm-up pings (fire-and-forget).
+    # Profiling showed round1 intent latency is bimodal — 2.6s warm vs 13.5s on
+    # the first call of a session for an identical ~1.7k-token payload
+    # (provider-side cold start / prefix-cache population). Warm the lite and
+    # main model routes once at startup so the first user turn skips that hit.
+    async def _warm_llm_routes():
+        try:
+            from app.llm.client import chat_json
+            from app.llm.model_pool import resolve_task
+            _r1_spec = resolve_task("round1_intent")
+            await chat_json(
+                [
+                    {"role": "system", "content": "Return strict JSON: {\"ok\": true}"},
+                    {"role": "user", "content": "warmup"},
+                ],
+                model_spec=_r1_spec,
+                reasoning="disabled",
+                metrics_tag="json.startup_warmup",
+            )
+            log.info("LLM route warm-up complete")
+        except Exception:
+            log.info("LLM route warm-up skipped (non-fatal)")
+
+    try:
+        asyncio.create_task(_warm_llm_routes())
+    except Exception:
+        log.exception("LLM warm-up scheduling failed (non-fatal)")
 
     yield
 

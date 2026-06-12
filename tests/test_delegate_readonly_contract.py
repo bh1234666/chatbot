@@ -20,8 +20,17 @@ def test_readonly_helper_expected_outputs_are_cleared(tmp_path):
         user_id="user",
     ))
 
-    assert raw[0]["kind"] == "project_map"
-    assert raw[0]["expected_outputs"] == []
+    assert not isinstance(raw, str)
+    assert raw[0]["task_id"] == "map"
+    assert raw[0]["expected_outputs"] == ["_helper_report_top3.md"]
+    facts = raw[0]["guard_observations"]
+    fact = next(
+        item for item in facts
+        if item.get("issue") == "read_only_project_analysis_output_conflict"
+    )
+    assert fact["current_kind"] == "project_map"
+    assert fact["expected_outputs"] == ["_helper_report_top3.md"]
+    assert "guard should decide" in fact["details"]
 
 
 def test_read_helper_staged_evidence_output_becomes_internal(tmp_path):
@@ -50,6 +59,68 @@ def test_read_helper_staged_evidence_output_becomes_internal(tmp_path):
     assert raw[0]["acceptance_checks"] == ["read_evidence_docx.txt exists and is nonempty"]
     assert "Write the final evidence text at the helper sandbox root" in raw[0]["prompt"]
     assert "save source evidence as read_evidence_docx.txt" in raw[0]["prompt"]
+
+
+def test_read_helper_staged_temp_classification_output_becomes_internal(tmp_path):
+    args = {"tasks": [{
+        "task_id": "classify_materials",
+        "kind": "read",
+        "prompt": (
+            "Read the provided staged source files, classify each item, and write "
+            "_env/.temp/material_classification.txt as internal evidence."
+        ),
+        "expected_outputs": ["_env/.temp/material_classification.txt"],
+        "acceptance_checks": ["_env/.temp/material_classification.txt exists"],
+    }]}
+
+    raw = asyncio.run(_sanitize_and_validate_tasks(
+        args,
+        main_workspace=str(tmp_path),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+    ))
+
+    assert raw[0]["kind"] == "read"
+    assert raw[0]["expected_outputs"] == ["material_classification.txt"]
+    assert raw[0]["write_scopes"] == []
+    assert raw[0]["acceptance_checks"] == ["material_classification.txt exists"]
+    assert "_env/.temp/material_classification.txt" not in raw[0]["prompt"]
+    assert "material_classification.txt" in raw[0]["prompt"]
+
+
+def test_read_helper_project_visible_outputs_become_guard_facts(tmp_path):
+    args = {"tasks": [{
+        "task_id": "triage_read",
+        "kind": "read",
+        "prompt": (
+            "Read the inbox messages and produce a classification report plus urgent drafts."
+        ),
+        "expected_outputs": ["_env/classification_report.md", "_env/urgent_drafts.md"],
+    }]}
+
+    raw = asyncio.run(_sanitize_and_validate_tasks(
+        args,
+        main_workspace=str(tmp_path),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+    ))
+
+    assert raw[0]["kind"] == "read"
+    assert raw[0]["expected_outputs"] == []
+    facts = raw[0]["guard_observations"]
+    fact = next(
+        item for item in facts
+        if item.get("issue") == "read_helper_project_visible_output_conflict"
+    )
+    assert "candidate_kind" not in fact
+    assert fact["expected_outputs"] == [
+        "_env/classification_report.md",
+        "_env/urgent_drafts.md",
+    ]
+    assert "suggested_action" not in fact
+    assert "suggestion" not in fact
 
 
 def test_readonly_architecture_review_is_not_rewritten_without_llm(tmp_path):
@@ -125,26 +196,13 @@ async def test_delegate_guard_accepts_project_analysis_kinds(monkeypatch):
     assert should_act is True
     assert reason == "project analysis is correctly scoped"
     assert split_recs == []
-    assert kind_recs == [
-        {
-            "task_id": "arch_client_loop_py",
-            "current_kind": "file_summary",
-            "suggested_kind": "verify",
-            "reason": "wrongly treating file_summary as non-standard",
-        },
-        {
-            "task_id": "impact_check",
-            "current_kind": "verify",
-            "suggested_kind": "impact_review",
-            "reason": "change-risk review fits impact_review",
-        },
-    ]
+    assert kind_recs == []
     assert "- project_map:" in captured["system"]
     assert "- file_summary:" in captured["system"]
     assert "- impact_review:" in captured["system"]
 
 
-async def test_delegate_guard_softens_false_detached_persona_veto(monkeypatch):
+async def test_delegate_guard_keeps_false_detached_guard_block(monkeypatch):
     from app.llm import client as llm_client
     from app.llm.tools import delegate
 
@@ -184,15 +242,97 @@ async def test_delegate_guard_softens_false_detached_persona_veto(monkeypatch):
         }],
     )
 
-    should_act, reason, split_recs, kind_recs, framework = result
-    assert should_act is True
+    should_act, reason, split_recs, kind_recs = result
+    assert should_act is False
     assert "No user request" in reason
-    assert split_recs
+    assert split_recs == []
     assert kind_recs == []
-    assert framework["block"] is True
     assert "# Current task anchor" in captured["user"]
     assert "# Guard runtime facts" in captured["user"]
     assert "Word 论文" in captured["user"]
+
+
+async def test_delegate_guard_task_brief_includes_io_contract(monkeypatch):
+    from app.llm import client as llm_client
+    from app.llm.tools import delegate
+
+    captured = {}
+
+    async def fake_chat_json(messages, *args, **kwargs):
+        captured["user"] = messages[1]["content"]
+        return {"should_act": True, "reason": "bounded code helper has concrete paths and checks"}
+
+    monkeypatch.setattr(llm_client, "chat_json", fake_chat_json)
+
+    should_act, reason, split_recs, kind_recs = await delegate._persona_consent_guard(
+        persona="",
+        user_message="Fix the config loader.",
+        tasks=[{
+            "task_id": "fix-config-loader",
+            "kind": "code",
+            "mode": "easy",
+            "prompt": "Diagnose and fix the config loader using the provided files.",
+            "dispatch_reason": "Concrete source and test paths identify a bounded code fix.",
+            "input_files": ["config_loader.py", "app_config.py", "tests/test_config_loader.py"],
+            "expected_outputs": ["_env/config_loader.py", "_env/app_config.py"],
+            "acceptance_checks": ["python3 -m pytest tests/test_config_loader.py"],
+        }],
+    )
+
+    assert should_act is True
+    assert reason == "bounded code helper has concrete paths and checks"
+    assert split_recs == []
+    assert kind_recs == []
+    assert "input_files: ['config_loader.py', 'app_config.py', 'tests/test_config_loader.py']" in captured["user"]
+    assert "acceptance_checks: ['python3 -m pytest tests/test_config_loader.py']" in captured["user"]
+    assert "Concrete source and test paths identify a bounded code fix." in captured["user"]
+
+
+async def test_delegate_guard_keeps_false_workflow_guard_block(monkeypatch):
+    from app.llm import client as llm_client
+    from app.llm.tools import delegate
+
+    async def fake_chat_json(messages, *args, **kwargs):
+        return {
+            "should_act": False,
+            "reason": "Source materials must be read first before synthesis; single task bundles all stages.",
+            "split_recommendations": [
+                {
+                    "task_id": "inbox_triage",
+                    "should_split": True,
+                    "split_into": ["read_sources", "synthesize_report"],
+                    "reason": "Read source items first, then synthesize.",
+                }
+            ],
+            "kind_recommendations": [
+                {
+                    "task_id": "inbox_triage",
+                    "current_kind": "code",
+                    "suggested_kind": "read",
+                    "reason": "The first stage is reading source messages.",
+                }
+            ],
+            "framework_block": {"block": False, "task_ids": [], "reason": ""},
+        }
+
+    monkeypatch.setattr(llm_client, "chat_json", fake_chat_json)
+
+    result = await delegate._persona_consent_guard(
+        persona="assistant can help with ordinary file tasks",
+        user_message="Sort these messages and prepare drafts when needed.",
+        tasks=[{
+            "task_id": "inbox_triage",
+            "kind": "code",
+            "prompt": "Sort message files and prepare a concise report.",
+            "expected_outputs": ["triage_report.md"],
+        }],
+    )
+
+    should_act, reason, split_recs, kind_recs = result
+    assert should_act is False
+    assert "Source materials must be read first" in reason
+    assert split_recs == []
+    assert kind_recs == []
 
 
 async def test_delegate_guard_ignores_text_artifact_demotion_to_general(monkeypatch):
@@ -344,15 +484,9 @@ async def test_delegate_guard_normalizes_read_recommendation_for_text_deliverabl
 
     assert should_act is True
     assert split_recs == []
-    # 2026-06-04 P133: post-LLM normalization no longer rewrites read→edit on the
-    # "user-facing text artifact" heuristic. The guard LLM's recommendation is
-    # passed through unchanged so the main thread can judge with full context.
-    assert kind_recs == [{
-        "task_id": "analysis_rbtree",
-        "current_kind": "code",
-        "suggested_kind": "read",
-        "reason": "pure analysis and markdown writing",
-    }]
+    # Structured recommendation fields are ignored by runtime; guard decisions
+    # are carried only by should_act and reason.
+    assert kind_recs == []
 
 
 async def test_delegate_guard_ignores_source_read_split_for_framework_contract(monkeypatch):

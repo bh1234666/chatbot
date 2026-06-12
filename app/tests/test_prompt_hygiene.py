@@ -482,6 +482,8 @@ def test_code_helper_compile_diagnostics_are_visible_and_normalized():
     assert "Include paths" in prompt
     assert "Linking and entry points" in prompt
     assert "Runtime and encoding" in prompt
+    assert "pre-fix failure run is optional diagnostic evidence" in prompt
+    assert "not a required milestone" in prompt
     assert "常见编译/运行时错误速查" not in prompt
     assert "优先使用工具提示、平台事实和最小修复" in prompt
 
@@ -509,7 +511,105 @@ def test_helper_request_envelope_guidance_is_visible():
 
     assert "kind='code'" in main_prompt
     assert "project scaffold" in delegate_task_prompt.lower()
+    assert "root-cause analysis is not required" in delegate_task_prompt
+    assert "read, diagnose, edit, and test" in delegate_task_prompt
+    assert "acceptance checks are usually enough" in input_files_desc
     assert "acceptance_checks" in main_prompt
+
+
+def test_periodic_prompt_audit_script_covers_prompt_drift_contract():
+    script = (Path(__file__).resolve().parents[2] / "stress_tools" / "audit_prompt_hygiene.py").read_text(encoding="utf-8")
+
+    for phrase in [
+        "English model-facing body first",
+        "Chinese operator summary must be concise",
+        "No bridge/application-specific special cases",
+        "No unnecessary negative prompting",
+        "No substantial duplicated prompt blocks",
+        "Prompt descriptions must match current orchestration",
+        "Run after every prompt, tool-schema, helper-flow",
+        "several small edits cannot silently drift",
+        "first rule out prompt contradiction or stale workflow facts",
+        "voice, OCR, TTS, image, draw, markdown, edit, and code",
+        "Workflow-contract failures mean the prompt and current process disagree",
+        "Prompt Inventory",
+        "Capability Facts From Current Registrations",
+        "High-Priority Review Queue",
+        "Workflow Contract Anchors",
+        "Sorted by risk",
+        "--report-dir",
+        "Write a timestamped Markdown report before each audit run",
+        "tests/test_source_encoding.py",
+        "app/tests/test_prompt_hygiene.py",
+        "tests/test_model_visible_prompt_contract.py",
+        "tests/test_orchestrator_prompts.py",
+        "tests/test_tool_schemas.py",
+        "tests/test_prompt_cache_layering.py",
+        "--repeat-minutes",
+        "--repeat-count",
+        "Run the same audit periodically",
+    ]:
+        assert phrase in script
+
+
+def test_makefile_exposes_periodic_prompt_audit_targets():
+    makefile = (Path(__file__).resolve().parents[2] / "Makefile").read_text(encoding="utf-8")
+
+    for phrase in [
+        "prompt-audit:",
+        "prompt-audit-full:",
+        "prompt-audit-watch:",
+        "audit_prompt_hygiene.py --show-plan -q",
+        "audit_prompt_hygiene.py --full --show-plan -q",
+        "audit_prompt_hygiene.py --full --repeat-minutes 30 -q",
+        "--write-report logs/prompt_audit_latest.md",
+        "--report-dir logs/prompt_audits",
+    ]:
+        assert phrase in makefile
+
+
+def test_prompt_referenced_internal_capabilities_are_currently_registered():
+    """Prompt-allowed capability names must map to current helper/tool reality."""
+    from app.llm import voice_output
+    from app.llm.tools import delegate, registry
+    from app.llm.tools.helper_kinds import HELPER_CONFIGS, MODEL_VISIBLE_HELPER_KINDS
+
+    visible_kinds = set(MODEL_VISIBLE_HELPER_KINDS)
+    for kind in (
+        "code",
+        "edit",
+        "verify",
+        "draw",
+        "tts",
+        "read",
+        "project_map",
+        "file_summary",
+        "impact_review",
+        "inventory",
+    ):
+        assert kind in visible_kinds
+        assert kind in HELPER_CONFIGS
+
+    main_thread_tools = {
+        tool["function"]["name"]
+        for tool in registry.ROUND2_TOOLS
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+    }
+    assert "delegate" in main_thread_tools
+
+    helper_tools = {
+        tool["function"]["name"]
+        for tool in delegate._HELPER_TOOLS
+        if isinstance(tool, dict) and isinstance(tool.get("function"), dict)
+    }
+    for tool_name in ("ocr", "tts", "office", "workspace", "read_file"):
+        assert tool_name in helper_tools
+
+    assert callable(voice_output.decide_voice)
+    assert callable(voice_output.should_keep_round2_tts_tool)
+
+    edit_description = HELPER_CONFIGS["edit"]["description"].lower()
+    assert "document" in edit_description and "artifact" in edit_description
 
 
 # ── Model-visible style policy ─────────────────────────────────────────────

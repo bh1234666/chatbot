@@ -9,6 +9,14 @@ def _contains_cjk(text: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
+def _tool_names(tools: list[dict]) -> set[str]:
+    return {
+        str((tool.get("function", {}) or {}).get("name", "")).strip()
+        for tool in tools
+        if isinstance(tool, dict) and (tool.get("function", {}) or {}).get("name")
+    }
+
+
 _MOJIBAKE_MARKERS = (
     "\ufffd",
     "銆",
@@ -220,8 +228,8 @@ def _iter_static_model_visible_dict_fields() -> Iterable[tuple[str, str]]:
         "resume_hint",
         "rewrite_warning",
         "suggested_recovery",
-        "suggested_next_actions",
-        "_suggested_next_actions",
+        "available_next_actions",
+        "_available_next_actions",
         "throttle_hint",
         "throttle_warning",
         "truncation_note",
@@ -229,7 +237,6 @@ def _iter_static_model_visible_dict_fields() -> Iterable[tuple[str, str]]:
         "_warning",
         "post_helper_usage_hint",
         "next_action_instruction",
-        "suggested_next_action",
         "suggested_request",
         "recovery_plan",
     }
@@ -291,8 +298,8 @@ _GUIDANCE_TOOL_RESULT_FIELDS = (
     ":resume_hint",
     ":rewrite_warning",
     ":suggested_recovery",
-    ":suggested_next_actions",
-    ":_suggested_next_actions",
+    ":available_next_actions",
+    ":_available_next_actions",
     ":throttle_hint",
     ":throttle_warning",
     ":truncation_note",
@@ -300,7 +307,6 @@ _GUIDANCE_TOOL_RESULT_FIELDS = (
     ":_warning",
     ":post_helper_usage_hint",
     ":next_action_instruction",
-    ":suggested_next_action",
     ":suggested_request",
     ":recovery_plan",
 )
@@ -438,6 +444,57 @@ def test_self_check_guidance_and_candidate_boundary(monkeypatch, tmp_path):
     assert "failed, partial, intermediate, or quality-blocked work" in prompt
     assert "同一产物" in prompt
     assert '"actual_workspace_files":[' in prompt_seen["user"]
+
+
+def test_clean_helper_producer_boundary_requires_self_verified_outputs():
+    from app.core.orchestrator import _clean_helper_boundary_note, _helper_result_is_clean_producer_verified
+
+    clean = {
+        "ok": True,
+        "terminal_reason": "completed",
+        "main_available_files": ["report.md"],
+        "outputs_check": {
+            "outputs_complete": True,
+            "producer_self_verified": True,
+            "outputs_missing": [],
+        },
+        "report": "## What was completed\nWrote and checked report.md.",
+    }
+    assert _helper_result_is_clean_producer_verified(clean) is True
+    note = _clean_helper_boundary_note(clean)
+    assert "producer_self_verified=true" in note
+    assert "should not re-read helper-owned artifact bodies" in note
+    assert "report.md" in note
+
+    missing_verification = {
+        **clean,
+        "outputs_check": {
+            "outputs_complete": True,
+            "producer_self_verified": False,
+        },
+    }
+    assert _helper_result_is_clean_producer_verified(missing_verification) is False
+
+    blocked = {
+        **clean,
+        "outputs_check": {
+            "outputs_complete": True,
+            "producer_self_verified": True,
+            "blocking_quality_warnings": ["unverified section"],
+        },
+    }
+    assert _helper_result_is_clean_producer_verified(blocked) is False
+
+
+def test_round2_skips_main_self_check_when_clean_helper_boundary_is_seen():
+    import inspect
+
+    from app.core import orchestrator
+
+    source = inspect.getsource(orchestrator._round2)
+    assert '"clean_helper_producer_boundary_seen": False' in source
+    assert 'macro_signals["clean_helper_producer_boundary_seen"] = True' in source
+    assert 'and not macro_signals.get("clean_helper_producer_boundary_seen")' in source
 
 
 def test_delivery_display_name_remap_reads_main_and_temp(tmp_path):
@@ -771,6 +828,9 @@ def test_helper_convergence_hints_are_english_first_and_actionable():
         helper_completed_todos_handoff,
         helper_finalize_window,
         helper_iter_checkpoint,
+        helper_office_read_convergence_checkpoint,
+        helper_office_write_convergence_checkpoint,
+        main_helper_completion_checkpoint,
         helper_read_to_write_checkpoint,
         helper_repeated_tool_call_bloat_checkpoint,
         helper_tool_call_bloat_checkpoint,
@@ -783,6 +843,33 @@ def test_helper_convergence_hints_are_english_first_and_actionable():
         (
             "helper.read_to_write",
             helper_read_to_write_checkpoint(iteration=8, helper_kind="edit", recent_reads=6),
+        ),
+        (
+            "helper.office_read_convergence",
+            helper_office_read_convergence_checkpoint(
+                iteration=21,
+                helper_kind="edit",
+                artifact="db_index_paper.docx",
+                read_count=2,
+            ),
+        ),
+        (
+            "helper.office_write_convergence",
+            helper_office_write_convergence_checkpoint(
+                iteration=18,
+                helper_kind="edit",
+                artifact="db_index_paper.docx",
+                write_count=8,
+            ),
+        ),
+        (
+            "main.helper_completion",
+            main_helper_completion_checkpoint(
+                iteration=22,
+                files=["db_index_paper.docx"],
+                facts=["outputs_complete=true", "helper reported recommend: no"],
+                warning_count=0,
+            ),
         ),
         (
             "helper.bloat",
@@ -817,10 +904,74 @@ def test_helper_convergence_hints_are_english_first_and_actionable():
     assert "Output files JSON" in repeated_bloat
     read_to_write = dict(hints)["helper.read_to_write"]
     assert "without writing the expected artifact" in read_to_write
+    assert "read-helper evidence file" in read_to_write
+    assert "*_evidence.txt" in read_to_write
+    assert "covered files or ranges" in read_to_write
     assert "merge or synthesis tasks" in read_to_write
+    office_write = dict(hints)["helper.office_write_convergence"]
+    assert "document-build convergence checkpoint" in office_write
+    assert "not as an automatic stop or forced batch rule" in office_write
+    assert "a coherent batched call is available" in office_write
+    office_read = dict(hints)["helper.office_read_convergence"]
+    assert "factual convergence signal" in office_read
+    assert "not a rule that forbids another read" in office_read
+    assert "targeted block/section" in office_read
+    main_completion = dict(hints)["main.helper_completion"]
+    assert "model-visible evidence" in main_completion
+    assert "Trust the successful helper's producer-owned content judgment" in main_completion
+    assert "Do not re-read helper-produced text" in main_completion
+    assert "verifier, build, or acceptance gaps back to the producer helper or a verify helper" in main_completion
+    assert "non-helper-trust boundary" in main_completion
 
 
-def test_intermediate_feedback_marks_kill_progress_as_stuck():
+def test_delegate_prompt_schema_avoids_preselecting_implementation_route():
+    from app.llm.tools import registry
+
+    prompt_desc = (
+        registry.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]
+        ["items"]["properties"]["prompt"]["description"]
+    )
+    tool_desc = registry.DELEGATE_TOOL_SCHEMA["function"]["description"]
+
+    combined = tool_desc + "\n" + prompt_desc
+    _assert_english_first("delegate.prompt.description", prompt_desc)
+    assert "do not preselect an implementation route" in prompt_desc
+    assert "python-docx" in combined
+    assert "unless the user explicitly requires" in combined
+    assert "不默认指定实现工具" in prompt_desc
+
+
+def test_task_quality_guard_allows_bounded_edit_input_files():
+    from app.llm import aux_prompts
+    from app.llm.tools import registry
+
+    guard_prompt = aux_prompts.TASK_QUALITY_GUARD_SYSTEM
+    delegate_kind_desc = (
+        registry.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]
+        ["items"]["properties"]["kind"]["description"]
+    )
+
+    assert "small bounded set of explicit `input_files`" in guard_prompt
+    assert "one final user-facing text, Markdown, Office, or PDF artifact" in guard_prompt
+    assert "Prefer read helpers first when the source-material extraction is broad" in guard_prompt
+    assert "A read helper may output internal `.txt` evidence" in guard_prompt
+
+    assert "bounded final text/Markdown/Office synthesis task with explicit `input_files`" in delegate_kind_desc
+    assert "For many source files, split into parallel read helpers" in delegate_kind_desc
+
+
+def test_task_quality_guard_allows_bounded_path_known_code_helpers():
+    from app.llm import aux_prompts
+
+    guard_prompt = aux_prompts.TASK_QUALITY_GUARD_SYSTEM
+
+    assert "focused code helper does not require prior main-thread source-body reads" in guard_prompt
+    assert "concrete project paths through `input_files`, expected outputs, and acceptance checks" in guard_prompt
+    assert "Inventory remains useful for broad or unclear projects" in guard_prompt
+    assert "not mandatory for every bounded path-known code fix" in guard_prompt
+
+
+def test_intermediate_feedback_marks_intervene_progress_as_stuck():
     from app.core.intermediate_feedback import (
         classify_workflow_feedback_event,
         summarize_workflow_feedback_event,
@@ -832,14 +983,14 @@ def test_intermediate_feedback_marks_kill_progress_as_stuck():
         "task_id": "read-pdf-vocab",
         "helper_kind": "read",
         "heartbeat_status": "fresh",
-        "wait_or_continue": "kill",
+        "wait_or_continue": "intervene",
         "_runaway": True,
         "_runaway_reason": "iter 133 > 100",
         "what_doing": "reading file",
     }
     assert classify_workflow_feedback_event(payload) == "stuck"
     facts = summarize_workflow_feedback_event(payload)
-    assert "state=kill" in facts
+    assert "state=intervene" in facts
     assert "event_fact=helper_runaway_or_stuck" in facts
     ok, reason = validate_intermediate_feedback_message(
         message="正在读取词汇材料，马上整理输出。",
@@ -881,12 +1032,95 @@ def test_model_visible_text_uses_read_helper_not_read_ocr_helper():
     assert offenders == []
 
 
+def test_helper_prompts_match_filtered_tool_boundaries():
+    from app.llm.tools import delegate
+    from app.llm.tools.helper_kinds import _filter_tools_for_kind
+    from app.llm.tools.helper_prompt_catalog import _select_helper_system
+
+    verify_tools = _tool_names(_filter_tools_for_kind("verify", delegate._HELPER_TOOLS))
+    verify_prompt = _select_helper_system("verify")
+    assert "bash" not in verify_tools
+    assert "## bash Tool" not in verify_prompt
+    assert "## bash Tool On This Host" not in verify_prompt
+
+    tts_tools = _tool_names(_filter_tools_for_kind("tts", delegate._HELPER_TOOLS))
+    tts_prompt = _select_helper_system("tts")
+    assert {"tts", "workspace"} <= tts_tools
+    assert "Use only the `tts` tool" not in tts_prompt
+    assert "Other available tools" in tts_prompt
+
+
+def test_model_visible_read_skill_examples_match_schema_style():
+    from app.llm.tools import helper_prompt_catalog, tool_schemas
+
+    office_desc = tool_schemas.OFFICE_TOOL_SCHEMA["function"]["description"]
+    prompt_text = "\n".join(
+        [
+            helper_prompt_catalog._HELPER_CONSISTENCY_CONTRACT,
+            helper_prompt_catalog._SHARED_WORKSPACE_CORE,
+            helper_prompt_catalog._HELPER_SYSTEM_READ,
+            office_desc,
+        ]
+    )
+    assert "read_skill('" not in prompt_text
+    assert 'read_skill("' not in prompt_text
+    assert 'read_skill` with `name="workspace-deep-dive"`' in prompt_text
+    assert 'read_skill` with `name="source-reading-recipes"`' in prompt_text
+    assert 'read_skill` with `name="office-recipes"`' in prompt_text
+
+
+def test_project_analysis_prompt_matches_scoped_tool_boundary():
+    from app.llm.tools.helper_prompt_catalog import _PROJECT_ANALYSIS_BASE
+
+    assert "cannot execute commands" not in _PROJECT_ANALYSIS_BASE
+    assert "scoped workspace or python tools" in _PROJECT_ANALYSIS_BASE
+    assert "bounded read-only inspection" in _PROJECT_ANALYSIS_BASE
+    assert "Project modification" in _PROJECT_ANALYSIS_BASE
+
+
 def test_expected_document_text_tokens_skip_templates_but_keep_real_quotes():
     from app.llm.tools.delegate_quality import _extract_expected_text_tokens_for_document
 
     prompt = '每题以"6.X 题"为标题，且必须包含"Appendix A"。'
     assert _extract_expected_text_tokens_for_document(prompt) == ["Appendix A"]
     assert _extract_expected_text_tokens_for_document('每题以"6.X ?"为标题') == []
+
+
+def test_expected_document_text_tokens_skip_helper_envelope_metadata():
+    from app.llm.tools.delegate_quality import _extract_expected_text_tokens_for_document
+
+    prompt = (
+        "### Acceptance Checks\n"
+        "- data rows=3\n"
+        "- Acceptance Checks=1\n"
+        "- Heading 2 subsections=4.1\n"
+        "Use TKTK or INSERT only as template placeholders; bracket ellipsis like […] means omitted text.\n"
+        "Generate report.docx with title \"Database Index Report\" and include X=12."
+    )
+
+    assert _extract_expected_text_tokens_for_document(prompt) == ["Database Index Report", "X=12"]
+
+
+def test_expected_document_text_tokens_skip_verification_report_phrasing():
+    from app.llm.tools.delegate_quality import _extract_expected_text_tokens_for_document
+
+    prompt = (
+        "VERDICT: PASS\n"
+        "CHECK 7: CROSS-STRUCTURE COMPARISON\n"
+        "All 7 checks PASS with one quality observation.\n"
+        "Generate report.docx with title \"Database Index Report\" and include X=12."
+    )
+
+    assert _extract_expected_text_tokens_for_document(prompt) == ["Database Index Report", "X=12"]
+
+
+def test_round2_prompt_treats_source_contract_expansion_as_evidence():
+    from app.core.round_prompts import ROUND2_SYSTEM_TEMPLATE
+
+    prompt = ROUND2_SYSTEM_TEMPLATE
+    assert "concrete deliverables, section order, item count" in prompt
+    assert "source file appears to conflict with or expand the current request" in prompt
+    assert "record the difference as evidence" in prompt
 
 
 def test_missing_module_hint_is_fact_first_not_install_first():

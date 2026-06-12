@@ -53,3 +53,63 @@ def test_registry_reexports_schemas():
         pytest.skip("registry 需运行时依赖,离线跳过(本地完整环境覆盖)")
     assert getattr(registry, "PYTHON_TOOL_SCHEMA") is tool_schemas.PYTHON_TOOL_SCHEMA
     assert getattr(registry, "WORKSPACE_TOOL_SCHEMA") is tool_schemas.WORKSPACE_TOOL_SCHEMA
+
+
+def test_memory_expand_schemas_require_current_index_ids():
+    for schema_name in ("EXPAND_WARM_SCHEMA", "EXPAND_COLD_SCHEMA", "EXPAND_KB_SCHEMA"):
+        desc = getattr(tool_schemas, schema_name)["function"]["description"]
+        assert "current" in desc.lower()
+        assert "semantic guesses" in desc
+        assert "not evidence IDs" in desc
+        assert "主题词猜测不是 ID" in desc
+
+
+def test_delegate_expected_outputs_description_distinguishes_inputs_from_owned_outputs():
+    task_props = (
+        tool_schemas.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]
+    )
+    desc = task_props["expected_outputs"]["description"]
+
+    assert "input_files" in desc
+    assert "expected_outputs" in desc
+    assert "produce/modify ownership" in desc
+    assert "copyback and acceptance" in desc
+    assert "bare filename is only a chat-workspace artifact" in desc
+    assert "not project-verifier-visible" in desc
+    assert "input_files 是可读输入" in desc
+
+
+def test_delegate_prompt_description_preserves_structured_source_field_ambiguity():
+    task_props = (
+        tool_schemas.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]
+    )
+    desc = task_props["prompt"]["description"]
+
+    assert "raw field names, values, notes, and acceptance constraints" in desc
+    assert "counts, units, durations, quantities, booleans, or risk flags" in desc
+    assert "ask the helper to compute from evidence" in desc
+    assert "结构化源字段保留原始字段和值" in desc
+
+
+def test_ask_user_question_schema_treats_requested_artifacts_as_authorized():
+    desc = tool_schemas.ASK_USER_QUESTION_SCHEMA["function"]["description"]
+
+    assert "save, create, edit, or jot down an artifact is already task authorization" in desc
+    assert "content or destination facts are missing" in desc
+    assert "用户已要求保存/创建/记录时即有该产物授权" in desc
+
+
+def test_helper_request_envelope_states_project_visibility_fact():
+    from app.llm.tools.delegate_framework import format_helper_request_envelope
+
+    text = format_helper_request_envelope({
+        "task_id": "report",
+        "kind": "edit",
+        "prompt": "Create the requested project report.",
+        "expected_outputs": ["triage_report.txt"],
+    })
+
+    assert "Project Visibility Fact" in text
+    assert "Bare output filenames are chat-workspace artifacts" in text
+    assert "`_env/<project-relative-path>`" in text
+    assert "项目验收可见产物需要" in text

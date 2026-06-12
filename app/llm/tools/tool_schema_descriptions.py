@@ -50,25 +50,30 @@ def _apply_english_schema_descriptions() -> None:
         (
             "Expand warm-memory entries by ID. Use this when an indexed warm-memory headline looks relevant and you "
             "need its summary, hints, entities, or tendencies before replying. Expand only entries that can affect the "
-            "current answer."
+            "current answer. IDs are opaque handles from the current memory index; semantic guesses such as topic names "
+            "are not evidence IDs and return empty results."
         ),
-        "按 ID 展开相关温记忆，只取会影响当前回复的条目。",
+        "按当前记忆索引里的真实 ID 展开温记忆；主题词猜测不是 ID。",
     )
     _set_prop_description(EXPAND_WARM_SCHEMA, "ids", "Warm-memory IDs such as `w_xxx`.", "温记忆 ID 列表。")
     _set_tool_description(
         EXPAND_COLD_SCHEMA,
         (
             "Expand cold-memory graph nodes by ID. Depth 1 returns direct neighbors; depth 2 returns two-hop neighbors "
-            "for deeper investigation when the current task needs long-term facts."
+            "for deeper investigation when the current task needs long-term facts. IDs are opaque handles from the "
+            "current memory index; semantic guesses such as topic names are not evidence IDs and return empty results."
         ),
-        "按 ID 展开冷记忆节点，可按深度查看邻居线索。",
+        "按当前记忆索引里的真实 ID 展开冷记忆；主题词猜测不是 ID。",
     )
     _set_prop_description(EXPAND_COLD_SCHEMA, "ids", "Cold-memory node IDs such as `c_xxx`.", "冷记忆节点 ID 列表。")
     _set_prop_description(EXPAND_COLD_SCHEMA, "depth", "Graph traversal depth, usually 1 or 2.", "邻居遍历深度。")
     _set_tool_description(
         EXPAND_KB_SCHEMA,
-        "Expand knowledge-base nodes from compressed shared history. Use it like cold memory, scoped to the KB.",
-        "展开共享知识库节点，用法类似冷记忆。",
+        (
+            "Expand knowledge-base nodes from compressed shared history. Use it like cold memory, scoped to the KB. "
+            "Use concrete KB IDs from the current index; semantic guesses such as topic names are not evidence IDs."
+        ),
+        "用当前索引里的真实 KB ID 展开知识库节点；主题词猜测不是 ID。",
     )
     _set_tool_description(
         MARK_AVOID_SCHEMA,
@@ -86,9 +91,9 @@ def _apply_english_schema_descriptions() -> None:
         WORKSPACE_TOOL_SCHEMA,
         (
             "Lightweight persistent workspace operations: create directories, write small files, run bounded commands, "
-            "and locate files. The main process should use this for orchestration, inspection, and very small checks. "
-            "Substantial implementation, charting, Office work, OCR, TTS, and long analysis should be delegated to "
-            "helpers. In environment project work, this tool works in the chat workspace; real project files are handled "
+            "and locate files. The main process uses this for orchestration, inspection, and very small checks. "
+            "Substantial implementation, charting, Office work, OCR, TTS, and long analysis are helper-owned in the "
+            "normal workflow. In environment project work, this tool works in the chat workspace; real project files are handled "
             "through env tools. `_env/...` paths are staged copies supplied for inspection or editing; project creation "
             "uses env_apply_create. Existing project files follow env_fetch -> edit_file/multi_edit/insert_in_file on the "
             "staged copy -> env_diff -> env_apply_replace. New project files should be created with env_apply_create "
@@ -173,8 +178,9 @@ def _apply_english_schema_descriptions() -> None:
     _set_tool_description(
         READ_FILE_SCHEMA,
         (
-            "Read a text file or a selected line range from the workspace. Use targeted ranges for large files after "
-            "you know where to look. For Office/PDF/images/media, inspect first and use the suggested specialized tool."
+            "Read a text file or a selected line range from the workspace. Helpers may use this for source and evidence "
+            "reading. The main process has a stricter read schema and should normally delegate broad reading. For "
+            "Office/PDF/images/media, inspect first and use the suggested specialized tool."
         ),
         "读取文本文件，可按行段读取；结构化文件先 inspect。",
     )
@@ -186,12 +192,18 @@ def _apply_english_schema_descriptions() -> None:
         EDIT_FILE_SCHEMA,
         (
             "Replace one exact text span in a plain text file. Use it for precise small edits where `old_str` appears "
-            "exactly `expected_count` times. For broad rewrites or repeated failed edits, re-read the relevant region "
-            "and use a better edit strategy."
+            "exactly `expected_count` times. `old_str` is literal file text, not the JSON-escaped representation of a "
+            "tool result; backslashes before quotes belong only when the file itself contains them. For broad rewrites "
+            "or repeated failed edits, re-read the relevant region and use a better edit strategy."
         ),
-        "精确替换纯文本片段，适合小范围编辑。",
+        "精确替换纯文本片段；old_str 是文件原文，不是 JSON 转义文本。",
     )
-    _set_prop_description(EDIT_FILE_SCHEMA, "path", "Workspace-relative text file path.", "文件相对路径。")
+    _set_prop_description(
+        EDIT_FILE_SCHEMA,
+        "path",
+        "Workspace-relative text file path. In environment project helpers, edit the staged `_env/...` copy, not the bare project-relative path.",
+        "文件相对路径；项目 helper 编辑已暂存的 `_env/...` 副本。",
+    )
     _set_prop_description(EDIT_FILE_SCHEMA, "old_str", "Exact text to replace, including whitespace and newlines.", "要替换的精确文本。")
     _set_prop_description(EDIT_FILE_SCHEMA, "new_str", "Replacement text; an empty string deletes the matched span.", "替换后的新文本。")
     _set_prop_description(EDIT_FILE_SCHEMA, "expected_count", "How many times `old_str` must appear.", "期望匹配次数。")
@@ -200,17 +212,33 @@ def _apply_english_schema_descriptions() -> None:
         "Insert text into a plain text file at a specified line position. Prefer edit tools for replacement scenarios.",
         "按行位置插入文本，替换场景用 edit。",
     )
-    _set_prop_description(INSERT_IN_FILE_SCHEMA, "path", "Workspace-relative text file path.", "文件相对路径。")
+    _set_prop_description(
+        INSERT_IN_FILE_SCHEMA,
+        "path",
+        "Workspace-relative text file path. In environment project helpers, insert into the staged `_env/...` copy, not the bare project-relative path.",
+        "文件相对路径；项目 helper 使用已暂存的 `_env/...` 副本。",
+    )
     _set_prop_description(INSERT_IN_FILE_SCHEMA, "after_line", "Insert after this line number; 0 means beginning, -1 means end.", "插入位置行号。")
     _set_prop_description(INSERT_IN_FILE_SCHEMA, "content_to_insert", "Text to insert.", "要插入的内容。")
     _set_tool_description(
         MULTI_EDIT_SCHEMA,
-        "Apply multiple exact text replacements atomically to a plain text file.",
-        "一次性原子应用多个精确替换。",
+        "Apply multiple exact text replacements atomically to a plain text file. Each old_str is literal file text, not JSON-escaped tool-result text.",
+        "一次性原子应用多个精确替换；old_str 是文件原文，不是 JSON 转义文本。",
     )
-    _set_prop_description(MULTI_EDIT_SCHEMA, "path", "Workspace-relative text file path.", "文件相对路径。")
+    _set_prop_description(
+        MULTI_EDIT_SCHEMA,
+        "path",
+        "Workspace-relative target for the atomic edit batch; environment project helpers use the staged `_env/...` copy for coordinated replacements, not a bare project-relative path.",
+        "原子批量替换目标；项目 helper 使用 `_env/...` 暂存副本，不用裸项目路径。",
+    )
     _set_prop_description(MULTI_EDIT_SCHEMA, "edits", "Ordered exact replacements to apply atomically.", "按顺序原子应用的替换列表。")
-    _set_nested_prop_description(MULTI_EDIT_SCHEMA, "edits", "old_str", "Exact text to replace.", "要替换的精确文本。")
+    _set_nested_prop_description(
+        MULTI_EDIT_SCHEMA,
+        "edits",
+        "old_str",
+        "Exact literal file text to replace; do not copy JSON escape backslashes unless they exist in the file.",
+        "要替换的文件原文；不要复制 JSON 转义反斜杠。",
+    )
     _set_nested_prop_description(MULTI_EDIT_SCHEMA, "edits", "new_str", "Replacement text; an empty string deletes the matched span.", "替换后的新文本。")
     _set_nested_prop_description(MULTI_EDIT_SCHEMA, "edits", "expected_count", "How many times `old_str` must appear.", "期望匹配次数。")
     _set_tool_description(
@@ -281,9 +309,12 @@ def _apply_english_schema_descriptions() -> None:
             "failed or partial records remain visible as recovery state until verified completion. For resource waits, "
             "first call `action='status'` and read `resource_requests[].request_id`; update a resource request only when "
             "you have that request_id and a concrete status decision. Producing and verifying a requested file can be "
-            "recorded as evidence or an artifact without forcing a resource-request update first."
+            "recorded as evidence or an artifact without forcing a resource-request update first. This ledger is internal "
+            "structured state; it is not a user-visible note file, memory file, or handoff artifact. When a user explicitly "
+            "asks to store facts as memory, notes, or later handoff, record each compact fact here as evidence or a "
+            "contract in addition to any requested or naturally needed visible note/handoff file; neither channel replaces the other."
         ),
-        "结构化任务账本，记录契约、证据、产物和资源等待状态；更新资源请求前先 status 取得 request_id。",
+        "结构化任务账本，不替代可见笔记/交接文件；后续记忆事实入 ledger 的同时保留需要的可见产物。",
     )
     _set_prop_description(
         AGENT_STATE_SCHEMA,
@@ -323,18 +354,28 @@ def _apply_english_schema_descriptions() -> None:
         TASK_PLAN_SCHEMA,
         (
             "Maintain the active task plan snapshot for the main process. Use it after reading memory, files, "
-            "continued toolchain context, or agent_state when the active task changes or becomes clearer than the "
-            "latest user turn alone. This updates the thread plan and mirrors compact facts into agent_state; it "
-            "does not verify artifacts or replace final JSON."
+            "continued toolchain context, or agent_state when those facts clarify or change the active task beyond "
+            "the current turn text. This updates the thread plan and mirrors compact facts into agent_state; it "
+            "does not verify artifacts or replace final JSON. Updates retain prior acceptance/evidence facts for "
+            "the same task unless the model states task-change evidence in the plan."
         ),
-        "维护当前主线任务快照；读取记忆、文件或续作证据后可更新。",
+        "维护当前主线任务快照；读取记忆、文件或续作证据后可更新；同任务旧验收事实会保留。",
     )
     _set_prop_description(TASK_PLAN_SCHEMA, "action", "Read or update the active task plan snapshot.", "读取或更新当前任务快照。")
     _set_prop_description(TASK_PLAN_SCHEMA, "goal", "Resolved active task goal.", "解析后的当前主线任务目标。")
     _set_prop_description(TASK_PLAN_SCHEMA, "key_points", "Compact current-task facts or acceptance notes.", "当前任务事实或验收要点。")
     _set_prop_description(TASK_PLAN_SCHEMA, "deliverables", "Expected current-task user-facing deliverables, if known.", "预期本任务交付物。")
-    _set_prop_description(TASK_PLAN_SCHEMA, "acceptance", "Checkable completion criteria for the active task.", "可检查验收标准。")
-    _set_prop_description(TASK_PLAN_SCHEMA, "evidence_required", "Evidence needed before finalizing this active task.", "最终交付前所需证据。")
+    _set_prop_description(TASK_PLAN_SCHEMA, "acceptance", "Checkable completion criteria for the active task. Omitted prior criteria for the same task remain visible in agent_state for comparison.", "可检查验收标准；同任务未重复的旧验收仍保留供对照。")
+    _set_prop_description(
+        TASK_PLAN_SCHEMA,
+        "evidence_required",
+        (
+            "Evidence needed before finalizing this active task. This records final evidence needs, not who must collect them. "
+            "For coding/debugging, code helpers can satisfy source reading, failure diagnosis, edits, and tests through input_files and acceptance_checks; "
+            "the main thread can keep final diff/apply and acceptance evidence compact."
+        ),
+        "最终交付前所需证据；记录证据需求，不表示必须由主进程收集。",
+    )
     _set_prop_description(TASK_PLAN_SCHEMA, "risks", "Known ambiguity or stale-context risks.", "已知歧义或旧上下文风险。")
     _set_prop_description(TASK_PLAN_SCHEMA, "current_stage", "Current active-task stage.", "当前阶段。")
     _set_prop_description(TASK_PLAN_SCHEMA, "reason", "Brief factual reason for the update.", "更新原因。")
@@ -372,24 +413,30 @@ def _apply_english_schema_descriptions() -> None:
             "long scripts, experiments, evidence-backed analysis, research claims, citations, chapters, tables with final values, charts, "
             "and final document assembly. Then spawn "
             "bounded slice helpers with the task-level `framework` field filled, and fan in their verified artifacts instead "
-            "of assigning the entire deliverable to one oversized helper. Long code, documents, tables, reports, OCR/source evidence, and analysis outputs "
+            "of assigning the entire deliverable to one oversized helper. For one ultra-large file, long log, or long source material that needs broad coverage, "
+            "fan out focused `read` or `file_summary` helpers by concrete line ranges, chapters, pages, headings, or natural sections; require coverage summaries, "
+            "gaps, evidence paths, and merge anchors from each slice. Long code, documents, tables, reports, OCR/source evidence, and analysis outputs "
             "should be produced in inspectable segments that can be resumed and merged. When many raw source files, Office/PDF/image materials, "
             "archive folders, or long text sources must be read, first fan out focused `read` helpers by source group or batch and let later "
             "`code` or `edit` helpers consume their evidence; keep the raw reading phase with read helpers even when scripts are mentioned. "
+            "When a final text/Markdown/Office artifact depends on a small bounded set of explicit `input_files`, one `edit` helper may read those files directly and assemble the final artifact; use separate read helpers when extraction is broad, long, visual, uncertain, or reusable. "
             "Every spawned task should be a compact structured request envelope. Keep `prompt` to the helper's local mission, slice boundary, "
             "input references, output paths, checks, and recovery conditions. Use `framework` for shared contracts, `input_files` for files or manifests, "
-            "and `expected_outputs` for owned paths. Full implementation source, long document prose, large benchmark scripts, complete tables, "
+            "and `expected_outputs` for owned paths. State required output format, evidence, and validation facts; do not preselect an "
+            "implementation route such as python-docx, custom scripts, or a helper-internal tool unless the user explicitly requires it or verified limitations make it necessary. "
+            "Full implementation source, long document prose, large benchmark scripts, complete tables, "
             "and copied file bodies belong in helper-owned workspace outputs that the helper authors and verifies. "
             "When the user-visible deliverable is a paper, report, or Office/PDF file, code, benchmark, and analysis helpers produce supporting evidence; "
-            "after sufficient evidence exists, delegate `edit` for final document assembly instead of continuing implementation expansion. For "
+            "after sufficient evidence exists, delegate `edit` for final document assembly instead of continuing implementation expansion. "
             "`_helpers_shared/...` files are handoff evidence for downstream helpers. Final project deliverables or user-facing artifacts "
             "must be assembled into clean non-shared workspace files or staged `_env/...` project paths before acceptance. "
-            "long tasks, set `wait_window_sec` and decide from returned progress whether to wait, resume, collect, or "
+            "In environment project work, project validators and check scripts inspect the real project/workspace state; a bare helper output filename is chat-workspace state, while `_env/<project-relative-path>` is a staged project output for main acceptance and apply. "
+            "long tasks, set `wait_window_sec` on spawn/collect/wait_any and decide from returned progress whether to wait, resume, collect, or "
             "cooperatively interrupt."
         ),
-        "统一派发和管理 helper；任务参数用短请求信封，源码正文、长文和完整表格由 helper 在工作区生成。",
+        "统一派发和管理 helper；超大单文件可按范围/章节等派多个 helper；源码正文、长文和完整表格由 helper 在工作区生成。",
     )
-    _set_prop_description(DELEGATE_TOOL_SCHEMA, "action", "Operation: spawn/spawn_async, poll, collect, wait_any, kill, or status.", "helper 管理操作。")
+    _set_prop_description(DELEGATE_TOOL_SCHEMA, "action", "Operation: spawn/spawn_async, poll, collect, wait_any, kill, or status. Poll is an immediate heartbeat query; use collect or wait_any to wait.", "helper 管理操作。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "task_ids", "Task IDs for poll, collect, wait_any, or batch kill.", "要查询或操作的 task_id 列表。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "tasks", "Task list for spawning helpers. Each task needs at least `task_id` and `prompt`.", "要派发的 helper 任务列表。")
     _set_nested_prop_description(
@@ -417,12 +464,17 @@ def _apply_english_schema_descriptions() -> None:
             "Write the request as a structured helper request envelope covering goal, slice boundary, inputs, outputs, checks, and recovery. "
             "Use it for concise behavior and specification detail. Full source code, long prose, file bodies, complete benchmark scripts, "
             "and filled tables belong in the helper's workspace outputs. "
-            "For long file lists or repeated instructions, put the list in a workspace manifest or `input_files` and keep this field compact. "
+            "For source files that can be named, put the paths in `input_files` and do not paste their bodies into this field. For long file lists or repeated instructions, put the list in a workspace manifest or `input_files` and keep this field compact. "
+            "When source/test paths are available through `input_files`, a root-cause analysis is not required in this field; state the goal and acceptance facts and let the helper read, diagnose, edit, and test. "
+            "If the main thread already read a source body, summarize only the fact needed for routing or acceptance instead of copying the complete body. "
+            "State required output format, evidence, and validation facts; do not preselect an implementation route such as python-docx, custom scripts, "
+            "or a helper-internal tool unless the user explicitly requires it or verified limitations make it necessary. "
+            "For structured source fields, pass raw field names, values, notes, and acceptance constraints. If a value is paired with counts, units, durations, quantities, booleans, or risk flags, state the ambiguity and ask the helper to compute from evidence; total/package/safe/satisfied interpretations need explicit source wording. "
             "Use `code` for project scaffold/source/script/benchmark files or technical framework/spec contracts that need workspace writes or commands. "
             "Use `edit` for final user-facing documents and prose/report outlines or contracts assembled from verified evidence. "
             "Choose a concrete helper kind whenever expected_outputs require a workspace file."
         ),
-        "prompt 是短请求信封，承载目标和规格；完整源码、长文和表格作为 helper 产物输出。",
+        "prompt 是短请求信封；有 input_files 时无需先写根因分析，不默认指定实现工具，已读源码也只摘要必要事实，结构化源字段保留原始字段和值，完整源码、长文和表格作为 helper 产物输出。",
     )
     _set_nested_prop_description(
         DELEGATE_TOOL_SCHEMA,
@@ -433,23 +485,39 @@ def _apply_english_schema_descriptions() -> None:
             "fan-out, then pass the relevant contract to each slice helper. Include goal, interfaces/schema, outline, "
             "evidence or source map, ownership boundary, validation checks, segment outputs, merge order, and the exact "
             "output matrix for downstream helpers: task_id, kind, mode, input_files, expected_outputs, acceptance checks, "
-            "and final merge/apply target. Keep it compact enough to paste into later helpers; keep substantive evidence, "
-            "final numeric values, citations, conclusions, implementation detail, and long section text in named producer outputs "
+            "and final merge/apply target. The first framework helper owns only this structural contract; it defines slots, "
+            "ownership, and acceptance rather than filling those slots. Keep it compact enough to paste into later helpers; keep substantive evidence, "
+            "evidence-backed analysis, research claims, citations, final numeric values, citations, conclusions, implementation detail, and long section text in named producer outputs "
             "instead of this field. A prompt-only reference to a contract file is useful context; still include "
-            "this field for each dependent slice. `_helpers_shared/...` is handoff evidence; final deliverables should be assembled into non-shared "
-            "workspace files or `_env/...` project paths."
+            "this field for each dependent slice. `_helpers_shared/...` files are handoff evidence; final deliverables and user-facing artifacts should be assembled into clean non-shared "
+            "workspace files or `_env/...` project paths. In environment project work, include project-visible final targets in the output matrix as `_env/<project-relative-path>` rather than bare filenames when validators or project checks need to see them."
         ),
         "共享框架契约需紧凑可传递，只放结构、槽位、归属、依赖和验收；实质内容由分片产物承载。",
     )
     _set_nested_prop_description(
         DELEGATE_TOOL_SCHEMA,
         "tasks",
+        "dispatch_reason",
+        (
+            "Main-thread reason for this exact helper boundary, kind, mode, and split choice. "
+            "Use it after a guard block, or when the guard may reasonably question the plan, to state the factual justification in free-form language: "
+            "why this boundary, kind, mode, framework, split, or retry is intentional. "
+            "This field informs the task-quality guard; it does not override safety, resource, path, or guard decisions."
+        ),
+        "主进程给守卫的自由派发理由；说明当前派发事实，不绕过守卫。"
+    )
+    _set_nested_prop_description(
+        DELEGATE_TOOL_SCHEMA,
+        "tasks",
         "input_files",
         (
-            "Concrete files, staged paths, source ranges, or artifacts transferred or expected to be readable by this helper. "
-            "Use `_env/...` paths in environment mode and include only files relevant to this helper's slice."
+            "Concrete files, staged paths, source ranges, line ranges, page ranges, section labels, or artifacts transferred or expected to be readable by this helper. "
+            "In environment project work, put likely project-relative paths here even when they are not yet staged; helper startup can stage exact `_env/...` copies. "
+            "Use this instead of pasting full source bodies or long bug analysis into `prompt`; keep only files or ranges relevant to this helper's slice. "
+            "Even if the main thread has already read a file body, the helper can reread the path from input_files, so prompt should carry compact facts rather than complete source text. "
+            "For coding/debugging, file paths plus acceptance checks are usually enough for the helper to read, diagnose, edit, and test."
         ),
-        "传给 helper 或要求其读取的具体文件、路径、范围或产物。",
+        "传给 helper 的具体文件、路径、行/页/章节范围或产物；项目模式可填项目相对路径以自动暂存，通常无需把源码正文或长分析塞进 prompt。",
     )
     _set_nested_prop_description(
         DELEGATE_TOOL_SCHEMA,
@@ -479,16 +547,16 @@ def _apply_english_schema_descriptions() -> None:
         (
             "Task nature. Use `code` for writing/fixing programs, HTML, scripts, complex data analysis, benchmarks, "
             "build/test interpretation, executable file-preparation steps before reading, and directory/source statistics "
-            "that need commands or scripts. Use `read` for source-material reading and evidence extraction from user "
+            "that need commands or scripts. Use `read` for source-material reading, classification, labeling, triage, transcription, and evidence extraction from user "
             "materials, prepared archive contents, text files, images, PDFs, Office files, screenshots, forms, and scanned "
-            "or visual content; script or library wording stays read when the script is only a reading method. For many source files, split into parallel read helpers by group or batch before downstream code/edit work. Use `edit` for "
+            "or visual content; script or library wording stays read when the script is only a reading method. For many source files, split into parallel read helpers by group or batch before downstream code/edit work. A bounded final text/Markdown/Office synthesis task with explicit `input_files` can be `edit` directly. Use `edit` for "
             "documents, prose/report sections assembled from verified evidence, and Office/PDF assembly. For document-delivery tasks, benchmark/code outputs are inputs to edit, not substitutes for the final document. Use `draw` for final image/chart files from data or specs, `verify` for checking "
             "existing code/images/documents, `tts` for audio generation, and "
             "`project_map`/`file_summary`/`impact_review` for project analysis; selected source/config file summaries "
             "in a code project stay `file_summary`. Use mode='hard' for stronger retries while "
             "preserving the same base kind; new work uses the supported base kinds."
         ),
-        "任务类型；材料读取优先 read 并按批并行，code 处理实现/计算/脚本产物，edit 处理最终文档。",
+        "任务类型；广泛材料读取优先 read 并按批并行，小型明确 input_files 可由 edit 直接组装最终文档，code 处理实现/计算/脚本产物。",
     )
     _set_nested_prop_description(
         DELEGATE_TOOL_SCHEMA,
@@ -508,17 +576,19 @@ def _apply_english_schema_descriptions() -> None:
         (
             "Expected deliverable or staged project-copy paths the helper may produce or edit. In environment work, "
             "include every `_env/...` project file this helper is allowed to touch, including package init files, "
-            "test glue, config, scripts, docs, and any file added during a same-task resume."
+            "test glue, config, scripts, docs, reports, data files, and any file added during a same-task resume. When source/test/config "
+            "paths are known and the helper is likely to edit them, include those targets here as owned staged outputs. "
+            "When project validators or check scripts must see a produced artifact, declare the intended project-relative target as `_env/<path>`; a bare filename is only a chat-workspace artifact and is not project-verifier-visible until the main process creates or applies a project file. For `kind=read`, `.txt` expected_outputs are internal evidence and should normally be helper-local names such as `read_evidence.txt`; `_env/...` is reserved for staged project files and project-visible artifacts. "
+            "`input_files` records readable inputs, while `expected_outputs` records produce/modify ownership for copyback and acceptance."
         ),
-        "预期产物或允许编辑的 _env 项目文件清单。",
+        "预期产物或允许编辑的 _env 项目文件清单；read 证据用内部 txt 名称；input_files 是可读输入，expected_outputs 是产出/修改归属。",
     )
-    _set_prop_description(DELEGATE_TOOL_SCHEMA, "wait_window_sec", "Seconds to wait before returning progress for still-running helpers.", "等待窗口秒数。")
+    _set_prop_description(DELEGATE_TOOL_SCHEMA, "wait_window_sec", "Seconds to wait for spawn, collect, or wait_any before returning progress for still-running helpers. Ignored by poll.", "等待窗口秒数；poll 忽略。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "min_results_to_return", "Return early once this many spawned helpers have completed.", "达到指定完成数量后提前返回。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "task_id", "Target task ID for single-helper actions such as kill.", "单个目标 task_id。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "reason", "Reason code for cooperative helper interruption.", "协作中断原因。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "force", "Deprecated compatibility flag; helper interruption is cooperative.", "历史兼容参数。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "force_blanket_resume", "Confirm an intentional resume of multiple active helpers.", "确认批量续作。")
-    _set_prop_description(DELEGATE_TOOL_SCHEMA, "auto_final", "Legacy compatibility flag for historical paired-helper behavior.", "历史兼容参数。")
     _set_prop_description(DELEGATE_TOOL_SCHEMA, "helper_think", "Enable low reasoning for spawned coding or verification helpers.", "为部分 helper 开启低档思考。")
 
     _set_tool_description(
@@ -526,14 +596,18 @@ def _apply_english_schema_descriptions() -> None:
         (
             "Read, write, edit, OCR embedded images, and verify Office documents. The file extension selects DOCX, "
             "PPTX, or XLSX, and each format has different valid actions. For DOCX, read/inspect body structure with "
-            "`read`, edit with `write`, `append`, `replace_section`, `replace_block`, `insert_block`, `delete_block`, "
+            "`read`, edit with `write`, `append`, `replace_section`, `replace_block`, `replace_blocks`, `insert_block`, `delete_block`, "
+            "`fill_empty_headings` for batch-populating existing empty DOCX headings, "
             "embed images with `image` blocks or `insert_image`, and verify data claims with `verify_numbers` or "
-            "`verify_rigor`. `verify_integrity` is XLSX-only. Valid DOCX block types are `heading`, `paragraph`, "
-            "`list`, `table`, `image`, `equation`, and `page_break`; plain prose is `paragraph`, bullets are `list`, "
-            "and image blocks require an existing workspace `path`. Table rows must contain at least one non-empty "
-            "cell. For targeted DOCX edits, call `read` first and use the exact non-negative `block_index` from the "
-            "read output. For large documents, page body text with `start_block`/`max_blocks`, OCR embedded images "
-            "with `ocr_images` into `save_to`, and inspect outputs before delivery."
+            "`verify_rigor`. `verify_integrity` is XLSX-only and is not a DOCX validity check. Valid DOCX block types are `heading`, `paragraph`, "
+            "`list`, `table`, `image`, `equation`, and `page_break`; plain prose is `paragraph`, subtitles are also `paragraph`, bullets are `list`, "
+            "and Table rows must contain at least one non-empty cell in a 2D array such as rows:[[\"A\",\"B\"],[\"C\",\"D\"]]. Image blocks require an existing workspace `path`. "
+            "For targeted DOCX edits, call `read` first and use the exact non-negative `block_index` from the "
+            "read output. A successful DOCX read returns headings plus paragraph/block, table, and image counts; "
+            "repeat reads are useful when the artifact changed or a named block range/detail remains unchecked. For large documents, page body text with `start_block`/`max_blocks`, OCR embedded images "
+            "with `ocr_images` into `save_to`, and inspect outputs before delivery. For formulas, data-rigor verification parameters, and detailed Office recipes, "
+            "load `read_skill` with `name=\"office-recipes\"` when those details affect the next action. For DOCX structural acceptance, "
+            "`read` returns headings plus paragraph/table/image counts; `search_in_file` is only for plain text files."
         ),
         "Office 按扩展名选择能力；DOCX 合法 block/type/action 要匹配，verify_integrity 仅用于 XLSX。",
     )
@@ -542,11 +616,13 @@ def _apply_english_schema_descriptions() -> None:
         "action",
         (
             "Office operation. DOCX supports read/write/append/replace_section/replace_block/delete_block/"
-            "insert_block/extract_images/ocr_images/insert_image/verify_numbers/verify_rigor. PPTX supports slide "
+            "replace_blocks/insert_block/fill_empty_headings/extract_images/ocr_images/insert_image/verify_numbers/verify_rigor. PPTX supports slide "
             "read/write/edit/image extraction/OCR/insert_image/verify_numbers. XLSX supports read/write/append/"
-            "update_cells/extract_images/ocr_images/verify_integrity. Choose a verifier supported by the file type."
+            "update_cells/extract_images/ocr_images/verify_integrity. Choose a verifier supported by the file type: "
+            "DOCX structural checks use `read`, DOCX data checks use `verify_numbers` or `verify_rigor` with `csv_paths`, "
+            "and `verify_integrity` is XLSX-only, not a DOCX validity check."
         ),
-        "Office 操作类型；不同扩展名支持的 action 不同。",
+        "Office 操作类型；DOCX 用 read/verify_numbers/verify_rigor，verify_integrity 仅 XLSX。",
     )
     _set_prop_description(OFFICE_TOOL_SCHEMA, "path", "Workspace-relative Office file path.", "Office 文件相对路径。")
     _set_prop_description(OFFICE_TOOL_SCHEMA, "title", "Optional cover/title text for document creation.", "可选标题。")
@@ -555,8 +631,8 @@ def _apply_english_schema_descriptions() -> None:
         "blocks",
         (
             "Structured DOCX blocks for write/append/edit actions. Valid types: heading, paragraph, list, table, "
-            "image, equation, page_break. Use paragraph for ordinary text, list for bullet/numbered items, table rows "
-            "as non-empty 2D arrays, and image blocks with an existing workspace path."
+            "image, equation, page_break. Use paragraph for ordinary text/subtitles, list for bullet/numbered items, "
+            "table rows as non-empty 2D arrays like [[\"A\",\"B\"],[\"C\",\"D\"]], and image blocks with an existing workspace path."
         ),
         "DOCX 结构化块；普通文字用 paragraph，项目符号用 list，表格和图片需字段完整。",
     )
@@ -612,16 +688,18 @@ def _apply_english_schema_descriptions() -> None:
     _set_tool_description(
         TODO_WRITE_SCHEMA,
         (
-            "Write the current task todo list, replacing the previous list. Use it to track complex multi-step work. "
+            "Write the current short task todo list, replacing the previous list. Use it to track complex multi-step work, "
+            "not to carry long prose, scripts, document bodies, tables, patches, or final answers. Use workspace, office, "
+            "or edit tools for artifact content. "
             "At most one todo may be `in_progress` at a time. Even when multiple helpers run in parallel, mark only "
             "the current coordinating step as `in_progress`; keep other parallel branches `pending` until the main "
             "process is actively handling them."
         ),
-        "覆盖写入当前任务清单；并行 helper 场景也只能有一个主控步骤处于 in_progress。",
+        "覆盖写入短任务清单；不承载长正文、脚本或文档内容；并行 helper 场景也只能有一个主控步骤处于 in_progress。",
     )
     _set_prop_description(TODO_WRITE_SCHEMA, "todos", "Complete replacement todo list.", "完整任务清单。")
     _set_nested_prop_description(TODO_WRITE_SCHEMA, "todos", "id", "Unique todo ID.", "唯一任务 ID。")
-    _set_nested_prop_description(TODO_WRITE_SCHEMA, "todos", "content", "Concrete task description.", "具体任务描述。")
+    _set_nested_prop_description(TODO_WRITE_SCHEMA, "todos", "content", "Brief concrete task description, not long artifact content.", "简短任务描述，不是长产物内容。")
     _set_nested_prop_description(TODO_WRITE_SCHEMA, "todos", "status", "Todo status; at most one item should be in progress.", "任务状态。")
     _set_tool_description(TODO_READ_SCHEMA, "Read the current task todo list.", "读取当前任务清单。")
     _set_tool_description(
@@ -703,8 +781,12 @@ def _apply_english_schema_descriptions() -> None:
     _set_prop_description(REQUEST_RESOURCE_SCHEMA, "resume_instruction", "Instruction the main process should use when resuming this helper.", "唤醒后的续作指令。")
     _set_tool_description(
         ASK_USER_QUESTION_SCHEMA,
-        "Ask the user a concise clarifying question when progress depends on a missing decision or external input.",
-        "需要用户决策或外部信息时提问。",
+        (
+            "Ask the user a concise clarifying question when progress depends on a missing decision or external input. "
+            "A current request to save, create, edit, or jot down an artifact is already task authorization for that artifact; "
+            "use the appropriate file/project tool unless content or destination facts are missing."
+        ),
+        "需要用户决策或外部信息时提问；用户已要求保存/创建/记录时即有该产物授权。",
     )
     _set_prop_description(ASK_USER_QUESTION_SCHEMA, "question", "Complete concise question to ask the user.", "要问用户的问题。")
     _set_prop_description(ASK_USER_QUESTION_SCHEMA, "options", "Optional short answer choices.", "可选答案。")
@@ -754,13 +836,17 @@ def _apply_english_schema_descriptions() -> None:
         MAIN_WORKSPACE_TOOL_SCHEMA,
         (
             "Main-process workspace tool for file management only. It can create directories, write documentation files, "
-            "run file-management commands, and locate files. Source-code implementation and substantive generation "
-            "should be delegated to helpers; this tool keeps the coordinator lightweight. In environment project work, "
+            "append short text sections, run file-management commands, and locate files. Source-code implementation, "
+            "substantive generation, long documents, command-heavy analysis, and tests are helper-owned in the normal workflow; "
+            "this tool keeps the coordinator lightweight. Large write/append calls are hard resource-boundary failures: "
+            "no file is written, no partial content is saved, and the tool result reports path, size, and recovery facts. "
+            "The tool loop may replace the attempted long content argument with an omission marker after the failed call "
+            "so the main context does not retain the long body. In environment project work, "
             "this tool works in the chat workspace, not the real project directory. Use env tools for real project files: "
             "env_fetch/edit staged copy/env_diff/env_apply_replace for existing "
             "files, and env_apply_create for confirmed-new files. `_env/...` paths are staged copies and staging "
             "evidence, not a project creation namespace or project directory to populate with workspace.write. "
-            "evidence; project file creation uses env_apply_create rather than workspace.write. "
+            "Project file creation uses env_apply_create rather than workspace.write. "
             "workspace.mkdir creates chat-workspace folders only; for project directories, create project files through "
             "env_apply_create, which creates needed parent folders, or use env_run only when an actual empty project "
             "directory is itself the requested artifact."
@@ -770,11 +856,20 @@ def _apply_english_schema_descriptions() -> None:
     _set_prop_description(
         MAIN_WORKSPACE_TOOL_SCHEMA,
         "action",
-        "Required action: `mkdir`, `write`, `run`, or `locate`. In environment project work, `mkdir` creates chat-workspace folders only.",
+        "Required action: `mkdir`, `write`, `append`, `run`, or `locate`. In environment project work, `mkdir` creates chat-workspace folders only.",
         "必填操作类型；项目模式下 mkdir 不是项目目录操作。",
     )
     _set_prop_description(MAIN_WORKSPACE_TOOL_SCHEMA, "path", "Workspace-relative path.", "工作区相对路径。")
-    _set_prop_description(MAIN_WORKSPACE_TOOL_SCHEMA, "content", "Documentation text for `write`.", "文档写入内容。")
+    _set_prop_description(
+        MAIN_WORKSPACE_TOOL_SCHEMA,
+        "content",
+        (
+            "Short documentation text for `write` or `append`. Large content is rejected rather than truncated or "
+            "partially written; use helper-owned artifacts, smaller logical sections, or environment apply tools when "
+            "the current evidence says durable project state is needed."
+        ),
+        "短文档写入内容；超大内容会拒绝且不截断落盘。"
+    )
     _set_prop_description(MAIN_WORKSPACE_TOOL_SCHEMA, "command", "File-management command for `run`.", "文件管理命令。")
     _set_prop_description(MAIN_WORKSPACE_TOOL_SCHEMA, "timeout_sec", "Maximum runtime in seconds.", "命令超时时间。")
     _set_prop_description(MAIN_WORKSPACE_TOOL_SCHEMA, "pattern", "Filename or glob pattern for `locate`.", "文件名或 glob 匹配。")
@@ -792,6 +887,22 @@ def apply_english_schema_descriptions(schema_globals: dict) -> None:
     _set_prop_description(
         MAIN_WORKSPACE_TOOL_SCHEMA,
         "command",
-        "File-management command for `run`. Match the active platform. On Windows without Git Bash, prefer `locate`, `read_file`, `search_*`, or Python probes. Unix-only `ls`, `find`, `/dev/null`, heredocs, or inline `export` syntax require a confirmed Unix shell.",
-        "文件管理命令需匹配当前平台；Windows 下优先专用文件工具或 Python 探针。",
+        "File-management command for `run`. Match the active platform. On Windows without Git Bash, prefer `locate`, `read_file`, `search_*`, or helper-delegated probes. Unix-only `ls`, `find`, `/dev/null`, heredocs, or inline `export` syntax require a confirmed Unix shell.",
+        "文件管理命令需匹配当前平台；Windows 下优先专用文件工具或委派 helper 探针。",
     )
+
+    _set_tool_description(
+        MAIN_READ_FILE_SCHEMA,
+        (
+            "Main-process text spot-check reader. It is designed for small files, narrow main-owned checks, or a narrow "
+            "evidence location already identified by helper/search/code_index/inspect. Broad source reading, long logs, "
+            "generated reports, source-material extraction, and full-file analysis are helper-owned in the normal workflow, "
+            "with the main process synthesizing from concise evidence. Large unbounded reads return "
+            "file-size and targeting facts instead of filling the main context."
+        ),
+        "主进程只做小文件或定点核查；大文件和全量分析由 helper 读取后回报精简证据。",
+    )
+    _set_prop_description(MAIN_READ_FILE_SCHEMA, "path", "Workspace-relative text file path.", "工作区相对文本路径。")
+    _set_prop_description(MAIN_READ_FILE_SCHEMA, "start_line", "Starting line number for a narrow evidence check after the location is known.", "已知位置后的窄范围核查起始行。")
+    _set_prop_description(MAIN_READ_FILE_SCHEMA, "end_line", "Inclusive ending line number for the same narrow evidence check.", "窄范围核查的结束行。")
+    _set_prop_description(MAIN_READ_FILE_SCHEMA, "max_chars", "Maximum returned characters; main-process defaults and caps are intentionally small.", "主进程返回字符上限更小。")

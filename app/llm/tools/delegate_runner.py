@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 
 from app.core.filesystem import FileRegistry
@@ -23,6 +24,73 @@ def _is_environment_helper_workspace() -> bool:
         return bool(is_environment_mode())
     except Exception:
         return False
+
+
+def _helper_input_file_path_facts(
+    input_files: list[str],
+    *,
+    helper_workspace: str,
+    environment_mode: bool,
+) -> str:
+    if not environment_mode or not input_files:
+        return ""
+    rows: list[str] = []
+    seen: set[str] = set()
+    root = os.path.abspath(helper_workspace or ".")
+
+    def _file_fact(path: str) -> tuple[bool, int | None]:
+        try:
+            full = os.path.abspath(os.path.join(root, path))
+            if os.path.commonpath([root, full]) != root:
+                return False, None
+            if not os.path.isfile(full):
+                return False, None
+            return True, os.path.getsize(full)
+        except Exception:
+            return False, None
+
+    for raw in input_files[:40]:
+        norm = str(raw or "").replace("\\", "/").strip().strip("`\"'").lstrip("./")
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        if norm.startswith("_env/"):
+            project_path = norm[5:].lstrip("/")
+            staged_path = norm
+        else:
+            project_path = norm
+            staged_path = f"_env/{norm}"
+        input_kind = (
+            "preserved_workspace_candidate"
+            if staged_path.startswith("_env/.blocked_creates/")
+            else "staged_project_or_workspace_input"
+        )
+        staged_exists, staged_size = _file_fact(staged_path)
+        bare_exists, bare_size = _file_fact(project_path)
+        rows.append(
+            "- "
+            f"input_kind=`{input_kind}`; "
+            f"project_path=`{project_path}`; "
+            f"staged_path=`{staged_path}`; "
+            f"staged_exists={str(staged_exists).lower()}; "
+            f"staged_size_bytes={staged_size if staged_size is not None else 'unknown'}; "
+            f"bare_path=`{project_path}`; "
+            f"bare_exists={str(bare_exists).lower()}; "
+            f"bare_size_bytes={bare_size if bare_size is not None else 'unknown'}"
+        )
+        if len(rows) >= 20:
+            break
+    if not rows:
+        return ""
+    return (
+        "## Input File Path Facts\n"
+        "The main process delegated these input_files. In environment project mode, project files are staged as local "
+        "`_env/<project-relative-path>` copies inside the helper workspace; a same-named bare path is a separate local "
+        "workspace file when it exists. `_env/.blocked_creates/...` paths are preserved workspace candidates, not "
+        "ordinary project-source paths. These are path and size facts only.\n\n"
+        + "\n".join(rows)
+        + "\n\n输入文件路径事实：项目文件在 helper 中通常是 `_env/...` 暂存副本；`_env/.blocked_creates/...` 是保留候选文件；同名裸路径若存在，是另一个本地文件事实。"
+    )
 
 
 def _registry_helper_outputs(main_workspace: str, task_id: str, kind: str) -> tuple[list[str], list[str]]:
@@ -56,6 +124,54 @@ def _registry_helper_outputs(main_workspace: str, task_id: str, kind: str) -> tu
     if kind in {"read", "ocr"}:
         visible_paths = []
     return sorted(set(all_paths)), sorted(set(visible_paths))
+
+
+def _update_helper_output_registry_metadata(
+    main_workspace: str,
+    *,
+    task_id: str,
+    outputs_check: dict,
+    paths: list[str],
+) -> None:
+    """Attach producer-owned verification facts to copied helper files."""
+    if not main_workspace or not task_id or not isinstance(outputs_check, dict):
+        return
+    try:
+        registry = FileRegistry.load(scope_id=f"workspace:{os.path.abspath(main_workspace)}", workspace_root=main_workspace)
+    except Exception:
+        return
+    producer_verified = outputs_check.get("producer_self_verified") is True
+    changed = False
+    seen: set[str] = set()
+    for raw in paths or []:
+        norm = str(raw or "").replace("\\", "/").strip().lstrip("./")
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        record = registry.find_by_workspace_path(norm)
+        if record is None or record.kind != FileKind.HELPER_OUTPUT:
+            continue
+        if record.owner_task_id and record.owner_task_id != task_id:
+            continue
+        metadata = record.metadata if isinstance(record.metadata, dict) else {}
+        metadata.update({
+            "source": metadata.get("source") or "delegate_copyback",
+            "outputs_complete": outputs_check.get("outputs_complete"),
+            "producer_self_verified": producer_verified,
+            "quality_blocked": bool(outputs_check.get("quality_blocked")),
+            "quality_warning_count": len(outputs_check.get("quality_warnings") or []),
+        })
+        record.metadata = metadata
+        if producer_verified:
+            record.verified = True
+            if record.status == FileStatus.READY:
+                record.status = FileStatus.VERIFIED
+        changed = True
+    if changed:
+        try:
+            registry.save()
+        except Exception:
+            return
 
 
 def _converge_terminal_state_for_complete_outputs(
@@ -131,8 +247,8 @@ def _converge_terminal_state_for_complete_outputs(
         result["post_helper_usage_hint"] = (
             str(result.get("post_helper_usage_hint") or "").strip()
             + ("\n" if result.get("post_helper_usage_hint") else "")
-            + "System output checks verified every declared file; treat this helper as completed unless later artifact inspection finds a concrete defect.\n\n"
-              "系统验收已确认声明产物完整；除非后续检查发现具体缺陷，否则按完成处理。"
+            + "System output checks show every declared file is present and no blocking quality/resource issue is reported; treat this helper as completed unless later facts show a concrete defect.\n\n"
+              "系统输出检查显示声明产物齐全且无阻断质量/资源问题；除非后续事实发现具体缺陷，否则按完成处理。"
         )
     return True
 
@@ -191,9 +307,60 @@ def _needs_helper_report_format_self_repair(report: str, *, expected_outputs: li
     try:
         if _extract_reported_output_files(report):
             return False
+        # A bare fenced JSON block with {"files": [...]} is still an explicit
+        # machine-readable declaration. Do not spend another LLM turn only to
+        # add a heading; downstream copy/check code still verifies the files.
+        if re.fullmatch(
+            r"(?is)\s*```(?:json)?\s*\{.*?\"files\"\s*:\s*\[.*?\].*?\}\s*```\s*",
+            str(report or ""),
+        ) and _extract_declared_files(report):
+            return False
         return bool(_has_malformed_output_files_attempt(report) or _extract_declared_files(report))
     except Exception:
         return False
+
+
+_MAIN_ONLY_TOOL_NAMES_RE = re.compile(
+    r"\b(?:env_apply_create|env_apply_replace|env_apply_patch|env_diff|env_run|env_read)\b"
+)
+
+
+def _helper_tool_boundary_fact_section(prompt: str, *, kind: str) -> str:
+    """Return helper-visible facts when a task mentions main-only tools.
+
+    The delegated prompt can legitimately mention the main process apply path
+    because it was written from the coordinator's point of view. Helpers should
+    see that wording as a coordination fact, not as an executable instruction.
+
+    主进程工具名进入 helper 任务时，只转成边界事实；helper 不被要求调用不可见工具。
+    """
+    text = str(prompt or "")
+    if not _MAIN_ONLY_TOOL_NAMES_RE.search(text):
+        return ""
+    helper_kind = str(kind or "").strip().lower()
+    if helper_kind in {"read", "ocr", "verify", "project_map", "file_summary", "impact_review", "inventory"}:
+        action_text = (
+            "Use your visible read/verify tools to produce evidence or a verdict, then report exact paths and blockers."
+        )
+        zh = "使用当前可见读取/验证工具产出证据或结论，并报告路径与阻塞。"
+    elif helper_kind == "edit":
+        action_text = (
+            "Create text/Markdown/Office artifacts with your visible edit, office, and workspace tools. "
+            "Finish by declaring exact existing helper-workspace output paths in `## Output files` JSON."
+        )
+        zh = "edit helper 用自身可见的编辑、office、workspace 工具创建产物，最终用 Output files JSON 声明已存在路径。"
+    else:
+        action_text = (
+            "Create or modify assigned files with your visible helper tools, run available checks, and report exact output paths."
+        )
+        zh = "使用当前 helper 可见工具改写文件、运行可用检查，并报告精确产物路径。"
+    return (
+        "## Helper Tool Boundary Facts\n"
+        "The delegated task text mentions main-process environment/apply tools such as env_apply_create/env_apply_replace/env_run/env_diff. "
+        "Those tool names describe main-process routing, apply, or helper-result consumption steps; they are not executable helper tools unless they appear in your actual tool list. "
+        f"{action_text}\n\n"
+        f"{zh}"
+    )
 
 
 def _build_helper_report_format_repair_prompt(
@@ -234,6 +401,7 @@ def _build_helper_user_prompt(
     resume: bool = False,
     resume_workspace_empty: bool = True,
     kind: str = "code",
+    task_contract_context: str = "",
 ) -> str:
     """Build the user-side helper prompt with stable framing before the task.
 
@@ -249,6 +417,15 @@ def _build_helper_user_prompt(
         if str(part or "").strip()
     )
     helper_kind = str(kind or "").strip().lower()
+    ordered_contract_text = "\n".join([
+        str(prompt or ""),
+        str(task_contract_context or ""),
+    ]).lower()
+    has_ordered_contract = bool(re.search(
+        r"\b(before|after|first|then|prior to|pre[- ]?change|pre[- ]?fix|baseline)\b|"
+        r"(之前|之后|先|然后|前置|基线|复现)",
+        ordered_contract_text,
+    ))
     stable_kind_frame = ""
     if helper_kind in {"read", "ocr"}:
         stable_kind_frame = (
@@ -275,9 +452,14 @@ def _build_helper_user_prompt(
             "## Edit Helper Operating Contract\n"
             "Produce the delegated document, report, or prose artifact. "
             "Consume evidence files and coverage summaries rather than re-reading raw source material. "
-            "Follow any provided template or outline exactly; fill all required sections before finishing. "
+            "Treat the delegated task envelope as the active contract. If source files, framework files, templates, or prior contracts contain broader requirements than the current task envelope, report the mismatch as a fact and follow the delegated deliverable shape unless the task explicitly adopts the broader source contract. "
+            "For Office documents, prefer a compact build loop: batch 3-6 sections or coherent block groups per office(action='write'/'append', ...) call, "
+            "then verify structure and claims near the end instead of reading after every paragraph. "
+            "A successful office(action='read', ...) call returns structural facts such as headings, paragraph/block counts, table count, image count, "
+            "and pagination hints; use those facts for the acceptance decision when they are sufficient, and do targeted paged reads only for named missing details. "
+            "Follow the template or outline selected by the delegated task exactly; fill all required sections before finishing. "
             "Declare the output file(s) in the final report; do not emit the full document body in the report itself.\n\n"
-            "编辑类 helper 按模板生成文档产物，消费已有证据文件，在报告中声明产物路径，不在报告体内重复全文。"
+            "编辑类 helper 按当前任务选定的模板/大纲生成文档，源文件额外要求只作为证据事实；Office 文档批量写入、末端验证；结构统计足够时据此验收，有明确缺口再分段读取。"
             "\n\n"
         )
     elif helper_kind == "verify":
@@ -335,11 +517,287 @@ def _build_helper_user_prompt(
         "本轮动态上下文；只说明可用技能、文件和预检，不改变 helper 身份或任务契约。\n\n"
         f"{dynamic_prompt_prefix}"
         )
+    boundary_fact = _helper_tool_boundary_fact_section(prompt, kind=helper_kind)
+    if boundary_fact:
+        context_parts.append(boundary_fact)
+    if has_ordered_contract:
+        context_parts.append(
+            "## Ordered Acceptance Facts\n"
+            "When the task envelope or acceptance checks state an order, treat that order as execution evidence. "
+            "If an observation, reproduction, baseline check, or verification is requested before a change, gather that pre-change evidence before editing the relevant local or staged files when feasible. "
+            "If the pre-change step cannot run from this helper context, record the exact blocker before proceeding.\n\n"
+            "若任务含先后顺序，按顺序取证；前置复现/基线/验证应尽量在编辑相关副本前完成，无法执行则先记录阻塞事实。"
+        )
     context_parts.append(
         f"{task_header}\n{prompt}\n\n"
         f"{task_tail}"
     )
+    if str(task_contract_context or "").strip():
+        context_parts.append(
+            "## Helper Task Contract Snapshot\n"
+            "Use this compact snapshot when the toolchain gets long or you need to recall the current helper boundary. "
+            "It is a factual copy of the main-process helper envelope, not an automatic success/failure rule.\n\n"
+            "长链路中用于回看当前 helper 边界；这是派发信封事实，不是自动验收裁决。\n\n"
+            f"{task_contract_context.strip()}"
+        )
     return "\n\n---\n\n".join(part for part in context_parts if part.strip())
+
+
+def _contract_list(value: object, *, max_items: int = 40, max_chars_each: int = 260) -> list[str]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, str):
+        raw_items = [line.strip(" -\t") for line in value.splitlines()]
+    elif isinstance(value, dict):
+        raw_items = [f"{k}: {v}" for k, v in sorted(value.items(), key=lambda item: str(item[0]))]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = [str(item).strip() for item in value]
+    else:
+        raw_items = [str(value).strip()]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        item = re.sub(r"\s+", " ", str(item or "")).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        if len(item) > max_chars_each:
+            item = item[:max_chars_each].rstrip() + "..."
+        out.append(item)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _active_main_explicit_constraints_for_helper(
+    *,
+    max_items: int = 6,
+    trace_id: str | None = None,
+) -> list[str]:
+    """Return compact current-turn constraints from the main task contract.
+
+    These are factual excerpts, not helper success rules. Including them in the
+    helper snapshot prevents a delegated task from losing explicit user-required
+    tools, ordering, reproduction, or validation evidence when the main prompt is
+    compact.
+
+    从主任务契约转交当前请求显式约束事实；不替 helper 判断是否完成。
+    """
+    try:
+        from app.core import agent_state
+        from app.core import debug as _debug
+
+        trace_id = trace_id or _debug.current_trace_id() or ""
+        contracts = agent_state.structured_status(trace_id).get("contracts") or []
+    except Exception:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for contract in contracts:
+        if not isinstance(contract, dict) or str(contract.get("task_id") or "") != "main":
+            continue
+        for item in contract.get("acceptance") or []:
+            text = str(item or "").strip()
+            if not text.startswith("Current user turn explicit constraint:"):
+                continue
+            fact = "Main active-task fact: " + text
+            if fact in seen:
+                continue
+            seen.add(fact)
+            out.append(fact[:360])
+            if len(out) >= max_items:
+                return out
+    return out
+
+
+def _active_main_reference_acceptance_facts_for_helper(
+    *,
+    max_items: int = 4,
+    trace_id: str | None = None,
+) -> list[str]:
+    """Return compact exact-reference acceptance facts from the main contract.
+
+    These facts come from tool-observed reference/golden/expected files. They
+    are passed to helpers as acceptance context so a later delegated task does
+    not weaken ordered or delimiter-sensitive checks into unordered semantics.
+
+    从主任务契约转交精确参考文件事实；作为 helper 验收上下文，不替 helper 自动判定成败。
+    """
+    try:
+        from app.core import agent_state
+        from app.core import debug as _debug
+
+        trace_id = trace_id or _debug.current_trace_id() or ""
+        contracts = agent_state.structured_status(trace_id).get("contracts") or []
+    except Exception:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    markers = (
+        "Exact reference file fact:",
+        "expected/golden/snapshot/reference",
+        "line order",
+        "trailing blank lines",
+    )
+    for contract in contracts:
+        if not isinstance(contract, dict) or str(contract.get("task_id") or "") != "main":
+            continue
+        for item in contract.get("acceptance") or []:
+            text = str(item or "").strip()
+            if not text or not any(marker in text for marker in markers):
+                continue
+            fact = "Main active-task fact: " + text
+            if fact in seen:
+                continue
+            seen.add(fact)
+            out.append(fact[:520])
+            if len(out) >= max_items:
+                return out
+    return out
+
+
+_ORDER_INSENSITIVE_RE = re.compile(
+    r"\b(?:any order|order (?:does not|doesn't) matter|order may vary|unordered|order-insensitive)\b|"
+    r"(?:任意顺序|顺序不(?:影响|重要|敏感)|顺序无关)",
+    re.IGNORECASE,
+)
+
+
+def _looks_order_insensitive(text: str) -> bool:
+    return bool(_ORDER_INSENSITIVE_RE.search(str(text or "")))
+
+
+def _helper_order_conflict_fact(*, prompt: str, acceptance_checks: list[str] | None) -> str:
+    """Return a factual helper-visible note when order facts conflict."""
+    checks = [str(item or "").strip() for item in (acceptance_checks or []) if str(item or "").strip()]
+    exact_facts = [
+        item for item in checks
+        if "Exact reference file fact:" in item and "line order" in item
+    ][:2]
+    if not exact_facts:
+        return ""
+    combined = "\n".join([str(prompt or ""), *checks])
+    if not _looks_order_insensitive(combined):
+        return ""
+    return (
+        "## Acceptance Comparison Facts\n"
+        "The delegated task text contains order-insensitive language, while the main active-task facts include "
+        "an exact reference file fact where line order, delimiters, visible text, and trailing blank lines are "
+        "acceptance facts when a verifier compares against that file. Treat both as facts to compare. If no "
+        "current verifier evidence says order is ignored, preserve the reference-file order in implementation "
+        "and verification.\n\n"
+        "验收事实对照：派发文本含“顺序不重要/任意顺序”，但主任务已有精确参考文件事实；若没有验证器证据说明忽略顺序，应保留参考文件顺序。\n\n"
+        + "\n".join(f"- {fact}" for fact in exact_facts)
+    )
+
+
+def _merge_helper_acceptance_with_active_constraints(
+    acceptance_checks: list[str] | None,
+    *,
+    max_items: int = 30,
+    trace_id: str | None = None,
+) -> list[str]:
+    inherited_facts = [
+        *_active_main_explicit_constraints_for_helper(max_items=6, trace_id=trace_id),
+        *_active_main_reference_acceptance_facts_for_helper(max_items=4, trace_id=trace_id),
+    ]
+    base_limit = max(0, max_items - len(inherited_facts))
+    merged = _contract_list(acceptance_checks, max_items=base_limit)
+    seen = set(merged)
+    for fact in inherited_facts:
+        if fact in seen:
+            continue
+        merged.append(fact)
+        seen.add(fact)
+        if len(merged) >= max_items:
+            break
+    return merged
+
+
+def _helper_inherited_active_task_facts_section(acceptance_checks: list[str] | None) -> str:
+    facts = [
+        str(item or "").strip()
+        for item in (acceptance_checks or [])
+        if str(item or "").strip().startswith("Main active-task fact:")
+    ][:8]
+    if not facts:
+        return ""
+    combined = "\n".join(facts).lower()
+    browser_fact = ""
+    if re.search(r"\b(host[-\s]?)?browser(?:\s+tool)?\b|playwright|puppeteer|selenium|chromium|浏览器|宿主浏览器", combined):
+        browser_fact = (
+            "\n\nBrowser evidence route fact: browser evidence can come from an actual browser tool or from a command "
+            "that runs Playwright, Puppeteer, Selenium, Chromium, Chrome, Firefox, or WebKit against the target URL. "
+            "Plain source reads and curl/plain HTTP checks are source or HTTP evidence, not host-browser evidence.\n\n"
+            "浏览器证据事实：可来自实际浏览器工具，或运行 Playwright/Puppeteer/Selenium/Chromium/Chrome/Firefox/WebKit "
+            "访问目标 URL 的命令；源码读取和 curl/普通 HTTP 检查不是宿主浏览器证据。"
+        )
+    return (
+        "## Inherited Active-Task Facts\n"
+        "The main task contract contains these current-task facts. They are evidence for this helper's next action, "
+        "not automatic success or failure labels. If a fact names a required tool, evidence type, ordering step, "
+        "or validation action, compare your plan and final report against it; if it is infeasible in this helper "
+        "context, report the concrete blocker before treating it as satisfied.\n\n"
+        "主任务契约事实；若包含工具、证据、顺序或验证要求，执行和报告时对照，无法满足则先说明阻塞事实。\n\n"
+        + "\n".join(f"- {fact}" for fact in facts)
+        + browser_fact
+    )
+
+
+def _build_helper_task_contract_snapshot(
+    *,
+    task_id: str,
+    kind: str,
+    mode: str,
+    prompt: str,
+    expected_outputs: list[str] | None,
+    write_scopes: list[str] | None,
+    acceptance_checks: list[str] | None,
+    resume: bool,
+) -> dict:
+    """Return a compact, recoverable helper-boundary snapshot."""
+    clean_prompt = str(prompt or "").strip()
+    return {
+        "task_id": str(task_id or "").strip(),
+        "helper_kind": str(kind or "").strip(),
+        "helper_mode": str(mode or "").strip(),
+        "resume": bool(resume),
+        "goal_excerpt": clean_prompt[:1800],
+        "expected_outputs": _contract_list(expected_outputs, max_items=40),
+        "write_scopes": _contract_list(write_scopes, max_items=30),
+        "acceptance_checks": _contract_list(acceptance_checks, max_items=30),
+    }
+
+
+def _format_helper_task_contract_snapshot(snapshot: dict, *, max_chars: int = 3200) -> str:
+    payload = {
+        "task_id": snapshot.get("task_id") or "",
+        "helper_kind": snapshot.get("helper_kind") or "",
+        "helper_mode": snapshot.get("helper_mode") or "",
+        "resume": bool(snapshot.get("resume")),
+        "expected_outputs": list(snapshot.get("expected_outputs") or [])[:20],
+        "write_scopes": list(snapshot.get("write_scopes") or [])[:16],
+        "acceptance_checks": list(snapshot.get("acceptance_checks") or [])[:16],
+        "goal_excerpt": str(snapshot.get("goal_excerpt") or "")[:1200],
+    }
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    if len(text) > max_chars:
+        text = text[: max_chars - 80].rstrip() + "\n[helper task contract snapshot truncated]"
+    return text
+
+
+def _persist_helper_task_contract(helper_workspace: str, snapshot: dict) -> None:
+    if not helper_workspace:
+        return
+    try:
+        os.makedirs(helper_workspace, exist_ok=True)
+        path = os.path.join(helper_workspace, ".helper_task_contract.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
 
 
 async def _run_one_helper(
@@ -358,8 +816,10 @@ async def _run_one_helper(
     kind: str = "code",
     mode: str = "easy",
     helper_think: bool = False,  # 2026-05-08: 主线程传 helper_think=true 时启用 reasoning
+    input_files: list[str] | None = None,
     expected_outputs: list[str] | None = None,  # 2026-05-11 Tier 1.C: 系统验收清单
     write_scopes: list[str] | None = None,
+    acceptance_checks: list[str] | None = None,
     batch_sibling_outputs: set[str] | None = None,  # 2026-05-15 P98: 同批兄弟 expected_outputs
 ) -> dict:
     """Run a single helper LLM task.
@@ -743,6 +1203,18 @@ async def _run_one_helper(
                 )
         prior_summary = ""
 
+    input_file_path_facts = _helper_input_file_path_facts(
+        input_files,
+        helper_workspace=helper_workspace,
+        environment_mode=_is_environment_helper_workspace(),
+    )
+    if input_file_path_facts:
+        dynamic_prompt_prefix_parts.append(input_file_path_facts)
+        debug.log(
+            f"delegate.{task_id}.input_file_path_facts",
+            f"injected path facts for {len(input_files or [])} input file(s)",
+        )
+
     # 2026-05-12 P34: 自动注入依赖路径清单(铁律 12 实操层)
     # 病因(实测 15:47 trace): 主线程派 bench_all 时 prompt 写
     # "你需要写 benchmark.c, 链接 ssl.o avl.o rb.o skip.o" 但没说在哪个目录。
@@ -994,6 +1466,33 @@ async def _run_one_helper(
             "hard 是同类高严谨流程：先读任务和失败证据，诊断路径/资源/依赖/范围/验收，再分步验证。"
         )
 
+    helper_acceptance_checks = _merge_helper_acceptance_with_active_constraints(
+        acceptance_checks,
+        trace_id=main_trace_id,
+    )
+    inherited_active_facts_section = _helper_inherited_active_task_facts_section(helper_acceptance_checks)
+    if inherited_active_facts_section:
+        dynamic_prompt_prefix_parts.append(inherited_active_facts_section)
+    order_conflict_fact = _helper_order_conflict_fact(
+        prompt=prompt,
+        acceptance_checks=helper_acceptance_checks,
+    )
+    if order_conflict_fact:
+        dynamic_prompt_prefix_parts.append(order_conflict_fact)
+
+    helper_task_contract = _build_helper_task_contract_snapshot(
+        task_id=task_id,
+        kind=kind,
+        mode=mode,
+        prompt=prompt,
+        expected_outputs=expected_outputs,
+        write_scopes=write_scopes or expected_outputs or [],
+        acceptance_checks=helper_acceptance_checks,
+        resume=resume,
+    )
+    _persist_helper_task_contract(helper_workspace, helper_task_contract)
+    helper_task_contract_text = _format_helper_task_contract_snapshot(helper_task_contract)
+
     # Keep the helper system prompt cacheable. Turn-specific workspace,
     # resume, dependency, and task facts are all assembled into the user message.
     user_prompt = _build_helper_user_prompt(
@@ -1003,6 +1502,7 @@ async def _run_one_helper(
         resume=resume,
         resume_workspace_empty=resume_workspace_empty,
         kind=kind,
+        task_contract_context=helper_task_contract_text,
     )
 
     msgs = [
@@ -1097,12 +1597,18 @@ async def _run_one_helper(
         set_current_thread_context as _h_set_thread_ctx,
         reset_current_thread_context as _h_reset_thread_ctx,
     )
-    _helper_user_msg = (prompt or "")[:600]
+    _helper_user_msg = (prompt or "")[:1800]
     _helper_thread_ctx = _HelperThreadContext(
         user_message=_helper_user_msg,
-        plan_intent=f"helper task: {task_id}",
-        plan_key_points=[],
-        plan_deliverables=[],
+        plan_intent=f"helper task: {task_id} ({kind}/{mode})",
+        plan_key_points=[
+            "helper task contract snapshot is available in .helper_task_contract.json",
+            *[
+                f"acceptance: {item}"
+                for item in list(helper_task_contract.get("acceptance_checks") or [])[:8]
+            ],
+        ],
+        plan_deliverables=list(helper_task_contract.get("expected_outputs") or [])[:20],
         role_label=f"helper:{task_id}",
     )
     _helper_thread_token = _h_set_thread_ctx(_helper_thread_ctx)
@@ -1313,7 +1819,7 @@ async def _run_one_helper(
         # paired helper 与父 helper 并行,"谁先出可用结果谁赢"。
         #
         # 删除原因(trace f973df3770544567 暴露):
-        #   - paired helper 也跑长(woat_impl_auto_final 跑 1h+,父 woat_impl 也跑 45min)
+        #   - paired helper 也跑长(历史样本中 paired sub-helper 跑 1h+,父 helper 也跑 45min)
         #     "并行加速"完全没生效 — 任务复杂时 paired helper 也救不了
         #   - paired helper 是 helper 派的 sub-helper,owner=helper:{trace_id}:{parent_task},
         #     不是 main_owner → P55 cancel 漏掉(P59 修但根因是 P40 设计错)
@@ -1823,12 +2329,17 @@ async def _run_one_helper(
                 + report
             )
         if main_resource_request:
+            _resource_kind = (
+                main_resource_request.get("matching_helper_kind")
+                or main_resource_request.get("resource_kind")
+                or main_resource_request.get("suggested_helper_kind")
+            )
             report = (
                 "[Helper frozen: main-process resource required]\n"
-                f"Needed resource kind: '{main_resource_request.get('suggested_helper_kind')}'\n"
+                f"Resource kind fact: '{_resource_kind}'\n"
                 f"Reason: {main_resource_request.get('blocked_reason') or main_resource_request.get('error')}\n"
-                f"Suggested action: {main_resource_request.get('main_thread_action') or 'spawn the requested helper resource, then resume or respawn this helper'}\n"
-                f"helper 已冻结等待资源；主进程提供或拒绝资源后再续作。\n\n"
+                f"Resource resolution facts: {main_resource_request.get('resource_resolution_facts') or main_resource_request.get('main_thread_action') or 'main process decides whether existing evidence/resource helpers satisfy the request, whether to create a resource, or whether to refuse and report the blocked state'}\n"
+                f"helper 已冻结等待资源；资源种类和恢复条件是事实，由主进程结合任务决定。\n\n"
                 + report
             )
 
@@ -1898,6 +2409,12 @@ async def _run_one_helper(
         # 自然边界 < 2KB。需要完整内容时 read_file .helper_{task_id}_full_report.txt。
         _reported_declared = set(_extract_reported_output_files(_full_report))
         _declared = _reported_declared or _extract_declared_files(_full_report)
+        if not _declared and kind not in {"read", "ocr"}:
+            _declared = {
+                str(path).replace("\\", "/").strip()
+                for path in (expected_outputs_for_copy or [])
+                if str(path).strip()
+            }
         _declared_set = set(_declared) if _declared else set()
         _registry_copied_back, _registry_visible_outputs = _registry_helper_outputs(main_workspace, task_id, kind)
         if _registry_copied_back:
@@ -1934,6 +2451,27 @@ async def _run_one_helper(
             _deduped_env = [p for p in _env_available_files if os.path.basename(p) not in _existing_basenames]
             _workspace_copied_back = sorted(set(_workspace_copied_back) | set(_deduped_env))
         _visible_copied_set = set(_visible_copied_back)
+        _helper_alias_by_main = {
+            str(m.get("main_name")): str(m.get("helper_name"))
+            for m in (_file_map or [])
+            if isinstance(m, dict)
+            and m.get("main_name")
+            and m.get("helper_name")
+            and str(m.get("main_name")) != str(m.get("helper_name"))
+        }
+
+        def _displayed_file_list(paths: list[str]) -> list[str]:
+            displayed: list[str] = []
+            seen: set[str] = set()
+            for path in paths:
+                name = str(path or "").replace("\\", "/").strip()
+                if name in seen:
+                    continue
+                seen.add(name)
+                displayed.append(name)
+            return displayed
+
+        _visible_copied_back_display = _displayed_file_list(_visible_copied_back)
 
         # 2026-05-15 修(trace 28d9525e):此 debug.log 原本放在 ~60 行之前的位置,
         # 引用了 _visible_copied_back,但变量定义在这里(几十行之后) —— Python
@@ -1964,6 +2502,7 @@ async def _run_one_helper(
         if kind in {"read", "ocr"}:
             _user_visible_delivered = set()
         _user_visible_copied = [path for path in _visible_copied_back if path in _user_visible_delivered]
+        _user_visible_copied_display = _displayed_file_list(_user_visible_copied)
         _read_internal_evidence_files: list[str] = []
         if kind in {"read", "ocr"}:
             _read_internal_evidence_files = _collect_read_evidence_files(
@@ -2023,7 +2562,26 @@ async def _run_one_helper(
         )
         # L5-1 (2026-05-09): report 区分"实际交付"和"声明但未生成"
         _report_lines = [summary]
-        _report_lines.append(f"已交付到主区: {', '.join(_user_visible_copied[:20]) if _user_visible_copied else '(无)'}")
+        _report_lines.append(f"已交付到主区: {', '.join(_user_visible_copied_display[:20]) if _user_visible_copied_display else '(无)'}")
+        _renamed_outputs = [
+            f"{helper_name} -> {main_name}"
+            for main_name, helper_name in sorted(_helper_alias_by_main.items())
+            if main_name in _visible_copied_set
+        ]
+        if _renamed_outputs:
+            _report_lines.append(
+                "Copyback filename aliases: "
+                f"{', '.join(_renamed_outputs[:20])}\n"
+                "主区真实文件名在箭头右侧；helper 原文件名只是来源别名。"
+            )
+        if _env_available_files and kind not in {"read", "ocr"}:
+            _report_lines.append(
+                "Staged project files available in main workspace: "
+                f"{', '.join(_env_available_files[:20])}\n"
+                "Fact: real project files are unchanged until these staged paths are applied with env_apply_*; "
+                "project tests run before apply validate the old project state.\n"
+                "这些是主工作区可读取/验证的 _env 暂存项目文件；env_apply_* 前真实项目仍是旧状态。"
+            )
         if _read_internal_evidence_files:
             _report_lines.append(
                 f"内部读取证据: {', '.join(_read_internal_evidence_files[:12])}"
@@ -2057,6 +2615,11 @@ async def _run_one_helper(
                 _pre_output_quality_warnings.append(_cw)
         except Exception:
             pass
+        try:
+            for _cw in source_data_approximation_warnings(_full_report, file=f".helper_{task_id}_full_report.txt"):
+                _pre_output_quality_warnings.append(_cw)
+        except Exception:
+            pass
         # 2026-05-08 优化: 主线程响应字段精简。
         # 旧版每个 result 含 workspace_dir(绝对路径,泄露)、summary(已并入 report)、
         # resumed_from(=输入参数 echo)、resumed_actually(False 时无意义)、stuck_reason(空字符串)。
@@ -2071,7 +2634,12 @@ async def _run_one_helper(
             "report": report,
             "files": _workspace_copied_back,
             "workspace_files": _workspace_copied_back,
-            "user_visible_files": _visible_copied_back,
+            "user_visible_files": _visible_copied_back_display,
+            "helper_file_aliases": {
+                main_name: helper_name
+                for main_name, helper_name in _helper_alias_by_main.items()
+                if main_name in _visible_copied_set
+            },
             "declared_files": sorted(_declared_set),
             "declared_but_missing": _declared_but_missing,
             "delivered_but_not_declared": _delivered_but_not_declared,
@@ -2093,20 +2661,34 @@ async def _run_one_helper(
             if copy_stats.get("recovery_hint"):
                 _result["report"] += "\n\n" + str(copy_stats.get("recovery_hint"))
                 _result["retry_instruction"] = str(copy_stats.get("recovery_hint"))
-            if copy_stats.get("suggested_next_action"):
-                _result["next_action"] = copy_stats.get("suggested_next_action")
+            if copy_stats.get("recovery_facts"):
+                _result["copyback_recovery_facts"] = copy_stats.get("recovery_facts")
         if _env_available_files:
             _result["main_available_files"] = _env_available_files[:50]
+            if kind not in {"read", "ocr"}:
+                _result["staged_project_files"] = _env_available_files[:50]
+                _result["pending_project_apply_fact"] = (
+                    "These `_env/...` paths are staged project copies in the main workspace. "
+                    "They are not evidence that the corresponding real project files changed; "
+                    "the main process can inspect/diff them and apply them to project paths with env_apply_* before claiming project delivery. "
+                    "Fact: project validation commands run before env_apply_* validate the old real project state, not the helper's staged edits.\n\n"
+                    "_env 是暂存项目副本；env_apply_* 前真实项目测试仍在验证旧状态。"
+                )
             if kind in {"read", "ocr"}:
                 _result["internal_evidence_files"] = sorted(set(
                     _read_internal_evidence_files + _env_available_files
                 ))[:50]
             _result["post_helper_usage_hint"] = (
                 "environment files have already been merged into the main workspace. "
-                "Use/read/run these _env/... paths directly; do not copy from or refer to "
-                ".temp/_delegate_* helper workspaces. For read helpers, these paths are "
-                "internal evidence for the main process, not user-facing deliverables.\n\n"
-                "环境文件已合并到主工作区；直接使用 _env 路径，勿引用 helper 临时目录。"
+                "Use these _env/... paths directly as staged evidence; do not copy from or refer to "
+                ".temp/_delegate_* helper workspaces. For project edits, env_diff is the compact first inspection "
+                "for staged changes before env_apply_*; do not use read_file to re-check helper-owned content after "
+                "clean completion. Use exact reads only for explicit quote/display requests or narrow main-owned "
+                "file-management/runtime facts; route helper warnings, contradictions, verifier/build/check gaps, or quality "
+                "concerns to the producer helper or a verify helper. "
+                "A real-project test before env_apply_* is a baseline/old-state test, while a post-apply test validates the staged edit. "
+                "For read helpers, these paths are internal evidence for the main process, not user-facing deliverables.\n\n"
+                "环境文件已合并到主工作区作为暂存证据；项目改动优先 env_diff、apply 和 helper/verify 验收事实，不因 helper 成功产物而复读内容。"
             )
         elif kind in {"read", "ocr"} and _read_internal_evidence_files:
             _result["internal_evidence_files"] = _read_internal_evidence_files[:50]
@@ -2125,6 +2707,22 @@ async def _run_one_helper(
             )
         if interrupted:
             _result["interrupted"] = True
+            if _visible_copied_back or _env_available_files:
+                _partial_paths = list(_visible_copied_back[:20])
+                if _env_available_files:
+                    _partial_paths.extend(_env_available_files[:20])
+                _result["partial_artifacts"] = {
+                    "files": _partial_paths[:40],
+                    "full_report_path": f".helper_{task_id}_full_report.txt",
+                    "status": "artifact_copied_before_helper_final_summary",
+                    "fact": (
+                        "The helper was interrupted before a clean final summary, but these artifacts exist in the main workspace. "
+                        "Treat the file list and outputs_check as facts; use targeted inspection or verification only when needed to resolve the current-task gap before deciding whether to resume, repair, or accept."
+                    ),
+                    "fact_zh": (
+                        "helper 未完成干净总结但已有产物复制到主工作区；把文件列表和 outputs_check 当事实，仅在需要闭合当前缺口时定向读取/验证。"
+                    ),
+                }
             if not copy_stats.get("shared_merge_allowed", True):
                 _result["artifact_note"] = (
                     "The helper was interrupted. Regular artifacts were copied, but `_helpers_shared/` handoff files "
@@ -2143,7 +2741,11 @@ async def _run_one_helper(
             _result["resource_required"] = main_resource_request
             if _pending_declared_outputs:
                 _result["pending_declared_outputs"] = _pending_declared_outputs
-            _result["suggested_retry_kind"] = main_resource_request.get("suggested_helper_kind")
+            _result["suggested_retry_kind"] = (
+                main_resource_request.get("matching_helper_kind")
+                or main_resource_request.get("resource_kind")
+                or main_resource_request.get("suggested_helper_kind")
+            )
             _result["suggested_retry_mode"] = "easy"
 
         # 2026-05-11 P2.1: 加 terminal_reason 字段 (参照 Claude Code transitions.ts)
@@ -2194,7 +2796,8 @@ async def _run_one_helper(
 
         # 2026-05-11 Tier 1.C: expected_outputs 系统比对
         # 主线程 spawn 时声明 ["abpt.c", "results_abpt.csv"], 完成时系统验收。
-        # outputs_complete=true 意味着齐了, 主线程**绝对不应该再 resume**。
+        # outputs_complete=true 只说明声明产物齐了；producer_self_verified=true
+        # 且无阻断警告才是主线程可信任的干净完成边界。
         # 2026-06-04 工程不变量: read/ocr helper 是内部 evidence 提取角色,
         # 永不产出用户可见 deliverable。这是工作流定位, 不接受 prompt 覆盖 ——
         # 用户没法决定内部 helper 的角色边界。expected_outputs 要走 edit/code/draw。
@@ -2235,9 +2838,15 @@ async def _run_one_helper(
                 for path in (copy_stats.get("env_copied_files") or [])
                 if str(path or "").strip()
             }
+            _env_skipped_unchanged_paths = {
+                str(path or "").replace("\\", "/").strip()
+                for path in (copy_stats.get("env_skipped_unchanged_files") or [])
+                if str(path or "").strip()
+            }
             _missing = []
             _matched_files: list[tuple[str, str]] = []  # (expected, actual_path)
             _env_matched_files: list[tuple[str, str]] = []
+            _env_unchanged_matched_files: list[tuple[str, str]] = []
             _shared_protocol_matches: list[dict[str, str]] = []
 
             def _matches_expected_output_path(actual_path: str, expected_norm: str, expected_base: str) -> bool:
@@ -2293,11 +2902,17 @@ async def _run_one_helper(
                     if _exp_norm in _env_copied_paths and os.path.isfile(_env_abs):
                         _env_matched_files.append((_exp, _exp_norm))
                         continue
+                    if _exp_norm in _env_skipped_unchanged_paths and os.path.isfile(_env_abs):
+                        _env_unchanged_matched_files.append((_exp, _exp_norm))
+                        continue
                 else:
                     _env_equivalent = f"_env/{_exp_norm}"
                     _env_abs = os.path.join(main_workspace, *_env_equivalent.split("/"))
                     if _env_equivalent in _env_copied_paths and os.path.isfile(_env_abs):
                         _env_matched_files.append((_exp, _env_equivalent))
+                        continue
+                    if _env_equivalent in _env_skipped_unchanged_paths and os.path.isfile(_env_abs):
+                        _env_unchanged_matched_files.append((_exp, _env_equivalent))
                         continue
                 if _found_path:
                     pass
@@ -2334,11 +2949,14 @@ async def _run_one_helper(
                     _missing.append(_exp)
             if _env_matched_files:
                 _matched_files.extend(_env_matched_files)
+            if _env_unchanged_matched_files:
+                _matched_files.extend(_env_unchanged_matched_files)
 
-            # 2026-05-11 P11: 内容质量验收 (quality_warnings)
-            # outputs_complete=true 只表示文件存在, 不验内容。
-            # 这里对 PNG/CSV/docx 等做基础 sanity 检查, 发现"垃圾文件"给主线程警告。
-            # 不阻断 outputs_complete(向后兼容), 但加 quality_warnings 字段。
+            # 2026-05-11 P11: content/structure sanity checks (quality_warnings).
+            # outputs_complete is the file-presence boundary; a clean helper
+            # result is producer-owned only when it also has no blocking
+            # quality/resource warning. The explicit producer fact below is
+            # what the main thread should trust, not raw file existence alone.
             _quality_warnings: list[dict] = list(_pre_output_quality_warnings)
             for _exp, _actual_path in _matched_files:
                 try:
@@ -2459,6 +3077,24 @@ async def _run_one_helper(
                         expected_text_tokens = _extract_expected_text_tokens_for_document(prompt)
                         if not _doc_text_for_grounding:
                             _doc_text_for_grounding = _document_text_for_quality_check(_abs_path, _ext)
+                        try:
+                            _meta_for_quantity: dict = {}
+                            if _ext == "docx":
+                                from app.llm.tools.file_inspect import _inspect_docx as _inspect_docx_for_quantity
+                                _meta_for_quantity = _inspect_docx_for_quantity(_abs_path)
+                            elif _ext == "pptx":
+                                from app.llm.tools.file_inspect import _inspect_pptx as _inspect_pptx_for_quantity
+                                _meta_for_quantity = _inspect_pptx_for_quantity(_abs_path)
+                            if isinstance(_meta_for_quantity, dict):
+                                for _cw in document_structure_quantity_warnings(
+                                    prompt,
+                                    file=_exp,
+                                    table_count=_meta_for_quantity.get("table_count"),
+                                    image_count=_meta_for_quantity.get("image_count"),
+                                ):
+                                    _quality_warnings.append(_cw)
+                        except Exception:
+                            pass
                         if expected_text_tokens:
                             actual_text_norm = _normalize_doc_text_for_match(
                                 _doc_text_for_grounding
@@ -2719,12 +3355,12 @@ async def _run_one_helper(
                     "report_chars": _report_chars,
                     "delivered_files": _delivered_output_count,
                     "details": _suspicious_reason,
-                    "suggestion": (
-                        "Inspect ledger.delivered_summary and the produced files against the original acceptance "
-                        "points. If the same deliverable is incomplete or low quality, resume the same task_id with "
-                        "resume=true, keep the base kind, and upgrade mode when needed. Use a verify helper only to "
-                        "check an existing artifact; use a new task_id only for a genuinely different work boundary.\n"
-                        "主线程按验收点检查产物；同一交付物修复用同 task_id + resume，必要时升 hard。"
+                    "observed_acceptance_review_fact": (
+                        "The helper report is shorter than expected for the delivered or declared outputs. The main thread "
+                        "has ledger.delivered_summary, produced files, original acceptance points, task_id, kind, and mode "
+                        "available for deciding whether this is complete, needs same-task continuation, needs verification "
+                        "of an existing artifact, or represents a genuinely different work boundary.\n"
+                        "观察到报告与产物规模不匹配；主线程需结合交付摘要、文件和验收点判断完成或续作。"
                     ),
                 })
 
@@ -2775,19 +3411,30 @@ async def _run_one_helper(
                     pass
 
             if main_resource_request:
+                _resource_kind = (
+                    main_resource_request.get("matching_helper_kind")
+                    or main_resource_request.get("resource_kind")
+                    or main_resource_request.get("suggested_helper_kind")
+                )
                 _quality_warnings.append({
                     "file": "<helper>",
                     "issue": "requires_main_resource",
                     "severity": "blocking",
                     "details": (
                         f"Helper is frozen and needs a main-process resource of kind "
-                        f"{main_resource_request.get('suggested_helper_kind')}: "
-                        f"{main_resource_request.get('main_thread_action')}\n\n"
-                        f"helper 冻结，等待主进程提供资源。"
+                        f"{_resource_kind}. "
+                        f"{main_resource_request.get('resource_resolution_facts') or main_resource_request.get('main_thread_action') or ''}\n\n"
+                        f"helper 冻结，资源种类和恢复条件是事实。"
                     ),
                     "resource_required": main_resource_request,
                 })
 
+            _blocking_quality_warnings = blocking_quality_warnings(_quality_warnings)
+            _producer_self_verified = (
+                not _missing
+                and not main_resource_request
+                and not _blocking_quality_warnings
+            )
             _result["outputs_check"] = {
                 "expected": expected_outputs,
                 "delivered_count": len({
@@ -2796,9 +3443,39 @@ async def _run_one_helper(
                 }),
                 "outputs_missing": _missing,
                 "outputs_complete": (not _missing and not main_resource_request),
-                # P11: quality_warnings 列表(空表示全部 OK)
                 "quality_warnings": _quality_warnings,
+                "quality_blocked": bool(_blocking_quality_warnings),
+                "producer_self_verified": _producer_self_verified,
             }
+            if _producer_self_verified:
+                _result["outputs_check"]["producer_boundary_fact"] = (
+                    "Declared outputs are present, no blocking quality/resource issue is reported, and this helper is the producer of the content. "
+                    "The main process can trust this helper-owned result. Helper-owned verifier/check/build needs, warnings, "
+                    "contradictions, or explicit independent-QA requests should be resolved through the producer helper, "
+                    "a verify helper, or existing helper-run evidence rather than main-thread content inspection. Main-owned "
+                    "content changes remain separate narrow boundaries. Transferring or applying helper-owned content does not by itself require "
+                    "main-thread content verification.\n\n"
+                    "声明产物齐全且无阻断质量/资源问题；helper 是内容生产者，主进程可采信其自检结果。机械应用/转移不改变生产者边界；验收缺口、警告、矛盾或独立 QA 需求交给生产 helper、verify helper 或已有 helper 验证证据。"
+                )
+            _update_helper_output_registry_metadata(
+                main_workspace,
+                task_id=task_id,
+                outputs_check=_result["outputs_check"],
+                paths=sorted(set(_visible_copied_back + _env_available_files + copied_back)),
+            )
+            if _env_unchanged_matched_files:
+                _result["outputs_check"]["unchanged_existing_outputs"] = [
+                    {"expected": expected, "existing_path": actual}
+                    for expected, actual in _env_unchanged_matched_files
+                ]
+                _result["outputs_check"]["unchanged_existing_outputs_fact"] = (
+                    "Some expected `_env/...` outputs were already present in the main workspace and the helper "
+                    "left them byte-identical. They are counted as existing outputs, not missing copyback files; "
+                    "a clean helper result may rely on the helper's content judgment. Warnings, contradictions, "
+                    "or acceptance gaps are producer/verify-helper follow-up boundaries, not reasons for "
+                    "main-thread content QA."
+                    "\n\n部分期望 `_env/...` 文件已存在且 helper 未改动；helper 干净完成时可采信其内容判断；警告、矛盾或验收缺口交给生产 helper 或 verify helper。"
+                )
             if _shared_protocol_matches:
                 _result["outputs_check"]["shared_protocol_matches"] = _shared_protocol_matches
                 _result["post_helper_usage_hint"] = (
@@ -2813,7 +3490,7 @@ async def _run_one_helper(
                     "process and downstream helpers, but they are not user-facing deliverables and are not real "
                     "project files. Continue the chain: inspect or collect the shared files, assemble the requested "
                     "final artifact, and in environment mode apply verified `_env/...` or project-relative files "
-                    "to the real project before final acceptance.\n\n"
+                    "to the real project before project-visible delivery.\n\n"
                     "`_helpers_shared/...` 只是协作证据；继续汇总、生成最终产物，并在项目模式落到真实项目路径后再验收。"
                 )
             if not _result["outputs_check"].get("outputs_complete"):
@@ -2823,7 +3500,6 @@ async def _run_one_helper(
                 _result["outputs_check"]["outputs_complete"] = False
                 if _missing and not _result["outputs_check"].get("outputs_missing"):
                     _result["outputs_check"]["outputs_missing"] = _missing
-            _blocking_quality_warnings = blocking_quality_warnings(_quality_warnings)
             if _blocking_quality_warnings and _result.get("terminal_reason") == "completed":
                 _result["ok"] = False
                 _result["terminal_reason"] = "quality_blocked"
@@ -2876,20 +3552,17 @@ async def _run_one_helper(
             _no_warnings = not _quality_warnings
             _has_expected = bool(expected_outputs) and kind not in {"read", "ocr"}
             _all_files_promoted = bool(_visible_copied_back or _env_available_files)
-            _has_office_output = any(
-                str(path).lower().endswith((".docx", ".pptx", ".xlsx"))
-                for path in _visible_copied_back
-            )
             if (_no_outputs_missing and _no_warnings and _has_expected
                     and _all_files_promoted and (not interrupted and not was_stuck or _terminal_converged)
-                    and not main_resource_request and not _has_office_output):
+                    and not main_resource_request):
                 _result["_post_helper_action"] = "output_json_directly"
                 # 2026-06-05 简化: 之前的提示太长 (~280 chars * 14 helpers = 4K context),
                 # 而且每个 helper 完成都重复;改为 1 行核心信息。
                 _result["_post_helper_hint"] = (
-                    "Outputs complete. Put the clean filename in plan.deliverables "
-                    "(pick one final if multiple candidates exist).\n"
-                    "产物完整；deliverables 写干净文件名,多候选选最终版。"
+                    "Producer self-verified outputs are complete. Put the clean filename in plan.deliverables "
+                    "(pick one final if multiple candidates exist); trust the helper's content judgment and do not run "
+                    "a separate main-thread final acceptance pass over helper-owned content.\n"
+                    "helper 自检产物完整；deliverables 写干净文件名，主进程信任其内容判断，不额外终验正文。"
                 )
                 if _env_available_files:
                     _result["_post_helper_hint"] += (
@@ -2928,9 +3601,9 @@ async def _run_one_helper(
                 f"重试提示需说明失败状态和新的处理方向。"
             )
             if was_stuck and stuck_reason:
-                # 根据 stuck_reason 关键词推断具体问题, 生成针对性 hint
+                # 根据 stuck_reason 关键词提取恢复事实，避免只复用旧 prompt。
                 _sr_lower = stuck_reason.lower()
-                _retry_suggestions = []
+                _retry_facts = []
                 if "win_fatal" in _sr_lower or "heap_corruption" in _sr_lower or "p103" in _sr_lower:
                     # 2026-05-21: ASan 不可用环境(MinGW)不推 ASan,给替代手段。
                     try:
@@ -2939,57 +3612,50 @@ async def _run_one_helper(
                     except Exception:
                         _asan_ok = False
                     if _asan_ok:
-                        _retry_suggestions.append(
-                            "Run a small debug build with `gcc -fsanitize=address -g -O0 your_code.c -o test && ./test`, "
-                            "then use the ASan trace to locate the memory bug."
+                        _retry_facts.append(
+                            "ASan appears available on this host; small debug builds can expose memory traces before larger inputs."
                         )
-                        _retry_suggestions.append("Start with N=10 under ASan; increase input size only after the small case is clean.")
+                        _retry_facts.append("Small inputs such as N=10 can isolate memory bugs before larger runs.")
                     else:
-                        _retry_suggestions.append(
-                            "ASan is unavailable on this host, so avoid `-fsanitize=address`. Use UBSan when available, "
-                            "assertions, boundary checks, and focused diagnostic output instead."
+                        _retry_facts.append(
+                            "ASan appears unavailable on this host; `-fsanitize=address` is not a reliable recovery path here."
                         )
-                        _retry_suggestions.append("Reproduce with N=10 first, add boundary assertions, then increase input size.")
+                        _retry_facts.append("Small reproduction inputs, boundary assertions, and focused diagnostics remain available evidence paths.")
                 if "bash_fail_rate" in _sr_lower or "p70" in _sr_lower:
-                    _retry_suggestions.append(
-                        "The previous helper looped through edit/build/fail. Start with a progress_note that states the current diagnosis, "
-                        "then consider rewriting the coherent module rather than repeatedly patching small spans."
+                    _retry_facts.append(
+                        "The previous helper looped through edit/build/fail; repeated local patches may not be producing new evidence."
                     )
                 if "edit_same_file" in _sr_lower or "p69" in _sr_lower:
-                    _retry_suggestions.append(
-                        "The previous helper repeatedly edited the same file without passing checks. Re-read the relevant file or function first, "
-                        "then rewrite the coherent function/module instead of another local patch."
+                    _retry_facts.append(
+                        "The previous helper repeatedly edited the same file without passing checks; current file/function evidence may be stale."
                     )
                 if "cumulative" in _sr_lower or "p14" in _sr_lower:
-                    _retry_suggestions.append(
-                        "The previous helper hit a repeated-error threshold. The retry prompt should name the known failure pattern, "
-                        "require reading the error output, and locate the cause before editing."
+                    _retry_facts.append(
+                        "The previous helper hit a repeated-error threshold; the known failure pattern and latest error output are relevant facts."
                     )
                 if "office_args_too_large" in _sr_lower:
-                    _retry_suggestions.append(
-                        "The previous Office call batched too many blocks. Limit each append to 2-8 blocks and split long sections across calls."
+                    _retry_facts.append(
+                        "The previous Office call batched too many blocks; smaller append batches are available."
                     )
                 if "long_no_delegate" in _sr_lower:
-                    _retry_suggestions.append(
-                        "The previous attempt did too much serial work. Split independent subtasks into helpers before fan-in."
+                    _retry_facts.append(
+                        "The previous attempt did much serial work; independent subtasks may exist before fan-in."
                     )
 
-                if _retry_suggestions:
+                if _retry_facts:
                     _smart_prompt_hint = (
                         f"Previous helper stuck reason: {stuck_reason[:250]}\n"
-                        f"The new prompt should include:\n"
-                        + "\n".join(f"  - {s}" for s in _retry_suggestions)
-                        + "\nUse a concrete revised direction instead of merely reusing the old prompt with a stuck label.\n\n"
-                        + "重派 helper 时说明上次卡点，并给出新的具体方向。"
+                        f"Observed recovery facts:\n"
+                        + "\n".join(f"  - {s}" for s in _retry_facts)
+                        + "\nThese facts describe the recovery surface: revised helper boundary, focused prompt, and acceptance checks may need to differ from merely reusing the old prompt with a stuck label.\n\n"
+                        + "观察到上次卡点和可用恢复事实；新边界、提示和验收可能需要不同于原提示。"
                     )
                 else:
                     _smart_prompt_hint = (
                         f"Previous helper stuck reason: {stuck_reason[:250]}\n"
-                        f"Recommended new prompt shape:\n"
-                        f"  - State where the previous helper got stuck, using details from its summary or report.\n"
-                        f"  - Give one concrete revised direction such as stronger verification, narrower tests, or a rewrite path.\n"
-                        f"  - Preserve useful work, but make the next attempt meaningfully different.\n\n"
-                        f"重派 helper 时保留已有证据，明确卡点，并换一个可产生新证据的方向。"
+                        f"Observed retry fact: the previous attempt got stuck, and its summary/report may contain usable artifacts, failure location, and unresolved acceptance gaps. "
+                        f"Possible recovery dimensions include stronger verification, narrower tests, a rewrite path, resource changes, or a different boundary.\n\n"
+                        f"观察到上次尝试卡住；摘要/报告中的产物、失败位置和验收缺口是恢复事实。"
                     )
 
             # 结构化 next_action(主线程 LLM 直接复制 params 用 delegate)

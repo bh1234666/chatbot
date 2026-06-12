@@ -35,14 +35,15 @@ src = inspect.getsource(repair_tool_call_pairing)
 module_src = inspect.getsource(sys.modules[repair_tool_call_pairing.__module__])
 assert "delegate" in module_src and "spawn_helper" in module_src and "wait_helper" in module_src
 assert "_synthetic_repair" in src
-assert "不要重新 spawn" in src
+assert "protocol_repair_required" in src
+assert "inspect the current workspace" in src
 print("  OK: repair_pairing has synthetic injection for task_mgmt tools")
 
-# Verify delegate.py has Fix 4 (resume dedup) and Fix 6 (auto_final block)
+# Verify delegate.py has Fix 4 (resume dedup) and Fix 6 (legacy auxiliary-pair block)
 dl_src = inspect.getsource(handle_delegate)
 assert "dup_resume_completed_tids" in dl_src, "Fix 4 missing: resume dedup"
-assert "_all_orig_dup" in dl_src or "auto_final_blocked_after_dedup" in dl_src, "Fix 6 missing: auto_final block"
-print("  OK: delegate has Fix 4 (resume dedup) and Fix 6 (auto_final block)")
+assert "_all_orig_dup" in dl_src or "legacy_aux_pair_blocked_after_dedup" in dl_src, "Fix 6 missing: legacy auxiliary-pair block"
+print("  OK: delegate has Fix 4 (resume dedup) and Fix 6 (legacy auxiliary-pair block)")
 
 # Verify workspace has Fix 3 and Fix 5
 ws_src = inspect.getsource(ensure_temp_workspace)

@@ -35,7 +35,7 @@ def language_directive(lang: str) -> str:
             "\n\n## Output Language\n"
             "The user's original message is Chinese. User-facing deliverables should be in Chinese:\n"
             "- Final replies and user-visible summaries should be Chinese.\n"
-            "- DOCX/PPTX/XLSX content written through office.write or office.append should use Chinese for titles, paragraphs, table headers, and notes.\n"
+            "- DOCX/PPTX/XLSX content written through the office tool with write or append actions should use Chinese for titles, paragraphs, table headers, and notes.\n"
             "- Filenames may be English, but file content should be Chinese.\n"
             "- Code comments may be Chinese when comments are useful; identifiers follow programming-language conventions.\n"
             "- Visible chart text such as title, xlabel, ylabel, and legend should be Chinese.\n"
@@ -64,5 +64,16 @@ def language_directive(lang: str) -> str:
             "The user's original message mixes Chinese and English with Chinese as the main language. Replies and documents "
             "should default to Chinese; technical terms, code-related English, and English phrases from the user may remain in English.\n\n"
             "中英混合且中文为主时，回复和文档默认中文，技术术语和代码相关英文可保留。"
+        )
+    if lang == "en":
+        # 2026-06-10 Round 7: an empty directive let Chinese-default personas
+        # answer English users in Chinese (t3-msg-inbox-triage 20260610_163156:
+        # English request, Chinese final reply). Mirror the zh rule.
+        return (
+            "\n\n## Output Language\n"
+            "The user's original message is English. User-facing replies, summaries, and document/report content "
+            "should be in English. Internal planning, helper reports, and helper-to-main coordination may use "
+            "whichever language best preserves evidence and task clarity.\n\n"
+            "用户使用英文；面向用户的回复和文档用英文，内部协调语言不限。"
         )
     return ""

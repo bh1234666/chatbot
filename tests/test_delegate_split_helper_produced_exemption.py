@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.llm.tools.delegate import _deterministic_source_read_split_recommendations
+from app.llm.tools.delegate import (
+    _deterministic_source_read_split_recommendations,
+    _should_soften_source_read_split_for_single_text_output,
+)
 
 
 def test_split_recommended_when_no_explicit_input_files():
@@ -20,7 +23,7 @@ def test_split_recommended_when_no_explicit_input_files():
     recs = _deterministic_source_read_split_recommendations([task])
     assert len(recs) == 1
     assert recs[0]["task_id"] == "extract_paper_figs"
-    assert recs[0]["should_split"] is True
+    assert recs[0]["observed_split_boundary_names"]
 
 
 def test_no_split_when_input_files_explicit():
@@ -74,3 +77,39 @@ def test_no_split_for_explicit_input_files_even_when_all_raw_sources():
     }
     recs = _deterministic_source_read_split_recommendations([task])
     assert recs == []
+
+
+def test_source_read_split_softens_for_single_text_synthesis_with_small_fact_set():
+    task = {
+        "task_id": "small_report",
+        "kind": "code",
+        "prompt": (
+            "Write summary.md from already confirmed profile.yaml and data.json facts. "
+            "Budget, constraints, and accepted venue facts are listed inline below."
+        ),
+        "expected_outputs": ["summary.md"],
+    }
+    rec = {
+        "task_id": "small_report",
+        "observed_split_boundary_names": ["read_user_profile", "read_data_json", "summary_synthesis"],
+        "reason": "Separate source-material reading from final writing.",
+    }
+
+    assert _should_soften_source_read_split_for_single_text_output(task, rec) is True
+
+
+def test_source_read_split_does_not_soften_for_broad_raw_material_batch():
+    files = "\n".join(f"- report{i}.docx" for i in range(10))
+    task = {
+        "task_id": "extract_reports",
+        "kind": "code",
+        "prompt": f"Read and extract source material from these files:\n{files}",
+        "expected_outputs": ["summary.md"],
+    }
+    rec = {
+        "task_id": "extract_reports",
+        "observed_split_boundary_names": ["read_sources_batch_1", "read_sources_batch_2"],
+        "reason": "Read helpers should split broad source material first.",
+    }
+
+    assert _should_soften_source_read_split_for_single_text_output(task, rec) is False

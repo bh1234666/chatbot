@@ -609,7 +609,17 @@ def _summarize_delegate_result(r: dict, brief: str) -> str:
             terminal = str(item.get("terminal_reason") or "").strip().lower()
             outputs = item.get("outputs_check") or {}
             outputs_complete = outputs.get("outputs_complete") if isinstance(outputs, dict) else None
-            if item.get("ok") is True or terminal == "completed" or outputs_complete is True:
+            producer_verified = outputs.get("producer_self_verified") is True if isinstance(outputs, dict) else False
+            quality_blocked = bool(outputs.get("quality_blocked")) if isinstance(outputs, dict) else False
+            if (
+                producer_verified
+                or (
+                    item.get("ok") is True
+                    and terminal == "completed"
+                    and outputs_complete is not False
+                    and not quality_blocked
+                )
+            ):
                 result_ids.append(tid)
             elif item.get("ok") is False or terminal in {"failed", "interrupted", "stuck", "timeout", "crashed"}:
                 failed_ids.append(tid)

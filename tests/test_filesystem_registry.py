@@ -294,5 +294,57 @@ def test_env_apply_guard_blocks_unready_registry_record(tmp_path):
 
     assert blocked["ok"] is False
     assert blocked["error_kind"] == "staged_environment_file_not_ready"
-    assert blocked["suggested_next_action"]["task_template"]["task_id"] == "report_task"
+    assert blocked["recovery_facts"]["same_task_id"] == "report_task"
     assert source.read_text(encoding="utf-8") == "old\n"
+
+
+def test_env_apply_allows_ready_provenance_when_registry_record_is_stale(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import environment
+
+    project = tmp_path / "project"
+    workspace = tmp_path / "workspace"
+    source = project / "config_loader.py"
+    project.mkdir()
+    workspace.mkdir()
+    source.write_text("old\n", encoding="utf-8")
+    env = EnvironmentContext(
+        root_dir=str(project),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        fetched = environment._handle_fetch(str(workspace), {"path": "config_loader.py"})
+        staged = workspace / "_env" / "config_loader.py"
+        staged.write_text("new\n", encoding="utf-8")
+        registry = FileRegistry.load(scope_id=f"env:{project.resolve()}", workspace_root=workspace, project_root=project)
+        record = registry.find_by_workspace_path("_env/config_loader.py")
+        assert record is not None
+        record.status = FileStatus.INDEXED
+        record.verified = False
+        registry.add_or_update(record)
+        registry.save()
+        environment.record_env_helper_outputs(
+            str(workspace),
+            task_id="fix_config",
+            files=["_env/config_loader.py"],
+            ok=True,
+            terminal_reason="completed",
+            outputs_complete=True,
+            kind="code",
+            mode="easy",
+        )
+        result = environment._handle_apply_replace(
+            str(workspace),
+            {
+                "path": "config_loader.py",
+                "workspace_path": "_env/config_loader.py",
+                "expected_hash": fetched["sha256"],
+            },
+        )
+
+    assert result["ok"] is True
+    assert source.read_text(encoding="utf-8") == "new\n"

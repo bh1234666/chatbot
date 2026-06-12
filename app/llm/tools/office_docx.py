@@ -17,6 +17,7 @@ import zipfile
 from typing import Any
 
 from app.llm.tools.office_common import _err
+from app.llm.tools.office_locking import docx_write_lock, replace_file_with_retries
 
 log = logging.getLogger(__name__)
 
@@ -47,10 +48,35 @@ def _save_docx_atomic(doc, target: str) -> tuple[int, str | None]:
                 shutil.copy2(target, bak_path)
             except OSError:
                 pass
-        os.replace(tmp_path, target)
+        replace_err = replace_file_with_retries(tmp_path, target)
+        if replace_err is not None:
+            return 0, (
+                f"save failed: {replace_err} "
+                "The target DOCX is likely still locked by another Office/read/write operation. "
+                "Wait briefly, avoid parallel edits to the same file, then retry the same operation from the current evidence.\n"
+                "保存失败:目标 DOCX 仍被占用；请避免并行编辑同一文件，稍后基于当前证据重试。"
+            )
         return os.path.getsize(target) if os.path.exists(target) else 0, None
     except Exception as e:
         return 0, f"save failed: {type(e).__name__}: {e}"
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
+def _open_docx_detached(target: str):
+    """Open a DOCX from a private temp copy so Windows can replace the target later."""
+    from docx import Document
+
+    directory = os.path.dirname(target) or "."
+    fd, tmp_path = tempfile.mkstemp(prefix=".docx_read_", suffix=".docx", dir=directory)
+    os.close(fd)
+    try:
+        shutil.copy2(target, tmp_path)
+        return Document(tmp_path)
     finally:
         try:
             if os.path.exists(tmp_path):
@@ -77,7 +103,7 @@ async def _docx_read(workspace_dir: str, target: str, rel_path: str, args: dict)
 
     def _do_read():
         try:
-            doc = Document(target)
+            doc = _open_docx_detached(target)
         except Exception as e:
             return None, _docx_open_error(e, rel_path)
 
@@ -269,8 +295,8 @@ async def _docx_read(workspace_dir: str, target: str, rel_path: str, args: dict)
             out["saved_text_bytes"] = len(body.encode("utf-8"))
             out["hint"] += (
                 f"\nRead body text was also saved to {save_to}; use read_file with line ranges if you need "
-                "paged text evidence. office(read) still returns structured blocks and tables directly.\n"
-                "正文已保存到 save_to，可用 read_file 分段读取；office(read) 本身也已返回结构化内容。"
+                "paged text evidence. The office tool with action=read still returns structured blocks and tables directly.\n"
+                "正文已保存到 save_to，可用 read_file 分段读取；office action=read 本身也已返回结构化内容。"
             )
         except (OSError, ValueError) as e:
             out["save_to_error"] = f"{type(e).__name__}: {e}"
@@ -473,7 +499,7 @@ async def _docx_delete_block(
 
     def _do():
         try:
-            doc = Document(target)
+            doc = _open_docx_detached(target)
         except Exception as e:
             return None, _docx_open_error(e, rel_path)
         items = _docx_enumerate_body(doc)
@@ -498,7 +524,8 @@ async def _docx_delete_block(
             "orphan_cleanup": orphan_info,
         }, None
 
-    info, err = await asyncio.to_thread(_do)
+    async with docx_write_lock(target):
+        info, err = await asyncio.to_thread(_do)
     if err:
         return _err(err)
     return json.dumps({

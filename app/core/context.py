@@ -115,7 +115,8 @@ def build_base_context(
     user_blocks.append(
         f"## Current Message To Answer\n"
         f"This is the request to handle now. The conversation history and injected context above are past/reference material; "
-        f"make the decision from this current message:\n\n"
+        f"make the decision from this current message. For current/latest project, file, code, log, or tool-state facts, "
+        f"historical assistant analyses are only leads until rechecked with current evidence:\n\n"
         f"{speaker}：{current_message}"
     )
 
@@ -149,7 +150,10 @@ def _compact_bot_log(log_str: str) -> str:
     parts: list[str] = []
     for kv in inner.split(" | "):
         kv_strip = kv.strip()
-        if kv_strip.startswith(("intent=", "note=", "aborted=", "complexity=")):
+        if kv_strip.startswith((
+            "intent=", "key_points=", "deliverables=", "delivery_partial=",
+            "in_main=", "helpers=", "note=", "aborted=", "complexity=",
+        )):
             if "=" in kv_strip:
                 key, value = kv_strip.split("=", 1)
                 value = value[:200] + ("..." if len(value) > 200 else "")
@@ -157,6 +161,46 @@ def _compact_bot_log(log_str: str) -> str:
             else:
                 parts.append(kv_strip)
     return f"<bot_log_brief>{' | '.join(parts)}</bot_log_brief>" if parts else ""
+
+
+_HISTORICAL_INTERNAL_MARKUP_RE = _re.compile(
+    r"<\s*/?\s*(?:env_)?(?:read|write|edit|search|run|tool|workspace|bash|python|ocr|tts|image|draw|markdown|code)\b[^<>]{0,1200}/?\s*>",
+    _re.IGNORECASE,
+)
+_HISTORICAL_INTERNAL_MARKUP_NOTE = "[internal tool/action markup omitted from historical visible text]"
+
+
+def _sanitize_historical_visible_text(text: str) -> str:
+    """Remove old user-visible tool markup while preserving ordinary text."""
+    if not text:
+        return ""
+    sanitized, count = _HISTORICAL_INTERNAL_MARKUP_RE.subn(
+        _HISTORICAL_INTERNAL_MARKUP_NOTE,
+        text,
+    )
+    if count <= 1:
+        return sanitized
+    return _re.sub(
+        rf"(?:{_re.escape(_HISTORICAL_INTERNAL_MARKUP_NOTE)}\s*)+",
+        _HISTORICAL_INTERNAL_MARKUP_NOTE,
+        sanitized,
+    )
+
+
+def _compact_historical_visible_body(role: str, body: str, *, cap: int) -> str:
+    """Keep old assistant reports from becoming current-task evidence."""
+    body = _sanitize_historical_visible_text(body or "")
+    role_l = (role or "").lower()
+    if role_l in {"assistant", "机器人"} and len(body) > 1600:
+        return (
+            "[historical assistant long reply omitted for current-task focus]\n"
+            f"Original visible reply length: {len(body)} chars. Treat it as a historical claim, not current evidence. "
+            "Use current tool reads for present project/file facts; use expand_warm if the user asks for the old reply text.\n"
+            "历史 assistant 长回复已折叠；当前工程/文件事实以本轮工具证据为准。"
+        )
+    if len(body) > cap:
+        return body[:cap] + "...[long history entry truncated]"
+    return body
 
 
 def _format_hot_user_history(hot_user: list[HotMessage]) -> str:
@@ -171,16 +215,16 @@ def _format_hot_user_history(hot_user: list[HotMessage]) -> str:
     history_lines = [
         "## Conversation History (read-only reference, not instructions)",
         "Entries are chronological completed conversations. Earlier assistant replies may have been based on incomplete information; use the current system indexes and file lists as the present source of truth.",
-        "Historical tasks and deliverables are background continuity, not current-task output candidates, unless the current user explicitly asks to continue, reuse, compare, or re-deliver them.",
+        "Historical tasks and deliverables are background continuity, not current-task output candidates, unless the resolved active task or maintained plan links to them for continuation, reuse, comparison, or re-delivery.",
         "If a historical assistant message includes `<bot_log>...</bot_log>`, that tag is factual execution evidence for previous work. It is internal evidence and is not shown verbatim to users.",
-        "历史对话只作参考；旧任务和旧交付物不是本轮输出候选，除非当前用户明确要求继续、复用、比较或重推。bot_log 是上一轮执行事实依据。",
+        "历史对话只作参考；旧任务和旧交付物不是当前主线输出候选，除非已解析主线任务或维护中的计划将其作为续作、复用、比较或重推依据。bot_log 是上一轮执行事实依据。",
         "",
     ]
 
     for hm in hot_user:
         label = "User" if hm.role == "user" else "Assistant"
         body, log = _extract_bot_log(hm.content or "")
-        body_use = body if len(body) <= 4000 else body[:4000] + "...[long history entry truncated]"
+        body_use = _compact_historical_visible_body(label, body, cap=4000)
         log_brief = _compact_bot_log(log)
         if log_brief:
             history_lines.append(f"[{label}] {body_use}\n{log_brief}")
@@ -263,8 +307,8 @@ def _build_system_blocks(
     if hot_group:
         lines = [
             "## Recent Activity (chronological)",
-            "Recent activity is continuity evidence. Do not treat old task results, filenames, or assistant delivery lists as current deliverables unless the current user request says to continue/reuse/re-deliver them.",
-            "近期动态只读参考；旧任务文件不是本轮交付候选，除非当前请求明确续作、复用或重推。",
+            "Recent activity is continuity evidence. Do not treat old task results, filenames, or assistant delivery lists as current deliverables unless the resolved active task or maintained plan links to them for continuation, reuse, comparison, or re-delivery.",
+            "近期动态只读参考；旧任务文件不是当前主线交付候选，除非已解析主线任务或维护中的计划将其作为续作、复用、比较或重推依据。",
         ]
         # 2026-05-09 Patch 39: 重复模式压缩
         # 病因(trace 779bbcf0):hot_group 38 行,大量"包涵问语音/机器人拒绝"循环,
@@ -648,24 +692,28 @@ def _build_tendency_block(tendency: dict) -> str:
         k: v for k, v in tendency.items()
         if k in _FORCE_KEEP_TENDENCY_KEYS or v not in (None, "", [], {}, False, 0)
     }
-    block = "## Previous Analysis\n" + json.dumps(
+    block = (
+        "## Entry Routing Snapshot\n"
+        "Coarse facts from the entry router. They explain why this Round 2 run started and the initial tool/context budget; they are not the final task contract after task_plan updates.\n"
+        "入口路由快照只解释是否进入 Round2 和初始预算；后续以 task_plan/thread plan 为当前任务事实。\n"
+    ) + json.dumps(
         compact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
 
     if tendency.get("is_document_task") is False:
         block += (
-            "\n\nRound 1 routing: `is_document_task=false`. "
-            "Use document/edit helpers only when the current message explicitly asks for a document-style deliverable; "
-            "deliver the direct result otherwise.\n\n"
-            "本轮没要文档时，按当前请求交付结果，不自动生成文档。"
+            "\n\nEntry routing snapshot: `is_document_task=false`. "
+            "Treat this as an initial budget fact, not a ban. Use document/edit helpers only when current task evidence "
+            "or task_plan facts show a document-style deliverable; deliver the direct result otherwise.\n\n"
+            "入口快照显示非文档；若后续任务事实要求文档，仍按事实处理。"
         )
 
     if tendency.get("is_coding_task") is False and tendency.get("is_document_task") is False:
         block += (
-            "\n\nRound 1 routing: `is_coding_task=false`, `is_document_task=false`. "
-            "When the current message explicitly asks to create/save files, images, audio, or read visual content, "
-            "choose the matching resource helper for this round.\n\n"
-            "非代码非文档任务仍按当前请求派合适资源 helper。"
+            "\n\nEntry routing snapshot: `is_coding_task=false`, `is_document_task=false`. "
+            "Treat this as an initial budget fact, not a ban. When current task evidence asks to create/save files, "
+            "images, audio, read visual content, or update project files, choose the matching helper for this round.\n\n"
+            "入口快照显示非代码非文档；后续事实要求资源或项目操作时仍派合适 helper。"
         )
     return block
 
@@ -696,13 +744,51 @@ def _build_workspace_snapshot_block(workspace_listing: list[str] | None) -> str:
     )
 
 
-def _append_round2_dynamic_context(messages: list[dict], blocks: list[str]) -> None:
-    """Insert Round 2 dynamic evidence before the current-request user tail.
+_CURRENT_REQUEST_MARKERS = (
+    "\n\n---\n\n## Current Message To Answer",
+    "\n\n## Current Message To Answer",
+    "## Current Message To Answer",
+    "\n\n---\n\n## Current Message To Route",
+    "\n\n## Current Message To Route",
+    "## Current Message To Route",
+)
 
-    Base context already ends its user message with the current request. Keeping
-    Round 2 dynamic context as a separate earlier user message preserves more
-    reusable prefix for similar planning calls, while the orchestrator still
-    appends the current request contract anchor at the final user tail.
+
+def _insert_user_context_before_current_request(messages: list[dict], block: str) -> bool:
+    """Place dynamic context late, immediately before the current request marker."""
+    payload = (block or "").strip()
+    if not payload:
+        return False
+    for idx in range(len(messages) - 1, -1, -1):
+        message = messages[idx]
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = str(message.get("content") or "")
+        marker_at: int | None = None
+        marker_text = ""
+        for marker in _CURRENT_REQUEST_MARKERS:
+            pos = content.find(marker)
+            if pos >= 0 and (marker_at is None or pos < marker_at):
+                marker_at = pos
+                marker_text = marker
+        if marker_at is None:
+            continue
+        before = content[:marker_at].rstrip()
+        after = content[marker_at + len(marker_text):].lstrip()
+        current_header = marker_text.strip()
+        pieces = [part for part in (before, payload, current_header + ("\n" + after if after else "")) if part]
+        messages[idx] = {**message, "content": "\n\n---\n\n".join(pieces)}
+        return True
+    return False
+
+
+def _append_round2_dynamic_context(messages: list[dict], blocks: list[str]) -> None:
+    """Insert Round 2 dynamic evidence just before the current-request tail.
+
+    Base context usually contains reusable conversation/history context followed
+    by `## Current Message To Answer`. Placing volatile Round 2 state right
+    before that marker preserves the longest reusable user-message prefix while
+    keeping task-local facts close to the current request.
     """
     payload = "\n\n---\n\n".join(block.strip() for block in blocks if block and block.strip())
     if not payload:
@@ -714,6 +800,8 @@ def _append_round2_dynamic_context(messages: list[dict], blocks: list[str]) -> N
         "本轮动态上下文，只读；包含当前索引、近期动态、路由分析、工作区状态和历史执行事实。\n\n"
         + payload
     )
+    if _insert_user_context_before_current_request(messages, block):
+        return
     for idx, message in enumerate(messages):
         if message.get("role") == "user":
             messages.insert(idx, {"role": "user", "content": block})
@@ -976,6 +1064,7 @@ def _format_recent_group_messages(messages: list[dict]) -> str:
         # 2026-05-11 主进程精简: 远期消息(idx < recent_cutoff)内容截到 100 字符
         # 远期发言用户问"刚才谁说啥"通常指最近 10 条, 远期完整内容意义有限
         _content_raw = m.get('content', '') or ''
+        _content_raw = _sanitize_historical_visible_text(_content_raw)
         if is_recent:
             _content_show = _content_raw  # 最近 10 条完整
         else:
@@ -1064,12 +1153,50 @@ def round1_messages_light(
 
     if hot_user:
         recent = hot_user[-20:]  # 最多最近 10 轮（user+assistant × 10）
-        lines = ["## Recent Conversation (read-only reference)", "最近对话只读参考。"]
+        lines = [
+            "## Recent Conversation (read-only reference)",
+            "Historical assistant long replies may be stale; current project/file facts require current evidence.",
+            "最近对话只读参考；历史长回复不作为当前工程事实。",
+        ]
         for hm in recent:
             label = "用户" if hm.role == "user" else "机器人"
-            body = hm.content[:800]
-            lines.append(f"[{label}] {body}")
+            body, log = _extract_bot_log(hm.content or "")
+            body = _compact_historical_visible_body(label, body, cap=800)
+            log_brief = _compact_bot_log(log)
+            if log_brief:
+                lines.append(f"[{label}] {body}\n{log_brief}")
+            else:
+                lines.append(f"[{label}] {body}")
         blocks.append("\n\n".join(lines))
+
+    try:
+        from app.core.message_routing import observed_route_text_facts
+        route_facts = observed_route_text_facts(current_message)
+    except Exception:
+        route_facts = []
+    if route_facts:
+        blocks.append(
+            "## Observed Text Facts (read-only, not decisions)\n"
+            "These are simple text-match facts from the latest message. They do not name the task type, route, tool need, or final output. Set JSON fields from the current request plus recent task context. If the latest message is a continuation, correction, retry, completion, or follow-up constraint about recent task evidence/artifacts/validation/assumptions, resolve the active task from recent conversation and bot_log briefs before deciding.\n\n"
+            + "\n".join(f"- {fact}" for fact in route_facts)
+            + "\n\n这里只陈述文本匹配事实；遇到续作、纠正或对最近任务证据/产物/验收/假设的追加约束时，先结合最近对话和 bot_log 摘要判断当前主线。"
+        )
+
+    try:
+        from app.core.environment_prompt import environment_project_context
+        env_context = environment_project_context()
+    except Exception:
+        env_context = ""
+    if env_context:
+        blocks.append(
+            "## Environment Project Facts (read-only, not route decisions)\n"
+            "A current environment project is attached to this request. These facts do not decide the route by themselves. "
+            "Concrete project files, verifier scripts, datasets, logs, and configuration are current tool evidence; memory "
+            "recall is historical evidence. When wording such as usual place, this file, the project, or current logs could "
+            "refer to project material, compare environment/project evidence with recent conversation before setting route fields.\n\n"
+            + env_context
+            + "\n\n项目环境事实只说明当前有项目上下文；项目文件和验证脚本属于当前工具证据，历史记忆属于历史证据。"
+        )
 
     # 2026-05-12 P54: 注意力 anchor 强化 (Round1 也用)
     blocks.append(
@@ -1300,6 +1427,96 @@ _OVERCLAIM_PATTERNS = (
     "100% 成功", "all passed", "全部 round-trip", "全部round-trip",
     "全部 round_trip", "全部round_trip",
 )
+_COVERAGE_GAP_RE = _re.compile(
+    r"("
+    r"跳过|未读取|没读取|未读|没读|未验证|没验证|未检查|没检查|未覆盖|未完整覆盖|"
+    r"仅读取|仅读取|只读取|仅检查|只检查|未跑|没跑|没有运行|尚未|仍需|"
+    r"超时|中断|未产出|未成功|不完整|缺口|失败|"
+    r"\bskipp?ed\b|\bunread\b|\bunverified\b|\bunchecked\b|\buncovered\b|"
+    r"\btimeout\b|\btimed\s+out\b|\binterrupted\b|\bincomplete\b|\bfailed\b|"
+    r"\bmissing\b|\bgap\b|\bno\s+complete\s+report\b|"
+    r"\bnot\s+(?:read|checked|verified|covered|run)\b|"
+    r"\bnot\s+fully\s+(?:read|checked|verified|covered)\b|"
+    r"\bonly\s+(?:read|checked|verified|covered)\b|"
+    r"\bpartial\s+(?:coverage|audit|verification)\b"
+    r")",
+    _re.IGNORECASE,
+)
+_NO_ACTION_BOUNDARY_RE = _re.compile(
+    r"("
+    r"无需|不需要|不用|没有必要|已满足|已经满足|证据足够|现有证据|"
+    r"未改动|未修改|保持不变|保留不变|未发送|不会发送|不发送|只标记|已标记|"
+    r"无阻塞|没有阻塞|无缺失|没有缺失|"
+    r"\bno\s+(?:further|additional|new)\s+(?:action|change|edit|work|mutation|deliverable|deliverables|output|outputs)\b|"
+    r"\bnothing\s+(?:is\s+)?(?:blocked|missing)\b|"
+    r"\bnothing\s+(?:was\s+)?(?:sent|modified|changed)\b|"
+    r"\bno\s+(?:blocker|blockers|blocking|missing|missing\s+items)\b|"
+    r"\balready\s+(?:satisfy|satisfies|satisfied|in\s+place|covered|verified)\b|"
+    r"\bexisting\s+evidence\b|"
+    r"\bleft\s+unchanged\b|\bunchanged\b|\bnot\s+(?:modified|sent|changed)\b|"
+    r"\bdo\s+not\s+send\b|\bdon't\s+send\b"
+    r")",
+    _re.IGNORECASE,
+)
+
+
+def _plan_coverage_gap_facts(plan: ResponsePlan, limit: int = 6) -> list[str]:
+    """Extract task-coverage gap facts without deciding the final status."""
+    facts: list[str] = []
+    seen: set[str] = set()
+    candidates: list[str] = []
+    if plan.intent:
+        candidates.append(plan.intent)
+    candidates.extend(plan.key_points or [])
+    if plan.internal_note:
+        candidates.append(plan.internal_note)
+    candidates.extend(plan.callbacks or [])
+    candidates.extend(plan.avoid or [])
+
+    for raw in candidates:
+        text = (raw or "").strip()
+        if not text or not _COVERAGE_GAP_RE.search(text):
+            continue
+        compact = _re.sub(r"\s+", " ", text)
+        if len(compact) > 260:
+            compact = compact[:240].rstrip() + "...[truncated]"
+        key = compact.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        facts.append(compact)
+        if len(facts) >= limit:
+            break
+    return facts
+
+
+def _plan_no_action_boundary_facts(plan: ResponsePlan, limit: int = 5) -> list[str]:
+    """Extract plan facts where the current answer should name a no-action boundary."""
+    facts: list[str] = []
+    seen: set[str] = set()
+    candidates: list[str] = []
+    if plan.intent:
+        candidates.append(plan.intent)
+    candidates.extend(plan.key_points or [])
+    if plan.internal_note:
+        candidates.append(plan.internal_note)
+    candidates.extend(plan.callbacks or [])
+
+    for raw in candidates:
+        text = (raw or "").strip()
+        if not text or not _NO_ACTION_BOUNDARY_RE.search(text):
+            continue
+        compact = _re.sub(r"\s+", " ", text)
+        if len(compact) > 240:
+            compact = compact[:220].rstrip() + "...[truncated]"
+        key = compact.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        facts.append(compact)
+        if len(facts) >= limit:
+            break
+    return facts
 
 
 def _audit_plan_honesty(plan: ResponsePlan) -> str:
@@ -1364,8 +1581,8 @@ def _audit_plan_honesty(plan: ResponsePlan) -> str:
         return (
             "\n\n"
             "## Plan contains strong success claims: preserve evidence boundaries\n"
-            "The plan includes claims like all passed, N/N passed, 100% success, or all correct. Use exact pass counts only when the main thread or provided tool evidence explicitly verified them. When counts come from helper self-reports, phrase the result as supported by the available report and distinguish any direct spot checks.\n"
-            "\n强成功声明需要按证据来源表达，区分主线程验证和 helper 自报。\n"
+            "The plan includes claims like all passed, N/N passed, 100% success, or all correct. Use exact pass counts when tool evidence or a clean producer-self-verified helper result explicitly supports them. If helper output facts are missing, warning-bearing, contradictory, or outside the active acceptance boundary, state that evidence boundary instead of upgrading it with main-thread content checks.\n"
+            "\n强成功声明按生产者边界表达；helper 干净自验可作为精确验收事实，缺证据/有警告/有矛盾时说明边界。\n"
         )
 
     # 2026-05-15 P95: 数值一致性自检 — internal_note 自爆"N 个 X 全"但 deliverables 数量对不上
@@ -1480,6 +1697,22 @@ def round3_messages(
         + f"\n- Tone: {plan.tone}\n"
         f"- Length: {plan.length_hint}\n"
     )
+    # 2026-06-10 Round 7: round3 never saw the round2 language directive, so a
+    # Chinese-default persona answered English users in Chinese
+    # (t3-msg-inbox-triage 20260610_163156/171622, behavior 0.75). State the
+    # reply language as a plan fact derived from the user's actual message.
+    try:
+        from app.core.language import detect_user_language as _detect_lang
+        _reply_lang = _detect_lang(current_message or "")
+        if _reply_lang == "en":
+            plan_text += (
+                "- Reply language: the user wrote in English; reply in English "
+                "(persona voice preserved, technical terms as-is).\n"
+            )
+        elif _reply_lang in ("zh", "mixed"):
+            plan_text += "- Reply language: 用户使用中文/中英混合，用中文回复。\n"
+    except Exception:
+        pass
     if plan.avoid:
         plan_text += "- Avoid topics:\n" + "\n".join(f"  - {a}" for a in plan.avoid) + "\n"
     if plan.callbacks:
@@ -1492,10 +1725,12 @@ def round3_messages(
     _plan_completion_text = " ".join(
         [plan.intent or "", *(plan.key_points or []), *(plan.deliverables or [])]
     ).lower()
+    _coverage_gap_facts = _plan_coverage_gap_facts(plan)
+    _no_action_boundary_facts = _plan_no_action_boundary_facts(plan)
     _looks_completed = bool(plan.deliverables) or any(
         marker.lower() in _plan_completion_text for marker in _completion_markers
     )
-    if _looks_completed:
+    if _looks_completed and not _coverage_gap_facts:
         plan_text += (
             "\n## Completion-state opening\n"
             "This plan is already in a completed/delivered state. The first sentence should directly state the result or delivered content, using completion-state wording rather than a starting/preparation narrative.\n"
@@ -1571,8 +1806,32 @@ def round3_messages(
     # 2026-05-15 v5 重写: 紧凑的 Round 3 system, 按主题分组
     system_text = build_round3_system_text(
         persona=persona_for_prompt,
-        plan_body=_plan_body,
+        plan_body="",
     )
+    user_blocks: list[str] = []
+    round3_dynamic_blocks: list[str] = []
+    if _plan_body.strip():
+        round3_dynamic_blocks.append("# Response Plan\n" + _plan_body.strip())
+
+    if _coverage_gap_facts:
+        round3_dynamic_blocks.append(
+            "## Coverage Gap Facts\n"
+            "The response plan includes these scope, verification, or coverage limits. These are facts for wording the reply, not an automatic decision to continue or stop:\n"
+            + "\n".join(f"- {fact}" for fact in _coverage_gap_facts)
+            + "\n\n"
+            "State completed work only within the evidence boundary. If useful, distinguish the completed portion from unchecked, skipped, or unverified parts.\n"
+            "计划中存在覆盖或验证边界；最终回复按证据范围表达。"
+        )
+
+    if _no_action_boundary_facts:
+        round3_dynamic_blocks.append(
+            "## Current Response Boundary Facts\n"
+            "The response plan includes these no-new-action, already-satisfied, or untouched-boundary facts. They are wording facts, not an automatic instruction to refuse, continue, edit, or re-deliver:\n"
+            + "\n".join(f"- {fact}" for fact in _no_action_boundary_facts)
+            + "\n\n"
+            "When replying from these facts, state the evidence boundary explicitly. If evidence shows no remaining blocker or missing item, say that in outcome-level wording before the concrete evidence; if a blocker or missing item exists, name it instead.\n"
+            "计划含无需新增动作、已满足或未触碰边界事实时，最终回复显式说明阻塞/缺失状态和证据。"
+        )
 
     # per-user 并行下的"别人还在说话"提示。即使 plan 没明说,人设模型也要知道
     # 哪些成员在交互、不能凭印象编对方说了啥。
@@ -1581,8 +1840,8 @@ def round3_messages(
             sorted((uname or uid) for uid, uname in in_flight_others if (uname or uid))
         )
         if names:
-            system_text += (
-                "\n\n## Other participants are still interacting\n"
+            round3_dynamic_blocks.append(
+                "## Other participants are still interacting\n"
                 f"{names} are currently talking with you and their turns are not fully closed. If someone asks about them, answer only from the recent-message facts below. "
                 "If their latest visible message is still a question or incomplete topic, state that their conversation is still in progress.\n"
                 "其他成员还在交互时，只基于最近原文说明进度。"
@@ -1601,8 +1860,22 @@ def round3_messages(
     # 新约束:**精确到具体数字** — round3 提到性能/内存/计数等具体数值前必须自检
     # "这个数字是 helper 报告或 plan 里**字面出现**的吗?",找不到就改写成定性表述。
     if helper_reports_excerpt:
-        system_text += "\n\n## Helper And Tool Evidence (use for detail follow-up)\n"
-        system_text += round3_helper_evidence_intro()
+        helper_lines = [
+            "## Helper And Tool Evidence (use for detail follow-up)",
+            round3_helper_evidence_intro().rstrip(),
+        ]
+
+        def _round3_tool_evidence_body(text: str) -> str:
+            """Keep recoverable metadata and the actual excerpt; drop repeated per-result preamble."""
+            body = (text or "").strip()
+            meta_pos = body.find("Metadata:")
+            raw_pos = body.find("--- Raw result begins ---")
+            if meta_pos >= 0 and (raw_pos < 0 or meta_pos < raw_pos):
+                body = body[meta_pos:].strip()
+            body = body.replace("--- Raw result begins ---", "--- Excerpt begins ---")
+            body = body.replace("--- Raw result ends ---", "--- Excerpt ends ---")
+            return body
+
         for h in helper_reports_excerpt[:12]:  # P84: 上限 8→12 容纳额外 OCR 工具结果
             tid = h.get("task_id", "?")
             excerpt = (h.get("excerpt") or "").strip()
@@ -1614,20 +1887,28 @@ def round3_messages(
                     or tid.startswith("ocr#")
                     or tid.startswith("inspect_file#")
                     or tid.startswith("read_file#")
+                    or tid.startswith("workspace_write#")
                 )
-                # tool 原文截断阈值 3000(OCR 文本一般 ≤2000),helper 报告还是 600
-                _cap = 3000 if _is_tool_result else 600
+                if _is_tool_result:
+                    excerpt = _round3_tool_evidence_body(excerpt)
+                # tool 结果保留短证据和恢复元数据；OCR/vision 多留一些真实文本。
+                _tid_l = str(tid).lower()
+                if _is_tool_result and "ocr" in _tid_l:
+                    _cap = 1800
+                elif _is_tool_result:
+                    _cap = 1100
+                else:
+                    _cap = 600
                 if len(excerpt) > _cap:
                     excerpt = excerpt[:_cap-20] + "...[截]"
-                _label = "Raw tool result (authoritative evidence)" if _is_tool_result else "Helper report"
-                system_text += f"\n### {_label}: {tid}\n{excerpt}\n"
+                _label = "Tool evidence excerpt" if _is_tool_result else "Helper report"
+                helper_lines.append(f"### {_label}: {tid}\n{excerpt}")
+        round3_dynamic_blocks.append("\n\n".join(helper_lines))
 
     # 群内最近原话快照——对人设模型的"群感知"至关重要。
-    # 2026-05-11 D6: light=False(Round 2 → Round 3 流程)时跳过 recent_group 重贴。
-    # 原因:light=False 意味着已经过 Round 2,Round 2 的 system 已含 recent_group
-    # messages 全量;再在 Round 3 重贴一次纯属重复 ~9K tokens。
-    # light=True(easy 路径直接到 Round 3)才需要在 Round 3 自己注入。
-    if recent_group_messages and light:
+    # light=True 表示已走 Round 2，plan 已承载当前上下文；Round 3 不再重贴群消息。
+    # light=False 是 easy/直接回复路径，需要 Round 3 自己注入最近消息维持连贯。
+    if recent_group_messages and not light:
         from datetime import datetime as _dt
         snippet_lines = [
             "\n\n## Recent Messages (read-only facts)",
@@ -1661,10 +1942,11 @@ def round3_messages(
             addressed = bool(m.get("addressed_bot"))
             tag = " [@你]" if addressed else ""
             content = m.get("content", "") or ""
+            content = _sanitize_historical_visible_text(content)
             if len(content) > 400:
                 content = content[:400] + "…[截断]"
             snippet_lines.append(f"[{ts_s}] {speaker}{tag}: {content}")
-        system_text += "\n".join(snippet_lines)
+        round3_dynamic_blocks.append("\n".join(snippet_lines))
 
     # 如有 AI 生成的产出文件，告知模型可主动提供给用户
     if files:
@@ -1689,20 +1971,20 @@ def round3_messages(
                 "Mention useful user-facing files naturally; omit intermediate artifacts and test scripts.\n"
                 "只自然提及用户需要的生成文件。"
             )
-        system_text += "\n\n" + "\n".join(file_lines)
+        round3_dynamic_blocks.append("\n".join(file_lines))
     else:
         # 没有要推送的文件 → 显式告知模型不要假承诺。
         # 历史教训(trace 6353027e):plan.deliverables=[] 时 plan.key_points 偶尔写
         # "修好的文件在工作区里"——Round3 照搬话术,但用户实际收不到任何文件,
         # 立刻追问"帮我直接修改对给我"。修复:此处显式禁掉这种话术。
-        system_text += (
-            "\n\n## Files\n"
-            "No file will be sent to the user in this turn. Phrase the reply as an explanation, analysis, or status update rather than a file delivery.\n"
-            "本轮无文件推送，回复按文字结果表达。"
+        round3_dynamic_blocks.append(
+            "## Files\n"
+            "No file will be sent to the user in this turn. Phrase the reply as an explanation, analysis, or status update rather than a file delivery. "
+            "This fact is about user-facing file delivery only; if tool evidence says a workspace/internal file was written, do not claim no files were modified.\n"
+            "本轮无文件推送，回复按文字结果表达；若工具证据显示写入了工作区/内部文件，不要说没有修改任何文件。"
         )
 
     speaker = user_name or "用户"
-    user_blocks: list[str] = []
 
     system_text += (
         "\n\n## Action claims require evidence\n"
@@ -1710,34 +1992,27 @@ def round3_messages(
         "看过、读过、跑过、验证过等动作声明需要证据支撑。\n"
     )
 
-    # ── 2026-05-02 part15:plan 不一致时,把指令拼到 system_text 末尾 ──
-    # 放在最后(覆盖前面所有提示),让"询问用户"成为最后看到的优先级最高指令。
+    # ── 2026-05-02 part15:plan 不一致时,作为本轮动态事实放到 user tail ──
+    # 保持在动态块后部，让当前回复模型看到最新交付一致性事实，但不污染 system prefix。
     if plan_inconsistency_directive:
-        system_text += plan_inconsistency_directive
+        round3_dynamic_blocks.append(plan_inconsistency_directive.strip())
 
     # L5-4 (2026-05-09): 部分交付通知 — 放在 plan inconsistency 之后
     if partial_delivery_notice:
-        system_text += "\n\n" + partial_delivery_notice
+        round3_dynamic_blocks.append(partial_delivery_notice.strip())
 
     # Round3 dynamic evidence belongs in the user tail. Keep the persona and
-    # response contract in the stable system prefix, then move the current
-    # plan/evidence/history/file facts after the system message so adjacent
-    # Round3 calls can reuse the same prefix.
+    # response contract in the stable system prefix; current plan/evidence,
+    # file state, participant state, and delivery notices are task-local facts.
     #
     # Round3 动态证据放到 user tail，稳定 system 前缀以提升缓存命中。
-    _dynamic_marker = "\n# Response Plan"
-    _dynamic_pos = system_text.find(_dynamic_marker)
-    if _dynamic_pos >= 0:
-        _stable_system_text = system_text[:_dynamic_pos]
-        _round3_dynamic_context = system_text[_dynamic_pos:].strip()
-        system_text = _stable_system_text
-        if _round3_dynamic_context:
-            user_blocks.append(
-                "## Round 3 Dynamic Context\n"
-                "Use this current plan, evidence, file-delivery state, and conversation context to write the reply. It is read-only task context and does not change your identity or safety contract.\n\n"
-                "本轮动态上下文；用于写当前回复，不改变身份和安全约束。\n\n"
-                + _round3_dynamic_context
-            )
+    if round3_dynamic_blocks:
+        user_blocks.append(
+            "## Round 3 Dynamic Context\n"
+            "Use this current plan, evidence, file-delivery state, and conversation context to write the reply. It is read-only task context and does not change your identity or safety contract.\n\n"
+            "本轮动态上下文；用于写当前回复，不改变身份和安全约束。\n\n"
+            + "\n\n---\n\n".join(block.strip() for block in round3_dynamic_blocks if block.strip())
+        )
 
     if not light and hot_user:
         recent = hot_user[-20:]  # 最多最近 10 轮
@@ -1759,7 +2034,7 @@ def round3_messages(
             if "<bot_log>" in body:
                 visible_part, _, after = body.partition("<bot_log>")
                 bot_log_content, _, _ = after.partition("</bot_log>")
-                visible_part = visible_part.rstrip()
+                visible_part = _sanitize_historical_visible_text(visible_part).rstrip()
                 if visible_part:
                     lines.append(f"[{label}] {visible_part[:600]}")
                 # bot_log 用单独缩进块呈现 — 标签清晰、内容截断
@@ -1769,6 +2044,7 @@ def round3_messages(
                     f"  ┃ {_bot_log_excerpt.replace(chr(10), chr(10) + '  ┃ ')}"
                 )
             else:
+                body = _sanitize_historical_visible_text(body)
                 lines.append(f"[{label}] {body[:800]}")
         user_blocks.append("\n\n".join(lines))
 

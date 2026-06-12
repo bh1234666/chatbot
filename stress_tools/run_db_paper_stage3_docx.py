@@ -35,6 +35,10 @@ API = "http://127.0.0.1:8000/v1/environment/stream"
 WALL_CAP_SEC = 1500  # 25 min hard deadline; verify-helper finishes ~10–11min in
 STALL_CAP_SEC = 90   # if SSE quiet for 90s, treat as wedged
 EXPECTED_ARTIFACT = "db_index_paper.docx"
+PLACEHOLDER_TOKEN_RE = (
+    r"(?i)(?:\bTODO\b|\bTKTK\b|\bINSERT\b|\blorem\s+ipsum\b|\[\s*[.。…]{2,}\s*\]|"
+    r"\bplaceholder\b)"
+)
 
 
 PLACEHOLDER_SECTIONS = [
@@ -50,6 +54,15 @@ def latest_dir(prefix: str) -> Path:
     if not dirs:
         raise SystemExit(f"no run found for prefix {prefix}")
     return dirs[0]
+
+
+def first_existing(*paths: Path) -> Path:
+    for path in paths:
+        if path.is_file():
+            return path
+    raise SystemExit(
+        "missing required input; tried:\n" + "\n".join(f"  - {p}" for p in paths)
+    )
 
 
 def write_placeholder_analysis(out: Path, slug: str, title: str) -> None:
@@ -100,6 +113,13 @@ def write_placeholder_csv(out: Path, slug: str) -> None:
     out.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
+def placeholder_token_hits(text: str) -> list[str]:
+    """Return template-placeholder hits without matching natural words like insertion."""
+    import re
+
+    return [m.group(0) for m in re.finditer(PLACEHOLDER_TOKEN_RE, text)]
+
+
 def main() -> int:
     run_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:6]
     session_dir = RUN_DIR / f"db_paper_stage3_docx_{run_id}"
@@ -114,16 +134,21 @@ def main() -> int:
     stage2_dir = latest_dir("db_paper_stage2_slice_rbt_")
 
     contract_src = stage1_dir / "db_index_paper_framework" / "framework_contract.md"
-    rbt_analysis_src = stage2_dir / "db_index_paper_slice" / "analysis" / "rbt_analysis.md"
+    rbt_analysis_src = first_existing(
+        stage2_dir / "db_index_paper_slice" / "slice_rb_tree" / "analysis_rb.md",
+        stage2_dir / "db_index_paper_slice" / "analysis" / "rbt_analysis.md",
+    )
+    rbt_benchmark_src = first_existing(
+        stage2_dir / "db_index_paper_slice" / "slice_rb_tree" / "benchmark_rb.csv",
+        stage2_dir / "db_index_paper_slice" / "bench_results" / "rbt.csv",
+    )
 
     if not contract_src.is_file():
         raise SystemExit(f"missing framework contract: {contract_src}")
-    if not rbt_analysis_src.is_file():
-        raise SystemExit(f"missing rbt analysis: {rbt_analysis_src}")
 
     shutil.copyfile(contract_src, work_dir / "framework_contract.md")
     shutil.copyfile(rbt_analysis_src, work_dir / "analysis" / "rbt_analysis.md")
-    write_placeholder_csv(work_dir / "bench_results" / "rbt.csv", "rbt")
+    shutil.copyfile(rbt_benchmark_src, work_dir / "bench_results" / "rbt.csv")
     for slug, title in PLACEHOLDER_SECTIONS:
         write_placeholder_analysis(
             work_dir / "analysis" / f"{slug}_analysis.md", slug, title

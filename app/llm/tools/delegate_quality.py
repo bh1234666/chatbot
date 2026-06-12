@@ -192,6 +192,61 @@ def text_mojibake_warnings(text: str, *, file: str = "") -> list[dict]:
     }]
 
 
+_SOURCE_DATA_APPROXIMATION_RE = re.compile(
+    r"(?is)"
+    r"("
+    r"(?:approximat(?:e|ed|es|ing|ion)|estimat(?:e|ed|es|ing|ion)|extrapolat(?:e|ed|es|ing|ion)|"
+    r"infer(?:red|ring)?|project(?:ed|ing)?|spot-?check|unverified|not\s+fully\s+extracted)"
+    r".{0,220}"
+    r"(?:truncat(?:ed|ion)|incomplete|partial|only\s+the|not\s+fully|missing|unavailable)"
+    r"|"
+    r"(?:truncat(?:ed|ion)|incomplete|partial|only\s+the|not\s+fully|missing|unavailable)"
+    r".{0,220}"
+    r"(?:approximat(?:e|ed|es|ing|ion)|estimat(?:e|ed|es|ing|ion)|extrapolat(?:e|ed|es|ing|ion)|"
+    r"infer(?:red|ring)?|project(?:ed|ing)?|spot-?check|unverified)"
+    r")"
+)
+
+
+def source_data_approximation_warnings(text: str, *, file: str = "<helper-report>") -> list[dict]:
+    """Warn when a helper reports source-backed values were approximated.
+
+    This is a model-visible quality fact, not a hard blocker. The main LLM may
+    still accept intentional estimates, but exact source-driven deliverables
+    should usually resume and parse the cited CSV/JSON/table/source data.
+
+    helper 自述因截断、缺失或未完整读取而近似数据时，作为事实警告交给主线程判断。
+    """
+    body = str(text or "")
+    if not body:
+        return []
+    warnings: list[dict] = []
+    seen: set[str] = set()
+    for match in _SOURCE_DATA_APPROXIMATION_RE.finditer(body):
+        excerpt = re.sub(r"\s+", " ", match.group(0)).strip()
+        if not excerpt:
+            continue
+        key = excerpt.lower()[:180]
+        if key in seen:
+            continue
+        seen.add(key)
+        warnings.append({
+            "file": file,
+            "issue": "document_source_data_approximated_from_truncation",
+            "severity": "warning",
+            "excerpt": excerpt[:360],
+            "details": (
+                "The helper report says some source-backed values were approximated, estimated, inferred, "
+                "or left for spot-checking because source data was truncated, partial, or incomplete. "
+                "For exact CSV/JSON/table-backed claims, expose this fact to the main model and consider "
+                "resuming the helper to parse the original source data instead of accepting inferred values."
+            ),
+        })
+        if len(warnings) >= 5:
+            break
+    return warnings
+
+
 def repair_common_mojibake_text(text: str) -> tuple[str, dict | None]:
     """Repair common UTF-8 text that was decoded through GBK/CP936 or Latin-1.
 
@@ -298,6 +353,83 @@ def docx_table_structure_warnings(abs_path: str) -> list[dict]:
     return warnings
 
 
+_MIN_TABLE_RE = re.compile(
+    r"(?is)(?:at\s+least|minimum(?:\s+of)?|no\s+fewer\s+than|>=|≥)\s*[:：]?\s*(\d{1,3})\s*"
+    r"(?:comparative\s+|comparison\s+)?(?:tables?|表格|张表)"
+)
+_MIN_FIGURE_RE = re.compile(
+    r"(?is)(?:at\s+least|minimum(?:\s+of)?|no\s+fewer\s+than|>=|≥)\s*[:：]?\s*(\d{1,3})\s*"
+    r"(?:figures?|charts?|images?|diagrams?|图表|图片|图像|插图|张图)"
+)
+
+
+def document_structure_quantity_warnings(
+    prompt: str,
+    *,
+    file: str,
+    table_count: int | None = None,
+    image_count: int | None = None,
+) -> list[dict]:
+    """Compare explicit document quantity requirements with observed metadata.
+
+    This only emits facts for clear lower-bound phrases such as "at least 4
+    tables" or "≥3 figures". It does not decide whether to reject delivery.
+
+    仅把明确数量下限与实际元数据差异暴露给主线程；是否继续修复由 LLM 判断。
+    """
+    body = str(prompt or "")
+    if not body:
+        return []
+    warnings: list[dict] = []
+
+    def _max_required(pattern: re.Pattern[str]) -> int | None:
+        vals: list[int] = []
+        for match in pattern.finditer(body):
+            start = max(0, match.start() - 80)
+            end = min(len(body), match.end() + 120)
+            context = body[start:end].lower()
+            if re.search(r"\b(?:optional|if\s+needed|if\s+useful|may\s+skip|or\s+skip|can\s+skip)\b", context):
+                continue
+            if re.search(r"(可选|可以跳过|可跳过|无需|不要求)", body[start:end]):
+                continue
+            try:
+                vals.append(int(match.group(1)))
+            except (TypeError, ValueError):
+                continue
+        return max(vals) if vals else None
+
+    required_tables = _max_required(_MIN_TABLE_RE)
+    if required_tables is not None and table_count is not None and table_count < required_tables:
+        warnings.append({
+            "file": file,
+            "issue": "document_required_table_count_shortfall",
+            "severity": "warning",
+            "required_minimum": required_tables,
+            "observed_count": int(table_count),
+            "details": (
+                f"The task text contains an explicit lower bound of at least {required_tables} table(s), "
+                f"while the produced document metadata reports {table_count} table(s). This is a structural "
+                "fact for the main model to weigh against the current task contract."
+            ),
+        })
+
+    required_figures = _max_required(_MIN_FIGURE_RE)
+    if required_figures is not None and image_count is not None and image_count < required_figures:
+        warnings.append({
+            "file": file,
+            "issue": "document_required_figure_count_shortfall",
+            "severity": "warning",
+            "required_minimum": required_figures,
+            "observed_count": int(image_count),
+            "details": (
+                f"The task text contains an explicit lower bound of at least {required_figures} figure/chart/image(s), "
+                f"while the produced document metadata reports {image_count} embedded image(s). This is a structural "
+                "fact for the main model to weigh against the current task contract."
+            ),
+        })
+    return warnings
+
+
 def document_source_grounding_warnings(text: str) -> list[dict]:
     """Warn when a source-driven document leaks internal source labels or overclaims."""
     body = str(text or "")
@@ -336,12 +468,43 @@ def _extract_expected_text_tokens_for_document(prompt: str) -> list[str]:
     text = str(prompt or "")
     tokens: list[str] = []
 
+    def _looks_like_non_content_token(val: str) -> bool:
+        compact = re.sub(r"\s+", "", str(val or ""))
+        lower = compact.lower()
+        if not compact:
+            return True
+        if "/" in compact or "\\" in compact:
+            return True
+        if re.fullmatch(r"[\w ._-]{1,80}\.(?:docx|pptx|xlsx|pdf|md|txt|csv|tsv|json|jsonl|yaml|yml|py|js|ts|c|h|cpp|png|jpg|jpeg|svg|html)", val.strip(), re.I):
+            return True
+        if lower in {
+            "tablegrid",
+            "normal",
+            "heading1",
+            "heading2",
+            "heading3",
+            "heading 1",
+            "heading 2",
+            "heading 3",
+        }:
+            return True
+        return False
+
     def _looks_like_template_placeholder(val: str) -> bool:
         compact = re.sub(r"\s+", "", str(val or ""))
         if not compact:
             return True
-        placeholder_words = {"xx", "xxx", "x.x", "x.y", "n/a", "todo", "tbd", "...", "……"}
-        if compact.lower() in placeholder_words:
+        bracketless = compact.strip("[]【】()（）{}<>《》")
+        placeholder_words = {
+            "xx", "xxx", "x.x", "x.y", "n/a", "todo", "tbd", "...", "……",
+            "…", "[...]", "[…]", "insert", "tktk",
+            "placeholder", "placeholders", "占位", "占位符", "待补", "待填",
+        }
+        if compact.lower() in placeholder_words or bracketless.lower() in placeholder_words:
+            return True
+        if "placeholder" in compact.lower():
+            return True
+        if re.fullmatch(r"(?:TK)+", compact, re.I):
             return True
         placeholder_suffix = r"(?:章|节|题|页|部分|项|条|\?)*"
         if re.fullmatch(rf"(?:第)?[Xx]{placeholder_suffix}", compact):
@@ -354,12 +517,102 @@ def _extract_expected_text_tokens_for_document(prompt: str) -> list[str]:
             return True
         return False
 
+    def _looks_like_structural_metadata_key(key: str) -> bool:
+        normalized = re.sub(r"[_\s-]+", " ", str(key or "").strip().lower())
+        if not normalized:
+            return True
+        structural_keys = {
+            "acceptance check",
+            "acceptance checks",
+            "check",
+            "checks",
+            "data row",
+            "data rows",
+            "row",
+            "rows",
+            "line",
+            "lines",
+            "expected output",
+            "expected outputs",
+            "writable project scope",
+            "writable project scopes",
+            "helper kind",
+            "helper mode",
+            "task id",
+            "heading",
+            "headings",
+            "heading subsection",
+            "heading subsections",
+            "subsection",
+            "subsections",
+            "section",
+            "sections",
+            "table",
+            "tables",
+            "figure",
+            "figures",
+            "slide",
+            "slides",
+            "verdict",
+            "overall verdict",
+            "quality note",
+            "quality observation",
+            "warning",
+            "warnings",
+            "pass",
+            "passes",
+            "fail",
+            "fails",
+            "passed",
+            "failed",
+        }
+        if normalized in structural_keys:
+            return True
+        if re.search(r"\b(check|checks|verdict|quality|warning|warnings|pass|passes|fail|fails|passed|failed|acceptance)\b", normalized):
+            return True
+        return False
+
+    def _normalize_numeric_fact_key(key: str) -> str:
+        cleaned = re.sub(r"\s+", " ", str(key or "").strip())
+        while True:
+            next_cleaned = re.sub(
+                r"^(?:and|or|also|include|includes|including|contain|contains|show|list|write|with)\s+",
+                "",
+                cleaned,
+                flags=re.I,
+            ).strip()
+            if next_cleaned == cleaned:
+                return cleaned
+            cleaned = next_cleaned
+
+    def _looks_like_negative_requirement_context(fragment: str) -> bool:
+        """Return True when nearby prose says the quoted text should be absent."""
+        body = str(fragment or "").lower()
+        if re.search(r"(不要|不得|不能|禁止|避免|不应|不要出现|不得出现|不能出现|全文不得出现|不要引用|不要暴露|不能包含|不包含)", fragment):
+            return True
+        return bool(re.search(
+            r"\b("
+            r"do\s+not|don't|must\s+not|should\s+not|cannot|can't|"
+            r"never|avoid|exclude|omit|forbid(?:den)?|"
+            r"not\s+(?:include|contain|appear|reference|refer\s+to|expose|leak|mention)|"
+            r"without\s+(?:including|containing|referencing|exposing|mentioning)"
+            r")\b",
+            body,
+        ))
+
     for m in re.finditer(r"[“\"']([^“”\"'\n]{2,40})[”\"']", text):
         val = m.group(1).strip()
-        sentence_start = max(text.rfind("。", 0, m.start()), text.rfind("\n", 0, m.start())) + 1
+        sentence_start = max(
+            text.rfind("。", 0, m.start()),
+            text.rfind("；", 0, m.start()),
+            text.rfind(";", 0, m.start()),
+            text.rfind("\n", 0, m.start()),
+        ) + 1
         prefix = text[sentence_start:m.start()]
-        suffix = text[m.end():m.end() + 8]
-        if re.search(r"(不要|不得|不能|禁止|避免|不应|不要出现|不得出现|不能出现|全文不得出现)", prefix + suffix):
+        suffix = text[m.end():m.end() + 48]
+        if _looks_like_negative_requirement_context(prefix + suffix):
+            continue
+        if _looks_like_non_content_token(val):
             continue
         if _looks_like_template_placeholder(val):
             continue
@@ -369,7 +622,28 @@ def _extract_expected_text_tokens_for_document(prompt: str) -> list[str]:
         r"\b([A-Za-z][A-Za-z0-9_ -]{0,20})\s*[=＝:：]\s*(-?\d+(?:\.\d+)?)\b",
         text,
     ):
-        tokens.append(f"{m.group(1).strip()}={m.group(2).strip()}")
+        sentence_start = max(
+            text.rfind(".", 0, m.start()),
+            text.rfind("。", 0, m.start()),
+            text.rfind("；", 0, m.start()),
+            text.rfind(";", 0, m.start()),
+            text.rfind("\n", 0, m.start()),
+        ) + 1
+        suffix = text[m.end():m.end() + 48]
+        if _looks_like_negative_requirement_context(text[sentence_start:m.start()] + suffix):
+            continue
+        key = _normalize_numeric_fact_key(m.group(1).strip())
+        key_lower = re.sub(r"[_\s-]+", " ", key.strip().lower())
+        if key_lower.startswith(("heading ", "headings ", "section ", "sections ", "subsection ", "subsections ")):
+            continue
+        sentence = text[sentence_start:m.end() + 80]
+        if re.search(r"\b(?:all\s+)?\d+\s+checks?\s+(?:pass|passed|fail|failed)\b", sentence, re.I):
+            continue
+        if _looks_like_non_content_token(key):
+            continue
+        if _looks_like_structural_metadata_key(key):
+            continue
+        tokens.append(f"{key}={m.group(2).strip()}")
     seen: set[str] = set()
     out: list[str] = []
     for token in tokens:

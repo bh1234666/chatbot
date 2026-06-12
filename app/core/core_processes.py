@@ -213,15 +213,15 @@ class ProcessHandle:
             d["what_doing"] = _compute_what_doing(self)
             d["estimated_remaining_sec"] = _compute_remaining_estimate(self)
             d["wait_or_continue"] = _compute_wait_or_continue(self)
-            # 2026-05-11 B3: iter runaway 显式标记,让主线程一眼看出"该 kill"
+            # 2026-05-11 B3: iter runaway 显式标记,让主线程一眼看出需要介入。
             if self.last_iter > 100:
                 d["_runaway"] = True
-                d["_runaway_reason"] = f"iter {self.last_iter} > 100 (几乎必死循环)"
+                d["_runaway_reason"] = f"iter {self.last_iter} > 100 (high runaway risk; intervention needed)"
             elif self.last_iter > 80 and not _helper_has_files(self):
                 d["_runaway"] = True
                 d["_runaway_reason"] = (
                     f"iter {self.last_iter} > 80 且无产出文件(疑似兜圈),"
-                    f"建议协作 kill 让 helper 出进度报告,再按报告同 task_id resume 或 mode='hard' 续作"
+                    f"需要主流程检查心跳、部分产物和报告，再决定等待、收集、协作中断或同 task_id 续作"
                 )
             if self.last_progress_at > 0:
                 age = round(now - self.last_progress_at, 1)
@@ -252,9 +252,25 @@ def _extract_progress_pct(handle: ProcessHandle | str) -> int | None:
             continue
         m = _re.search(r"(\d+)\s*%", src)
         if m:
+            window = src[max(0, m.start() - 24): min(len(src), m.end() + 32)].lower()
+            if any(token in window for token in (
+                "tolerance", "within", "accuracy", "confidence", "置信", "容差", "误差", "公差",
+            )):
+                continue
+            if not any(token in window for token in (
+                "progress", "complete", "completed", "done", "finished", "remaining",
+                "进度", "完成", "已完成", "剩余",
+            )):
+                continue
             return int(m.group(1))
         m = _re.search(r"(\d+)\s*/\s*(\d+)", src)
         if m:
+            window = src[max(0, m.start() - 24): min(len(src), m.end() + 32)].lower()
+            if not any(token in window for token in (
+                "progress", "complete", "completed", "done", "finished", "task", "step",
+                "进度", "完成", "已完成", "步骤", "任务",
+            )):
+                continue
             return int(100 * int(m.group(1)) / max(int(m.group(2)), 1))
     return None
 
@@ -307,29 +323,29 @@ def _compute_remaining_estimate(handle: ProcessHandle = None, *, iter: int | Non
 
 
 def _compute_wait_or_continue(handle: ProcessHandle = None, *, last_heartbeat_age_sec: float | None = None, iter: int | None = None, recent_tools: list[str] | None = None) -> str:
-    """建议主线程: 继续等(wait)还是介入(kill/resume)。
+    """Return a compact helper attention state: wait, check, or intervene.
 
     2026-05-11 B3 加: iter runaway 检测。
     实测 trace 822f2aaa: bptree iter 100, rbtree iter 94 主线程都没 kill,
-    单 helper 死循环 25+ 分钟。新规则:
-      - iter > 80 + 心跳活跃但无产出文件 → "kill" (建议主线程介入)
+    单 helper 死循环 25+ 分钟。当前返回事实级状态,不替主线程选择 kill:
+      - iter > 80 + 心跳活跃但无产出文件 → "intervene"
       - iter > 50 + elapsed > 600s + 心跳活跃 → "check" (主动查看)
-      - iter > 100 + 任何状态 → "kill" 强烈建议(单 helper 不该超过 100 iter)
+      - iter > 100 + 任何状态 → "intervene"
     """
     if handle is None:
         age = last_heartbeat_age_sec
         if age is not None:
             if age > 120:
-                return "kill"
+                return "intervene"
             if age > 90:
                 return "check"
         if iter is not None and iter > 100:
-            return "kill"
+            return "intervene"
         return "wait"
     if handle.last_progress_at > 0:
         age = time.time() - handle.last_progress_at
         if age > 120:
-            return "kill"  # 心跳过旧
+            return "intervene"  # 心跳过旧
         if age > 90:
             return "check"  # 可疑,需主动查
     # 2026-05-11 B3 新增 iter-based 检测
@@ -337,10 +353,10 @@ def _compute_wait_or_continue(handle: ProcessHandle = None, *, last_heartbeat_ag
     elapsed = time.time() - handle.created_at if handle.created_at else 0
     # 100+ iter 几乎必死循环
     if iter_count > 100:
-        return "kill"
+        return "intervene"
     # 80+ iter + 长跑 + 没产出文件 = 兜圈
     if iter_count > 80 and not _helper_has_files(handle):
-        return "kill"
+        return "intervene"
     # 50+ iter + 10min + 心跳活但慢 = 检查
     if iter_count > 50 and elapsed > 600:
         return "check"
@@ -581,7 +597,7 @@ class ProcessRegistry:
     async def cancel_all_helpers_for_owner(self, owner: str) -> int:
         """2026-05-10 Patch 55: 取消 owner 下所有未完成的 helper。
 
-        替代旧 P50 cancel_orphan_auto_spawned(只 cancel _auto_final/_verify 后缀)。
+        替代旧 P50 cancel_orphan_auto_spawned(只 cancel obsolete paired/verify 后缀)。
         用户原话:"主进程结束后向用户回复,此时所有子进程都应该结束,没有意义了"。
 
         触发场景:**chat 回合彻底结束**(orchestrator 的 finally 块):
@@ -627,9 +643,9 @@ class ProcessRegistry:
         """2026-05-10 Patch 59: chat 回合结束时按 trace_id cancel **整棵 helper 树**。
 
         病因(trace f973df3770544567):P55 在 finally 块调 cancel_all_helpers_for_owner
-        (main_owner=main:{trace_id}),但 woat_impl_auto_final 是 P40 在 helper woat_impl
+        (main_owner=main:{trace_id}),但历史 paired sub-helper 是 P40 在 helper woat_impl
         内部派的 sub-helper,owner 是 helper:{trace_id}:woat_impl,**不是 main_owner**。
-        cancel 只看 main_owner 漏掉了 sub-helper → woat_impl_auto_final 在 user.released
+        cancel 只看 main_owner 漏掉了 sub-helper → 该 helper 在 user.released
         后还跑了 12 分钟孤儿空跑(09:26 → 10:27),而 main 流程 10:15 就结束了。
 
         修法:owner 字符串嵌了 trace_id(`main:{trace_id}` / `helper:{trace_id}:{task_id}`),
@@ -1268,6 +1284,7 @@ class ThreadContext:
     plan_intent: str = ""            # plan.intent 的当前版
     plan_key_points: list = field(default_factory=list)
     plan_deliverables: list = field(default_factory=list)
+    plan_markers: dict = field(default_factory=dict)
     role_label: str = "main"         # "main" | "helper"
 
 
@@ -1288,8 +1305,18 @@ def reset_current_thread_context(token):
 
 
 async def update_thread_plan(*, intent: str = "", key_points: list | None = None,
-                             deliverables: list | None = None) -> bool:
-    """更新当前线程上下文的 plan 快照(round2 各阶段回写用)。"""
+                             deliverables: list | None = None,
+                             current_stage: str = "",
+                             acceptance: list | None = None,
+                             evidence_required: list | None = None,
+                             markers: dict | None = None) -> bool:
+    """更新当前线程上下文的 plan 快照(round2 各阶段回写用).
+
+    Markers are factual plan-state fields, not route decisions. Round 1 is the
+    coarse entry route and Round 2 owns the current task facts after it runs.
+
+    marker 只记录事实状态，不替模型判定任务类型。
+    """
     ctx = _current_thread_context.get()
     if ctx is None:
         return False
@@ -1299,6 +1326,25 @@ async def update_thread_plan(*, intent: str = "", key_points: list | None = None
         ctx.plan_key_points = list(key_points)
     if deliverables is not None:
         ctx.plan_deliverables = list(deliverables)
+    marker_update = dict(markers or {})
+    if current_stage:
+        marker_update["current_stage"] = str(current_stage)
+    marker_update["has_goal"] = bool(ctx.plan_intent)
+    marker_update["key_points_count"] = len(ctx.plan_key_points or [])
+    marker_update["deliverables_count"] = len(ctx.plan_deliverables or [])
+    marker_update["has_deliverables"] = bool(ctx.plan_deliverables)
+    if acceptance is not None:
+        marker_update["acceptance_count"] = len(acceptance or [])
+        marker_update["has_acceptance"] = bool(acceptance)
+    if evidence_required is not None:
+        marker_update["evidence_required_count"] = len(evidence_required or [])
+        marker_update["has_evidence_required"] = bool(evidence_required)
+    marker_update["round1_scope_fact"] = (
+        "Round1 is a coarse entry route and Round2-skip gate; after Round2 runs, "
+        "latest task_plan/thread-plan facts are the current task markers."
+    )
+    marker_update["updated_at"] = round(time.time(), 3)
+    ctx.plan_markers = {**dict(ctx.plan_markers or {}), **marker_update}
     return True
 
 

@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
@@ -175,16 +177,29 @@ def test_artifact_creation_intent_routes_tools_without_overmatching():
     from app.core.message_routing import (
         has_artifact_creation_intent,
         is_office_document_creation_intent,
+        observed_route_text_facts,
     )
 
     assert has_artifact_creation_intent("请创建 codex_e2e_note.txt，并写入三行内容")
     assert has_artifact_creation_intent("生成 PNG 折线图 chart.png")
     assert has_artifact_creation_intent("make a short report.docx with a chart")
+    assert has_artifact_creation_intent("Can you put together a clear explainer for me with sources I can click through?")
+    assert has_artifact_creation_intent("Please prepare a cited synthesis from these notes")
     assert is_office_document_creation_intent("请生成一份很短的 docx 报告")
 
     assert not is_office_document_creation_intent("请创建 codex_e2e_note.txt")
     assert not has_artifact_creation_intent(u(r"\u7528\u4e00\u53e5\u8bdd\u89e3\u91ca OCR \u662f\u4ec0\u4e48"))
+    assert not has_artifact_creation_intent("Explain OCR in one sentence")
     assert not has_artifact_creation_intent(u(r"\u53ea\u56de\u590d OK"))
+
+    explainer_facts = observed_route_text_facts(
+        "Can you put together a clear explainer for me with sources I can click through?"
+    )
+    assert any("creation/persistence wording" in fact for fact in explainer_facts)
+    assert not any("candidate_" in fact for fact in explainer_facts)
+    concept_facts = observed_route_text_facts("Explain OCR in one sentence")
+    assert any("contains explanatory wording plus term(s): ocr" in fact.lower() for fact in concept_facts)
+    assert not any("creation/persistence wording" in fact for fact in concept_facts)
 
 
 def test_round2_payload_includes_hard_routing_flags_for_creation_requests():
@@ -195,7 +210,40 @@ def test_round2_payload_includes_hard_routing_flags_for_creation_requests():
     assert "_round2_tendency_payload = tendency.model_dump()" in src
     assert '_round2_tendency_payload["needs_tools"] = needs_tools' in src
     assert '_round2_tendency_payload["artifact_creation_intent"]' in src
-    assert "a failed locate/search_files result is not completion" in src
+    assert "A failed locate/search_files result is not completion" in src
+
+
+@pytest.mark.asyncio
+async def test_round1_artifact_signal_does_not_override_llm_route(monkeypatch):
+    from app.core import orchestrator
+    from app.llm import model_pool
+
+    async def fake_chat_json(*args, **kwargs):
+        return {
+            "_thinking": "The user may want an explainer, but the router keeps the model decision authoritative.",
+            "tendencies": {"任务委托": 0.6},
+            "rationale": "test route",
+            "complexity": "easy",
+            "needs_tools": False,
+            "needs_recall": False,
+            "parallelizable": False,
+            "is_coding_task": False,
+            "is_document_task": False,
+            "recall_topics": [],
+            "recall_layers": [],
+        }
+
+    monkeypatch.setattr(orchestrator.llm, "chat_json", fake_chat_json)
+    monkeypatch.setattr(model_pool, "resolve_task", lambda _name: None)
+
+    result = await orchestrator._round1(
+        "A",
+        "Can you put together a clear explainer for me with sources I can click through?",
+        [],
+    )
+
+    assert result.needs_tools is False
+    assert result.tendency.complexity == "easy"
 
 
 def test_recent_group_context_gate_is_quality_oriented():
@@ -228,7 +276,8 @@ def test_environment_tool_results_are_available_to_round3():
     src = inspect.getsource(orchestrator._round2)
     assert '"env_read": "content"' in src
     assert '"env_search": "matches"' in src
-    assert 'tool_name in _DATA_TOOLS_FIELDS or tool_name in {"workspace", "env_run"}' in src
+    assert 'tool_name in _DATA_TOOLS_FIELDS or tool_name in {' in src
+    assert '"workspace", "env_run", "env_apply_replace", "env_apply_create"' in src
     assert "_analysis_markers" in src
 
 

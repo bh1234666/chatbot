@@ -156,6 +156,9 @@ def _sink_matches(sink: _RegisteredSink, payload: dict) -> bool:
         return False
     if sink.user_id and payload.get("user_id") and payload.get("user_id") != sink.user_id:
         return False
-    if sink.trace_id and payload.get("trace_id") != sink.trace_id:
-        return False
+    if sink.trace_id:
+        trace_id = str(payload.get("trace_id") or "")
+        parent_trace_id = str(payload.get("parent_trace_id") or "")
+        if trace_id != sink.trace_id and parent_trace_id != sink.trace_id:
+            return False
     return True

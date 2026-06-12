@@ -7,6 +7,56 @@ from app.core import debug
 from app.llm.tools import workspace as ws_tool
 
 
+def _compact_string_list(value: object, *, max_items: int = 20, max_chars_each: int = 260) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        text = " ".join(str(item or "").split()).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        if len(text) > max_chars_each:
+            text = text[:max_chars_each].rstrip() + "..."
+        out.append(text)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _load_helper_task_contract(workspace_dir: str) -> dict | None:
+    if not workspace_dir:
+        return None
+    path = os.path.join(workspace_dir, ".helper_task_contract.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "error": f"could not read .helper_task_contract.json: {type(exc).__name__}",
+        }
+    if not isinstance(raw, dict):
+        return {"error": ".helper_task_contract.json is not a JSON object"}
+    return {
+        "task_id": str(raw.get("task_id") or "")[:160],
+        "helper_kind": str(raw.get("helper_kind") or "")[:80],
+        "helper_mode": str(raw.get("helper_mode") or "")[:80],
+        "resume": bool(raw.get("resume")),
+        "expected_outputs": _compact_string_list(raw.get("expected_outputs"), max_items=20),
+        "write_scopes": _compact_string_list(raw.get("write_scopes"), max_items=16),
+        "acceptance_checks": _compact_string_list(raw.get("acceptance_checks"), max_items=16),
+        "goal_excerpt": str(raw.get("goal_excerpt") or "")[:1200],
+        "source": ".helper_task_contract.json",
+        "truth_scope": (
+            "Factual helper task envelope persisted at helper start. Use it to recall the delegated boundary; "
+            "it is not an automatic success/failure decision."
+        ),
+    }
+
+
 def _infer_main_and_temp(workspace_dir: str) -> tuple[str, str, str] | None:
     norm = os.path.normpath(workspace_dir)
     base = os.path.basename(norm)
@@ -189,12 +239,17 @@ async def handle_recall_thread(workspace_dir: str, args: dict) -> str:
             "intent": ctx.plan_intent or "(plan is still being generated)",
             "key_points": ctx.plan_key_points,
             "deliverables": ctx.plan_deliverables,
+            "markers": dict(getattr(ctx, "plan_markers", None) or {}),
         }
     else:
         out["original_user_message"] = "(thread context is not available)"
         out["plan"] = None
 
     if workspace_dir:
+        helper_contract = _load_helper_task_contract(workspace_dir)
+        if helper_contract is not None:
+            out["helper_task_contract"] = helper_contract
+
         todo_path = os.path.join(workspace_dir, ".todo.json")
         if os.path.isfile(todo_path):
             try:

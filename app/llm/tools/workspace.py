@@ -1230,11 +1230,16 @@ def ensure_temp_workspace(main_ws: str, *, force_resync: bool = False, session_t
 def promote_to_main(
     main_ws: str, temp_ws: str, deliverables: list[str],
 ) -> tuple[list[str], list[str], dict[str, str]]:
-    """从 temp 提升 deliverable 文件到主工作区(模糊匹配)。
+    """从 temp 提升 deliverable 文件到主工作区。
 
-    L5-2 (2026-05-09): 三级模糊匹配解决"plan 写裸名,主区是带前缀名"的 mismatch。
+    L5-2 (2026-05-09): 有限前缀匹配解决"plan 写裸名,主区是带前缀名"的 mismatch。
     旧函数只做精确路径匹配,helper 产出 `paper_pptx_xlsx_paper.docx` 时
     plan 写 `paper.docx` → 全 missing。
+
+    2026-06-08: 不再扫描 `_delegate_*` helper 内部沙箱,也不做 `*{basename}` 首个
+    命中的宽泛兜底。helper 产物应先通过 copyback 进入 temp/main 可见区; promote 只
+    提升当前 temp 中的显式文件或唯一的 `<prefix>_<basename>` 文件。歧义/缺失作为事实
+    记录到 skipped,交给 LLM 重新决定。
 
     Args:
         main_ws: 主工作区路径
@@ -1253,19 +1258,22 @@ def promote_to_main(
     skipped: list[str] = []
     name_remap: dict[str, str] = {}
 
-    # 构建 temp 工作区文件索引(只索引文件,跳过 _delegate_ 子目录内的)
+    # 构建 temp 工作区文件索引。跳过 helper 内部沙箱;这些不是可直接交付边界。
     _temp_files: dict[str, str] = {}  # basename → full path
-    _delegate_files: dict[str, str] = {}  # basename → full path (delegate 内,备选)
     for dirpath, dirnames, filenames in os.walk(temp_ws):
         rel_dir = os.path.relpath(dirpath, temp_ws)
         if rel_dir == ".":
             pass
         elif rel_dir.startswith("_delegate_"):
-            for fname in filenames:
-                _delegate_files[fname] = os.path.join(dirpath, fname)
             dirnames.clear()  # 不深层递归 delegate 子目录
             continue
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith("_delegate_") and d not in {"__pycache__", ".git", ".pytest_cache"}
+        ]
         for fname in filenames:
+            if fname.startswith(".") or fname in _METADATA_BASENAMES or fname.endswith(_NON_DELIVERABLE_SUFFIXES):
+                continue
             full = os.path.join(dirpath, fname)
             _temp_files[fname] = full
             # 也按相对于 temp 的路径索引
@@ -1285,27 +1293,28 @@ def promote_to_main(
             src = _temp_files[os.path.basename(dlv)]
             matched_key = os.path.basename(dlv)
 
-        # Level 2: 任意前缀 glob — 匹配 `<prefix>_<deliverable>` 模式
+        # Level 2: 有限前缀匹配 — 只接受唯一 `<prefix>_<deliverable>` 文件。
         if src is None:
             dlv_basename = os.path.basename(dlv)
-            for fname, fpath in _temp_files.items():
-                if fnmatch.fnmatch(fname, f"*_{dlv_basename}") or fnmatch.fnmatch(fname, f"*{dlv_basename}"):
-                    src = fpath
-                    matched_key = fname
-                    break
-
-        # Level 3: 子目录(delegate 沙箱内)查找
-        if src is None:
-            dlv_basename = os.path.basename(dlv)
-            if dlv_basename in _delegate_files:
-                src = _delegate_files[dlv_basename]
-                matched_key = dlv_basename
-            else:
-                for fname, fpath in _delegate_files.items():
-                    if fnmatch.fnmatch(fname, f"*_{dlv_basename}") or fnmatch.fnmatch(fname, f"*{dlv_basename}"):
-                        src = fpath
-                        matched_key = fname
-                        break
+            prefixed_matches = [
+                (fname, fpath)
+                for fname, fpath in _temp_files.items()
+                if "/" not in fname and fnmatch.fnmatch(fname, f"*_{dlv_basename}")
+            ]
+            # Deduplicate basename/path dual index matches.
+            unique_matches: dict[str, str] = {}
+            for fname, fpath in prefixed_matches:
+                unique_matches[fpath] = fname
+            if len(unique_matches) == 1:
+                fpath, fname = next(iter(unique_matches.items()))
+                src = fpath
+                matched_key = fname
+            elif len(unique_matches) > 1:
+                debug.log(
+                    "workspace.promote.ambiguous",
+                    f"deliverable {dlv!r} matched multiple prefixed files; leaving for LLM decision: "
+                    f"{list(unique_matches.values())[:10]}",
+                )
 
         if src is None or not os.path.isfile(src):
             skipped.append(dlv)
@@ -1756,6 +1765,83 @@ def _file_not_found_response(
             ),
             "_suggestions": [],
         }
+    if classification.zone == PathZone.STAGED_FILE:
+        try:
+            from app.core.runtime_mode import current_environment, is_environment_mode
+
+            if is_environment_mode():
+                env = current_environment()
+                project_path = classification.project_path
+                project_exists = False
+                if env is not None and project_path:
+                    try:
+                        project_root = Path(env.root_dir).resolve()
+                        candidate = (project_root / project_path).resolve()
+                        candidate.relative_to(project_root)
+                        project_exists = candidate.exists()
+                    except Exception:
+                        project_exists = False
+                if project_exists:
+                    return {
+                        "ok": True,
+                        "action": action_hint,
+                        "path": path,
+                        "content": "",
+                        "content_omitted": True,
+                        "content_compacted": True,
+                        "content_omitted_reason": "staged_copy_missing_project_path_exists",
+                        "path_zone": str(classification.zone),
+                        "staged_path": classification.workspace_path,
+                        "staged_path_exists": False,
+                        "project_path": project_path,
+                        "project_path_exists": True,
+                        "staged_copy_handoff_fact": (
+                            f"Fact: `{path}` is a staged workspace copy path, but that staged copy does not exist. "
+                            f"The corresponding real project path `{project_path}` exists. No file body was read. "
+                            "Use env_read/env_search/env_list_tree/env_run for compact project facts, or env_fetch "
+                            "when a helper or workspace tool needs a staged copy."
+                        ),
+                        "事实": (
+                            f"`{path}` 暂存副本不存在，但真实项目路径 `{project_path}` 存在；本次未读取正文。"
+                            "需要项目事实用 env_*，需要工作区副本再 env_fetch。"
+                        ),
+                        "suggested_tools": ["env_read", "env_search", "env_list_tree", "env_run", "env_fetch"],
+                        "_next_action_instruction": (
+                            "Treat this as path evidence, not a failed read. Decide whether the task needs compact "
+                            f"project facts from `{project_path}`, a staged copy via env_fetch, or helper-owned reading. "
+                            "Do not full-read source/test bodies in the main thread merely to verify helper output.\n\n"
+                            "这是路径事实而非读取失败；由模型决定使用 env_*、env_fetch 或 helper 读取。"
+                        ),
+                        "_suggestions": [],
+                    }
+                return {
+                    "ok": False,
+                    "error": (
+                        f"file not found: {path}\n"
+                        f"`{path}` is a chat-workspace staged copy path. The corresponding project path is "
+                        f"`{project_path}`. The staged copy does not currently exist in the chat workspace"
+                        + ("; the project path exists." if project_exists else "; the project path was not verified as existing.")
+                        + "\nUse env_read/env_search/env_list_tree/env_run with the project path for read-only project facts, "
+                        "or call env_fetch before using read_file/search_in_file/code_index on the `_env/...` staged copy. "
+                        "If a helper needs this file, pass the exact project_path from inventory/resource manifest or request it explicitly.\n"
+                        "该路径是暂存副本路径；当前副本不存在。只读项目事实用项目相对路径调用 env_*；需要工作区副本时先 env_fetch。"
+                    ),
+                    "path": path,
+                    "path_zone": str(classification.zone),
+                    "staged_path": classification.workspace_path,
+                    "staged_path_exists": False,
+                    "project_path": project_path,
+                    "project_path_exists": project_exists,
+                    "suggested_tools": ["env_read", "env_search", "env_list_tree", "env_run", "env_fetch"],
+                    "_next_action_instruction": (
+                        "This result is path evidence only. Decide whether the next step needs direct project evidence "
+                        f"(`{project_path}` with env_* tools) or a staged workspace copy (env_fetch, then use `{path}`).\n\n"
+                        "本结果只陈述路径事实；下一步由模型根据任务决定直接读项目路径还是先暂存。"
+                    ),
+                    "_suggestions": [],
+                }
+        except Exception:
+            pass
 
     suggestions = _suggest_similar_files(ws_dir, path)
     error = f"file not found: {path}"
@@ -1806,9 +1892,14 @@ def _file_not_found_response(
                 "project paths.\n"
                 "项目文件请用 env_*；read_file 只读工作区或已暂存副本。"
             )
+            action_use = (
+                "workspace editing"
+                if action_hint in {"edit_file", "multi_edit", "insert_in_file"}
+                else "workspace reading"
+            )
             if staged_exists:
                 error += (
-                    f" A staged copy exists at `{staged_candidate}`; use that exact path if you need workspace reading.\n"
+                    f" A staged copy exists at `{staged_candidate}`; use that exact path if you need {action_use}.\n"
                     f"已存在暂存副本 `{staged_candidate}`；请直接改用它。"
                 )
             else:
@@ -1827,6 +1918,13 @@ def _file_not_found_response(
         "error": error,
         "_suggestions": suggestions,
     }
+    if "staged_candidate" in locals():
+        response["staged_candidate"] = staged_candidate
+        response["staged_candidate_exists"] = staged_exists
+        response["path_zone_fact"] = (
+            "In environment mode, non-`_env/` paths are project-relative names; workspace file/edit tools "
+            "operate on chat-workspace files or existing staged `_env/...` copies."
+        )
     if auto_redirect:
         response["_auto_redirect_path"] = auto_redirect
     return response
@@ -2246,6 +2344,7 @@ async def handle_mkdir(ws_dir: str, path: str) -> dict:
 
 from app.llm.tools.workspace_file_ops import (  # noqa: E402,F401
     handle_write,
+    handle_append,
     _extract_python_outline,
     _build_file_outline,
     _detect_file_type,
@@ -2416,21 +2515,22 @@ _FILE_TYPE_TABLE = {
     ".toml": ("text-structured", "TOML",
               "import tomllib; data = tomllib.load(open('PATH', 'rb'))",
               "# 写回需 tomli_w: tomli_w.dump(data, open('PATH', 'wb'))"),
-    # document — 优先用 `office` 工具,代码 fallback 留作进阶用法
+    # document — normal route is the structured `office` tool. Python snippets
+    # are fallback extraction probes only when the office tool lacks a needed
+    # operation or exact unsupported inspection is required.
     ".docx": ("document", "Word document",
-              "# **优先**:`office read path='PATH'` —— 直接拿段落+表格+图片清单 JSON\n"
-              "# 仅当 office 工具不支持的细操作时才手写 python-docx:\n"
+              "# Normal route: office(action='read', path='PATH') returns document structure.\n"
+              "# Fallback probe only when a named unsupported detail is needed:\n"
               "from docx import Document\\n"
               "doc = Document('PATH')\\n"
               "text = '\\n'.join(p.text for p in doc.paragraphs)",
-              "# **优先**:`office write path='PATH' blocks=[...]` 或 `office append`\n"
-              "# blocks 元素: heading/paragraph/list/table/image/page_break\n"
-              "# 含图: blocks=[{type:'image', path:'chart.png', width_inches:6, caption:'...'}]\n"
-              "# 不要每次写文档都让我手写 100 行 python-docx —— 慢且易翻车"),
+              "# Normal route: office(action='write'/'append'/'replace_block', path='PATH', blocks=[...])\n"
+              "# blocks: heading/paragraph/list/table/image/page_break.\n"
+              "# Use python-docx only for a named unsupported formatting/inspection need, not for ordinary assembly."),
     ".doc": ("document", "Word document (legacy .doc)",
              "# .doc 老格式 office 工具不直接支持,先转 .docx:\\n"
              "# workspace run 'libreoffice --headless --convert-to docx PATH'\\n"
-             "# 然后 office read 处理生成的 .docx",
+             "# 然后 office(action='read', path='PATH.docx') 处理生成的 .docx",
              None),
     ".pdf": ("document", "PDF",
              "# === 读 PDF(两种方式互补) ===\\n"
@@ -2456,10 +2556,10 @@ _FILE_TYPE_TABLE = {
              "# RTF 写回较麻烦,通常做法是输出 .docx 或 .txt"),
     # presentation — PowerPoint
     ".pptx": ("presentation", "PowerPoint presentation",
-              "# **优先**:`office read path='PATH'` —— 直接拿 slides[].title + body_texts JSON\n"
+              "# Preferred: office(action='read', path='PATH') returns slides[].title + body_texts JSON.\n"
               "# 代码方式:from pptx import Presentation; prs = Presentation('PATH')\n"
               "# for s in prs.slides: print(s.shapes.title.text if s.shapes.title else '')",
-              "# **优先**:`office write path='PATH' slides=[{title:'...', body:[...]}]`\n"
+              "# Preferred: office(action='write', path='PATH', slides=[{title:'...', body:[...]}])\n"
               "# body 元素: text / bullets / image / table\n"
               "# 复杂幻灯片(动画/转场/精确版式)再考虑手写 python-pptx 代码"),
     ".ppt": ("presentation", "PowerPoint (legacy .ppt)",
@@ -2468,11 +2568,11 @@ _FILE_TYPE_TABLE = {
              None),
     # spreadsheet — 优先用 `office` 工具
     ".xlsx": ("spreadsheet", "Excel workbook",
-              "# **优先**:`office read path='PATH'` —— 直接拿 sheets[].rows JSON\n"
+              "# Preferred: office(action='read', path='PATH') returns sheets[].rows JSON.\n"
               "# 代码方式(读样式/合并/条件格式时):import openpyxl\\n"
               "wb = openpyxl.load_workbook('PATH', data_only=True)\\n"
               "for sn in wb.sheetnames: ws = wb[sn]; print(sn, list(ws.iter_rows(values_only=True))[:3])",
-              "# **优先**:`office write path='PATH' sheets=[{name:'...', rows:[[...]], header:true}]`\n"
+              "# Preferred: office(action='write', path='PATH', sheets=[{name:'...', rows:[[...]], header:true}])\n"
               "# 公式以 '=' 开头: rows=[['A','B'],[1,2],['Total','=SUM(B2:B3)']]\n"
               "# 复杂场景(图表/合并单元格/条件格式)用 openpyxl 代码"),
     ".xls": ("spreadsheet", "Excel (legacy .xls)",
@@ -3402,9 +3502,74 @@ def _translate_windows_command(cmd: str, ws_dir: str) -> str:
     """
     import re
 
+    def _decode_python_c_line_escapes_outside_strings(src: str) -> str:
+        """Decode shell-escaped line separators without changing Python string literals."""
+        out: list[str] = []
+        i = 0
+        in_string = False
+        quote = ""
+        triple = False
+        escaped = False
+        while i < len(src):
+            ch = src[i]
+            if not in_string:
+                if src.startswith("\\r\\n", i):
+                    out.append("\n")
+                    i += 4
+                    continue
+                if src.startswith("\\n", i):
+                    out.append("\n")
+                    i += 2
+                    continue
+                if src.startswith("\\r", i):
+                    out.append("\n")
+                    i += 2
+                    continue
+                if ch in {"'", '"'}:
+                    quote = ch
+                    triple = src.startswith(ch * 3, i)
+                    in_string = True
+                    escaped = False
+                    if triple:
+                        out.append(ch * 3)
+                        i += 3
+                    else:
+                        out.append(ch)
+                        i += 1
+                    continue
+                out.append(ch)
+                i += 1
+                continue
+
+            out.append(ch)
+            if triple:
+                if src.startswith(quote * 3, i):
+                    out.extend([quote, quote])
+                    i += 3
+                    in_string = False
+                    quote = ""
+                    triple = False
+                else:
+                    i += 1
+                continue
+
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\":
+                escaped = True
+                i += 1
+                continue
+            if ch == quote:
+                in_string = False
+                quote = ""
+            i += 1
+        return "".join(out)
+
     def _normalize_python_c_source(src: str) -> str:
         normalized = src.replace(r'\"', '"').replace(r"\'", "'")
-        normalized = normalized.replace("\\r\\n", "\n").replace("\\n", "\n")
+        normalized = _decode_python_c_line_escapes_outside_strings(normalized)
         normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
         return normalized
 
@@ -3470,6 +3635,32 @@ def _translate_windows_command(cmd: str, ws_dir: str) -> str:
             return f"{wrapped.group('exe')} /{wrapped.group('flag')} {translated_rest}"
         return cmd
 
+    def _translate_windows_null_device(src: str) -> str:
+        """Translate Unix null-device targets to cmd.exe's NUL device.
+
+        Only rewrite when `/dev/null` is used as a redirection target or a
+        command output target such as `curl -o /dev/null`; path arguments and
+        URLs are left alone.
+        """
+        def repl(match: re.Match) -> str:
+            return f"{match.group('prefix')}{match.group('quote') or ''}NUL{match.group('quote') or ''}"
+
+        return re.sub(
+            r'(?P<prefix>(?:\d?\s*>\s*|--output\s+|-o\s+))(?P<quote>["\']?)/dev/null(?P=quote)',
+            repl,
+            src,
+            flags=re.IGNORECASE,
+        )
+
+    null_translated = _translate_windows_null_device(stripped_cmd)
+    if null_translated != stripped_cmd:
+        debug.log(
+            "workspace.translate.null_device",
+            f"/dev/null output target → NUL: {null_translated[:120]}",
+        )
+        stripped_cmd = null_translated
+        cmd = stripped_cmd
+
     # set VAR=value && python -c "..." → preserve the env prefix safely, but still move -c code to a temp file.
     consumed_set = _consume_leading_set_assignments(stripped_cmd)
     if consumed_set:
@@ -3484,8 +3675,11 @@ def _translate_windows_command(cmd: str, ws_dir: str) -> str:
             return translated
 
     # Unix env prefix on Windows: PYTHONPATH=x python -c "..." → set PYTHONPATH=x && python ...
+    _PY_LAUNCHER_RE = r'(?:python3?|py)(?:\.(?:exe|cmd|bat))?'
+
     _ENV_PREFIX_PAT = re.compile(
-        r'^(?P<assigns>(?:[A-Za-z_][A-Za-z0-9_]*=[^\s&|<>]+\s+)+)(?P<rest>python(?:\.exe)?\s+.+)$',
+        r'^(?P<assigns>(?:[A-Za-z_][A-Za-z0-9_]*=[^\s&|<>]+\s+)+)(?P<rest>'
+        + _PY_LAUNCHER_RE + r'\s+.+)$',
         re.IGNORECASE | re.DOTALL,
     )
     m = _ENV_PREFIX_PAT.match(stripped_cmd)
@@ -3503,18 +3697,108 @@ def _translate_windows_command(cmd: str, ws_dir: str) -> str:
         )
         return translated
 
+    def _translate_simple_cp_command(src: str) -> str | None:
+        try:
+            import shlex
+            parts = shlex.split(src, posix=False)
+        except ValueError:
+            return None
+        if not parts or parts[0].lower() != "cp":
+            return None
+        opts = []
+        paths = []
+        for part in parts[1:]:
+            clean = part.strip()
+            if clean in {"-f", "--force"} and not paths:
+                opts.append(clean)
+                continue
+            if clean.startswith("-"):
+                return None
+            paths.append(clean.strip("\"'"))
+        if len(paths) != 2:
+            return None
+        workspace = Path(ws_dir).resolve()
+
+        def _inside_workspace(raw: str) -> Path | None:
+            if not raw or any(ch in raw for ch in "<>|&"):
+                return None
+            candidate = Path(raw)
+            resolved = candidate.resolve() if candidate.is_absolute() else (workspace / candidate).resolve()
+            try:
+                resolved.relative_to(workspace)
+            except ValueError:
+                return None
+            return resolved
+
+        src_path = _inside_workspace(paths[0])
+        dst_path = _inside_workspace(paths[1])
+        if src_path is None or dst_path is None:
+            return None
+        try:
+            import uuid
+            tmp_name = f"_py_cmd_{uuid.uuid4().hex[:8]}.py"
+            tmp_path = workspace / tmp_name
+            script = (
+                "from pathlib import Path\n"
+                "import shutil\n"
+                f"workspace = Path({str(workspace)!r}).resolve()\n"
+                f"src = Path({str(src_path)!r}).resolve()\n"
+                f"dst = Path({str(dst_path)!r}).resolve()\n"
+                "for p in (src, dst):\n"
+                "    p.relative_to(workspace)\n"
+                "if src.is_dir():\n"
+                "    shutil.copytree(src, dst, dirs_exist_ok=True)\n"
+                "else:\n"
+                "    dst.parent.mkdir(parents=True, exist_ok=True)\n"
+                "    shutil.copy2(src, dst)\n"
+            )
+            tmp_path.write_text(script, encoding="utf-8")
+            debug.log(
+                "workspace.translate.cp",
+                f"cp {paths[0]} {paths[1]} -> python {tmp_name}",
+            )
+            return f"python {tmp_name}"
+        except OSError:
+            return None
+
+    translated_cp = _translate_simple_cp_command(cmd.strip())
+    if translated_cp is not None:
+        return translated_cp
+
+    def _collapse_python_runner_forwarding(src: str) -> str | None:
+        """python python3.cmd -c "..." is a runner-forwarding shape, not a Python script."""
+        _PY_FORWARD_PAT = re.compile(
+            r'^(?P<outer>' + _PY_LAUNCHER_RE + r')'
+            r'(?P<opts>(?:\s+-(?!c(?:\s|$))[A-Za-z0-9]+(?:\s+[A-Za-z0-9_.:/\\-]+)?)*)'
+            r'\s+(?P<shim>(?:\.?[\\/])?(?:python3?|py)\.(?:cmd|bat|exe))\s+'
+            r'(?P<rest>-c\s+.*)$',
+            re.IGNORECASE | re.DOTALL,
+        )
+        m = _PY_FORWARD_PAT.match(src.strip())
+        if not m:
+            return None
+        shim = m.group("shim").replace("\\", "/")
+        shim_name = os.path.basename(shim)
+        rest = m.group("rest").strip()
+        collapsed = f"{shim_name} {rest}"
+        debug.log(
+            "workspace.translate.python_runner_forward",
+            f"{m.group('outer')} {m.group('shim')} -c ... → {collapsed[:120]}",
+        )
+        return collapsed
+
     def _translate_python_c_command(src: str, script_dir: str = "", display_prefix: str = "") -> str | None:
         # python [-B/-u/-X utf8/...] -c "..." → write a temporary .py file.
         # Keep interpreter flags before -c; they affect script execution too and
         # helpers often add `-B` for smoke checks.
         _PY_OPTS = r'(?P<opts>(?:\s+-(?!c(?:\s|$))[A-Za-z0-9]+(?:\s+[A-Za-z0-9_.:/\\-]+)?)*)'
         _PY_C_PAT = re.compile(
-            r'^(?P<exe>python(?:\.exe)?)' + _PY_OPTS + r'\s+-c\s+'
+            r'^(?P<exe>' + _PY_LAUNCHER_RE + r')' + _PY_OPTS + r'\s+-c\s+'
             r'(?P<quote>["\'])(?P<code>.*)(?P=quote)\s*$',
             re.DOTALL,
         )
         _PY_C_WITH_SUFFIX_PAT = re.compile(
-            r'^(?P<exe>python(?:\.exe)?)' + _PY_OPTS + r'\s+-c\s+'
+            r'^(?P<exe>' + _PY_LAUNCHER_RE + r')' + _PY_OPTS + r'\s+-c\s+'
             r'(?P<quote>["\'])(?P<code>.*)(?P=quote)\s+'
             r'(?P<suffix>(?:\d?>\S+|[<>|&].*)\s*)$',
             re.DOTALL,
@@ -3544,6 +3828,13 @@ def _translate_windows_command(cmd: str, ws_dir: str) -> str:
         except OSError:
             return None
 
+    collapsed_forwarding = _collapse_python_runner_forwarding(cmd.strip())
+    if collapsed_forwarding is not None:
+        translated_forwarding = _translate_python_c_command(collapsed_forwarding)
+        if translated_forwarding is not None:
+            return translated_forwarding
+        return collapsed_forwarding
+
     translated_py_c = _translate_python_c_command(cmd.strip())
     if translated_py_c is not None:
         return translated_py_c
@@ -3554,7 +3845,7 @@ def _translate_windows_command(cmd: str, ws_dir: str) -> str:
     # 仅对共享目录里的简单 python 脚本执行做重写,避免改变一般 shell 语义。
     _CD_SHARED_PY_PAT = re.compile(
         r'^cd\s+(?P<subdir>(?:_helpers_shared|_shared)[^\s]*)\s+&&\s+'
-        r'(?P<exe>python(?:\.exe)?)\s+(?P<script>[^\s"\']+\.py)(?P<args>(?:\s+.*)?)$',
+        r'(?P<exe>' + _PY_LAUNCHER_RE + r')\s+(?P<script>[^\s"\']+\.py)(?P<args>(?:\s+.*)?)$',
         re.IGNORECASE,
     )
     m = _CD_SHARED_PY_PAT.match(cmd.strip())
@@ -3766,18 +4057,18 @@ async def handle_locate(ws_dir: str, pattern: str) -> dict:
     }
 
 
-# ── 2026-05-09 Patch 22: inspect_file —— 主线程验证二进制产物的首选 ──
+# ── 2026-05-09 Patch 22: inspect_file —— narrow structured metadata inspection ──
 #
 # 病因(trace 963c236c5a6f4f27):主线程编码能力弱于 helper(对长串迭代写代码
 # 效率低正确率低),所以默认策略是把代码工作 delegate 给 helper。但 helper 经常
-# 产出 docx/pptx/xlsx/png 这类二进制,helper 的 report 说"我做了 4 张图",实际
-# docx 里可能是 0 张图。主线程要能核实,但又不该为每个简单验证写脚本(就算 < 150 行
+# 产出 docx/pptx/xlsx/png 这类二进制,helper 的 report 可能缺结构事实或有矛盾。
+# 主线程需要窄元数据工具处理这种缺口,但又不该为每个简单结构事实写脚本(就算 < 150 行
 # 自己写没问题,反复来也烦)。
 #
 # 解决:inspect_file 是预制工具,纯 ZIP/header 解析,**不需要主线程写代码**。
 # 给主线程结构化元数据:页数/表格数/图片数/宽高/首行预览等,让它一调即得。
-# 80% 校验场景靠 inspect_file 一行搞定;字段不够再写小 .py(Patch 28 允许);
-# 真正复杂校验才 delegate。三层阶梯见 Round 2 prompt §5.7。
+# 常见结构事实靠 inspect_file 一行搞定;字段不够再写小 .py(Patch 28 允许);
+# 真正复杂校验交给 verify/helper。三层阶梯见 Round 2 prompt §5.7。
 
 _INSPECT_TEXT_EXTS = {
     ".txt", ".md", ".json", ".csv", ".tsv", ".yaml", ".yml", ".xml",
@@ -3846,7 +4137,7 @@ _INSPECT_EXT_TYPE_MAP = {
 
 
 def inspect_file(workspace_dir: str, path: str) -> dict:
-    """主线程验证产物的工具入口。
+    """Narrow structured metadata tool entry point.
 
     返回结构:
       {

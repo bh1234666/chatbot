@@ -66,6 +66,7 @@ def _split_system_static_dynamic(system_text: str) -> tuple[str, str]:
         "\n\n## Other Participants Still Interacting",
         "\n\n## Recent Activity",
         "\n\n## Recent Shared Messages",
+        "\n\n## Entry Routing Snapshot",
         "\n\n## Previous Analysis",
         "\n\n## Current Workspace (.temp) Snapshot",
         "\n\n## Recent execution records",
@@ -192,6 +193,70 @@ def _hash_chain(segments: list[tuple[str, bytes]]) -> list[dict[str, Any]]:
             }
         )
     return chain
+
+
+def serialized_prompt_cache_input(
+    *,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> bytes:
+    """Serialize the observed prompt shape for common-prefix diagnostics.
+
+    This is not sent to the model and does not normalize the real request. It
+    gives tests and debug reports a deterministic byte sequence that preserves
+    the cache-critical ordering: stable leading system, tool schema, dynamic
+    leading system, then non-leading-system messages.
+
+    仅用于本地诊断完整请求前缀复用率，不改变真实请求。
+    """
+    system_text = _leading_system_text(messages)
+    system_static, system_dynamic = _split_system_static_dynamic(system_text)
+    tool_bytes = _stable_json_bytes(_tool_schema_summary(tools))
+    leading_system_count = _leading_system_count(messages)
+    non_leading_messages = messages[leading_system_count:]
+    messages_bytes = _stable_json_bytes(non_leading_messages)
+    return b"".join(
+        [
+            b"<system_static>\n",
+            system_static.encode("utf-8"),
+            b"\n<tool_schema>\n",
+            tool_bytes,
+            b"\n<system_dynamic>\n",
+            system_dynamic.encode("utf-8"),
+            b"\n<messages>\n",
+            messages_bytes,
+        ]
+    )
+
+
+def common_prefix_bytes(left: bytes, right: bytes) -> int:
+    """Return the byte length of the common prefix of two byte strings."""
+    limit = min(len(left), len(right))
+    for index in range(limit):
+        if left[index] != right[index]:
+            return index
+    return limit
+
+
+def compare_prompt_cache_prefix(
+    *,
+    left_messages: list[dict[str, Any]],
+    right_messages: list[dict[str, Any]],
+    left_tools: list[dict[str, Any]] | None = None,
+    right_tools: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Compare two observed prompt inputs by longest deterministic prefix."""
+    left = serialized_prompt_cache_input(messages=left_messages, tools=left_tools)
+    right = serialized_prompt_cache_input(messages=right_messages, tools=right_tools)
+    common = common_prefix_bytes(left, right)
+    denominator = max(1, min(len(left), len(right)))
+    return {
+        "common_prefix_bytes": common,
+        "left_bytes": len(left),
+        "right_bytes": len(right),
+        "common_prefix_ratio": common / denominator,
+        "common_prefix_percent": round(common * 100 / denominator, 4),
+    }
 
 
 def describe_prompt_cache_input(

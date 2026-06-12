@@ -136,6 +136,17 @@ def test_read_helper_prompt_mentions_tiered_cache_reuse():
     assert "allow_upgrade" in _HELPER_SYSTEM_READ
 
 
+def test_code_helper_prompt_preserves_exact_validation_commands():
+    from app.llm.tools.delegate import _select_helper_system
+
+    prompt = _select_helper_system("code")
+    assert "acceptance checks, or verifier names a concrete command" in prompt
+    assert "stdout/stderr behavior" in prompt
+    assert "run that command exactly when possible" in prompt
+    assert "ordinary stdout checks are text-output checks" in prompt
+    assert "按原命令、目录、参数和输出语义验证" in prompt
+
+
 def test_read_helper_prompt_keeps_internal_material_separate_from_user_copy():
     from app.llm.tools.delegate import _HELPER_SYSTEM_READ, _HELPER_SYSTEM_EDIT
 
@@ -149,6 +160,8 @@ def test_read_helper_prompt_keeps_internal_material_separate_from_user_copy():
     assert "uncertain content" in _HELPER_SYSTEM_READ
     assert "methods_used" in _HELPER_SYSTEM_READ
     assert "cache_status" in _HELPER_SYSTEM_READ
+    assert "slice of an ultra-large file" in _HELPER_SYSTEM_READ
+    assert "covered spans, missing spans, merge anchors" in _HELPER_SYSTEM_READ
 
     assert "preserve the acceptance contract" in _HELPER_SYSTEM_EDIT
     assert "coverage summaries, item counts, section maps, and line ranges" in _HELPER_SYSTEM_EDIT

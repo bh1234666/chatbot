@@ -7,6 +7,8 @@ import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+from app.llm.tools.output_spill import write_tool_output_spill
+
 
 TEXT_EXTS = {
     ".txt", ".md", ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml",
@@ -27,22 +29,46 @@ def preview_file(path: str | Path, *, max_chars: int = 120_000) -> dict:
     except OSError:
         size = 0
     base = {"ok": True, "name": p.name, "size": size, "ext": ext}
+
+    def _text_result(kind: str, text: str) -> dict:
+        truncated = len(text) > max_chars
+        result = {**base, "type": kind, "content": text[:max_chars], "truncated": truncated}
+        if truncated:
+            saved_path = write_tool_output_spill(
+                root_dir=str(p.parent),
+                tool_name="file_preview",
+                label=f"{kind}_content",
+                text=text,
+            )
+            result.update({
+                "content_truncated": True,
+                "content_original_chars": len(text),
+                "content_full_saved_path": saved_path,
+                "output_truncated": True,
+                "tool_result_truncated": True,
+                "visible_excerpt_policy": (
+                    f"Full preview text was saved at `{saved_path}` (`content_full_saved_path`); "
+                    "only the head excerpt is returned."
+                ),
+            })
+        return result
+
     try:
         if ext in TEXT_EXTS:
             text = p.read_text(encoding="utf-8", errors="replace")
-            return {**base, "type": "text", "content": text[:max_chars], "truncated": len(text) > max_chars}
+            return _text_result("text", text)
         if ext == ".docx":
             text = _preview_docx(p)
-            return {**base, "type": "docx", "content": text[:max_chars], "truncated": len(text) > max_chars}
+            return _text_result("docx", text)
         if ext == ".pptx":
             text = _preview_pptx(p)
-            return {**base, "type": "pptx", "content": text[:max_chars], "truncated": len(text) > max_chars}
+            return _text_result("pptx", text)
         if ext == ".xlsx":
             text = _preview_xlsx(p)
-            return {**base, "type": "xlsx", "content": text[:max_chars], "truncated": len(text) > max_chars}
+            return _text_result("xlsx", text)
         if ext == ".pdf":
             text = _preview_pdf(p, max_chars=max_chars)
-            return {**base, "type": "pdf", "content": text[:max_chars], "truncated": len(text) > max_chars}
+            return _text_result("pdf", text)
     except Exception as e:
         return {**base, "ok": False, "error": f"{type(e).__name__}: {e}"}
     return {**base, "type": "binary", "content": "", "truncated": False}

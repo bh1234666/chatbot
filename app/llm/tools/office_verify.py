@@ -19,8 +19,7 @@ def _sync_office_globals() -> None:
 async def _docx_verify_numbers(
     workspace_dir: str, target: str, rel_path: str, args: dict,
 ) -> str:
-    """对照一份或多份 CSV, 找出 docx 正文里"数字 + 单位"形式的论断是否
-    与 CSV 数据吻合。用于发现 LLM 凭印象编数(实测交付的论文里 12+ 处).
+    """对照一份或多份 CSV, 找出 docx 正文里可能应由 CSV 支撑的数字论断。
 
     args:
       csv_paths: 必填, list[str] 工作区相对路径
@@ -57,12 +56,39 @@ async def _docx_verify_numbers(
     except (TypeError, ValueError):
         tolerance = 0.05
 
-    # 默认匹配带单位的数字: 4.20ms / 4.20 ms / 4.2秒
-    # 同时也匹配纯小数 (>= 0.001 才有意义)
+    # 默认匹配数字；后续按上下文把章节号、硬件型号、版本号、引用页码等
+    # 非 CSV 事实数字降为 skipped_context_numbers，避免把工具最近值当作硬裁决。
     pat = re.compile(
         args.get("number_pattern")
         or r"(\d+(?:\.\d+)?)\s*(?:ms|毫秒|秒|s\b|µs|us)?"
     )
+
+    def _non_csv_number_reason(text: str, num_str: str, start: int, end: int) -> str | None:
+        around = text[max(0, start - 35): min(len(text), end + 35)]
+        lower = around.lower()
+        before = text[max(0, start - 3): start]
+        after = text[end: min(len(text), end + 8)]
+        try:
+            num = float(num_str)
+        except ValueError:
+            return "not_numeric"
+        if abs(num) < 1.0 and "." not in num_str:
+            return "tiny_integer"
+        if num <= 10 and "." not in num_str:
+            return "small_integer_likely_enumeration"
+        if re.search(r"\b(section|table|figure|fig\.|chapter|appendix|reference|ref\.|algorithm)\s*$", before.lower()):
+            return "document_reference_number"
+        if re.match(r"^\s*(?:[.)\]-]|节|章|表|图)", after):
+            return "document_reference_number"
+        if re.search(r"\b\d+(?:\.\d+){1,3}\b", around):
+            return "version_or_section_number"
+        if re.search(r"\b(?:i[3579]|ryzen|xeon|core|gcc|clang|python|windows|linux|ddr\d?|ram)\b", lower):
+            return "hardware_or_software_spec"
+        if re.search(r"\b(?:vol\.|no\.|pp\.|pages?|proc\.|symp\.|conference|journal|isbn|doi)\b", lower):
+            return "citation_metadata"
+        if "." not in num_str and 1900 <= num <= 2050:
+            return "year_or_citation_year"
+        return None
 
     def _do():
         # ── 1. 读 CSV, 建 value index ────────────────────────
@@ -117,6 +143,7 @@ async def _docx_verify_numbers(
             return None, f"open failed: {type(e).__name__}: {e}"
 
         claims: list[dict] = []
+        skipped_context_numbers: list[dict] = []
         for p_idx, p in enumerate(doc.paragraphs):
             text = p.text or ""
             if not text.strip():
@@ -130,24 +157,21 @@ async def _docx_verify_numbers(
                     num = float(num_str)
                 except ValueError:
                     continue
-                # 跳过极小或极大的: 整数 1-2 位太可能是普通编号(图1,5.1节...)
-                if abs(num) < 1.0 and num_str.find(".") == -1:
-                    continue
-                if num <= 10 and "." not in num_str:
-                    continue  # 整数 ≤10 大多是序号
-                # 启发式: 跳过 4 位整数 1900-2050 范围 (大概率是年份, 例如引用 "(1978)")
-                if "." not in num_str and 1900 <= num <= 2050:
-                    # 看上下文是否含 "年" / "(" 或前后是"年/月/日"
-                    start = max(0, m.start() - 5)
-                    end = min(len(text), m.end() + 5)
-                    around = text[start:end]
-                    if ("年" in around or "(" in around or ")" in around
-                            or "199" in around or "20" in around[:4]):
-                        continue
                 # context: 前 25 / 后 25 字符
                 start = max(0, m.start() - 25)
                 end = min(len(text), m.end() + 25)
                 ctx = text[start:end]
+                skip_reason = _non_csv_number_reason(text, num_str, m.start(), m.end())
+                if skip_reason:
+                    if len(skipped_context_numbers) < 25:
+                        skipped_context_numbers.append({
+                            "paragraph_idx": p_idx,
+                            "number": num,
+                            "number_str": num_str,
+                            "context": ctx,
+                            "reason": skip_reason,
+                        })
+                    continue
                 claims.append({
                     "paragraph_idx": p_idx,
                     "number": num,
@@ -155,8 +179,8 @@ async def _docx_verify_numbers(
                     "context": ctx,
                 })
 
-        # ── 3. 对每个 claim, 找 CSV 里最接近的值 ───────────────
-        # 如果绝对偏差 / claim 数值 ≤ tolerance, 视为匹配
+        # ── 3. 对每个候选 claim, 找 CSV 里最接近的值 ───────────────
+        # 这是证据提示，不是硬裁决；LLM 需要结合语义判断该数字是否应由 CSV 支撑。
         mismatches: list[dict] = []
         matches: list[dict] = []
         for c in claims:
@@ -204,6 +228,8 @@ async def _docx_verify_numbers(
             "csv_summaries": csv_summaries,
             "mismatches": mismatches[:50],   # 最多回 50 个
             "matches_sample": matches[:5],   # 抽 5 个匹配作 sanity check
+            "skipped_context_numbers_count": len(skipped_context_numbers),
+            "skipped_context_numbers_sample": skipped_context_numbers[:10],
         }, None
 
     result, err = await asyncio.to_thread(_do)
@@ -211,26 +237,28 @@ async def _docx_verify_numbers(
         return _err(err, action="verify_numbers")
 
     hint = (
-        f"Checked {result['claims_extracted']} numeric claims; "
+        f"Checked {result['claims_extracted']} candidate CSV-backed numeric claims; "
         f"{result['matches_count']} matched CSV within {int(tolerance*100)}% tolerance, "
-        f"{result['mismatches_count']} did not match.\n"
-        f"数字论断已与 CSV 核对。"
+        f"{result['mismatches_count']} candidate mismatches were found. "
+        f"Skipped {result.get('skipped_context_numbers_count', 0)} context numbers that look like section/version/hardware/citation metadata.\n"
+        f"数字候选已与 CSV 核对；章节号、版本号、硬件规格和引用元数据不作为 CSV 不匹配项。"
     )
     if result["mismatches_count"] > 0:
-        # 找最严重的 deviation 提示
+        # 找最严重的 deviation 作为事实样本，不要求逐项硬修。
         worst = max(result["mismatches"], key=lambda x: x["deviation_pct"])
         hint += (
-            f" 最严重一项偏差 {worst['deviation_pct']}%: "
+            f" 最大候选偏差 {worst['deviation_pct']}%: "
             f"正文 {worst['claim_number']} vs CSV "
             f"{worst['best_csv_match']['value']} "
             f"({worst['best_csv_match']['column']}@{worst['best_csv_match']['row_key'][:30]})。"
         )
         hint += (
-            " 🚨 强烈建议: 对每个 mismatch 用 replace_section/replace_block 改正后, "
-            "再调一次 verify_numbers 确认全绿。"
+            " Treat mismatches as candidate facts for semantic review: edit only numbers that the document presents as CSV/benchmark results. "
+            "Do not edit hardware specs, software versions, section/table/reference numbers, or citation metadata solely because this nearest-value check flagged them.\n\n"
+            "候选不匹配需按语义复核；只有正文把该数字作为 CSV/benchmark 结果时才修改。"
         )
     else:
-        hint += " ✓ 全部数字论断在容差内, 可以交付。"
+        hint += " ✓ No candidate CSV-backed number mismatches were found within this heuristic scope."
 
     return json.dumps({
         "ok": True,

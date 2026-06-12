@@ -1,0 +1,25 @@
+{
+  "name": "ClawBench original OpenClaw agent baseline",
+  "script": "stress_tools/run_clawbench_original_agent.ps1",
+  "runner": "WSL Ubuntu native Docker",
+  "model": "deepseek/deepseek-chat",
+  "task": "t1-fs-quick-note",
+  "runs": 1,
+  "concurrency": 1,
+  "recorded_at": "2026-06-08T00:52:06+08:00",
+  "run_root": "F:\\chatbot\\.benchmarks\\clawbench_original_runs\\20260608_005206",
+  "result_json": "F:\\chatbot\\.benchmarks\\clawbench_original_runs\\20260608_005206\\data\\results\\original_agent_deepseek_deepseek-chat_t1-fs-quick-note_20260608_005206.json",
+  "overall_score": 0.88003,
+  "overall_completion": 1.0,
+  "overall_trajectory": 0.6,
+  "overall_behavior": 1.0,
+  "overall_reliability": 1.0,
+  "overall_median_latency_ms": 220324.0,
+  "overall_tokens_per_pass": 49224.0,
+  "overall_cost_per_pass_usd": 0.005631836,
+  "notes": [
+    "This is the fixed local baseline for the original ClawBench/OpenClaw agent.",
+    "Docker Desktop is not required; this uses Docker Engine inside WSL.",
+    "The cloned ClawBench harness is patched to reconnect the gateway after agents.create."
+  ]
+}

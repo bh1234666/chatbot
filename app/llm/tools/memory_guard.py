@@ -394,7 +394,11 @@ def preflight_memory_check(command: str = "") -> dict[str, Any] | None:
                 **active,
                 "command_preview": (command or "")[:160],
             },
-            "suggested_action": "wait_or_reduce_parallel_memory_work",
+            "observed_recovery_options": [
+                "wait for active under-limit subprocesses to finish",
+                "stop a less useful active subprocess",
+                "retry a smaller command or narrower shard",
+            ],
         }
     if not snap.get("ok"):
         return None
@@ -420,7 +424,11 @@ def preflight_memory_check(command: str = "") -> dict[str, Any] | None:
                 "min_available_gib": _bytes_to_gib(min_available),
                 "command_preview": (command or "")[:160],
             },
-            "suggested_action": "reduce_memory_pressure_before_retry",
+            "observed_recovery_options": [
+                "wait until host memory is available",
+                "reduce dataset size or command scope",
+                "reuse existing partial results before retrying unfinished work",
+            ],
         }
     return None
 
@@ -509,24 +517,39 @@ def memory_limit_error(facts: dict[str, Any], *, stdout: str = "", stderr: str =
         "error": (
             "The command was stopped by the memory guard before OS memory exhaustion. "
             "This is a resource limit fact, not proof of a code bug. Completed partial work may still be valid. "
-            "Use the memory facts below to decide whether to wait, split the benchmark, reduce data size, stream "
-            "results to files, or retry unfinished work after other subprocesses finish.\n"
-            "命令因内存保护被中断；这是资源事实，不等于代码错误。请依据内存事实决定等待、拆分、降载或重试未完成部分。"
+            "The memory facts below support decisions such as waiting for under-limit work, splitting the benchmark, "
+            "reducing data size, streaming results to files, or retrying unfinished work after pressure drops.\n"
+            "命令因内存保护被中断；这是资源事实，不等于代码错误。内存事实可支持等待、拆分、降载或重试未完成部分。"
         ),
         "error_kind": "memory_limit_exceeded",
         "memory_limit_exceeded": True,
         "resource_required": {
             "resource_kind": "memory",
+            "matching_helper_kind": "code",
             "suggested_helper_kind": "code",
             "blocked_reason": "workspace/env subprocess memory pressure",
             "needed_outputs": [],
+            "observed_recovery_options": [
+                "wait for still-running under-limit work",
+                "split the benchmark or command into smaller shards",
+                "retry only unfinished portions after memory pressure drops",
+            ],
+            "resource_resolution_facts": (
+                "This is memory pressure. Re-running all unfinished heavy commands in parallel unchanged preserves "
+                "the same pressure pattern; under-limit work, smaller shards, or retrying unfinished portions after "
+                "pressure drops are recoverable shapes."
+            ),
             "main_thread_action": (
-                "Treat this as memory pressure. Do not rerun all unfinished heavy commands in parallel unchanged; "
-                "wait for still-running under-limit work, split the benchmark, or retry only unfinished portions."
+                "main process decides from active task and memory facts: wait for still-running under-limit work, "
+                "split the benchmark, reduce load, or retry only unfinished portions"
             ),
         },
         "memory": facts,
-        "partial_stdout": stdout[-4000:] if stdout else "",
-        "partial_stderr": stderr[-4000:] if stderr else "",
-        "suggested_action": "wait_or_reduce_scope_before_retry",
+        "partial_stdout": stdout if stdout else "",
+        "partial_stderr": stderr if stderr else "",
+        "observed_recovery_options": [
+            "wait for still-running under-limit work",
+            "split or reduce the heavy command",
+            "retry only unfinished portions after memory pressure drops",
+        ],
     }

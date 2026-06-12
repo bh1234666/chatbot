@@ -130,94 +130,9 @@ def _normalize_auto_continue(raw: dict, req: AutoContinueCheckRequest) -> AutoCo
     if len(continue_message) > 80:
         continue_message = continue_message[:80].strip() or "继续"
 
-    assistant_reply = str(req.assistant_reply or "")
-    user_message = str(req.user_message or "")
-    partial_markers = (
-        "如果你要我继续",
-        "要这么干的话",
-        "下一步就",
-        "下一步可以",
-        "下一步我可以",
-        "我现在就",
-        "还没实际执行",
-        "尚未完成",
-        "没有取得可核查",
-        "未完成",
-    )
-    continuation_requested = any(marker in assistant_reply for marker in partial_markers)
-    implementation_terms = (
-        "实现",
-        "修改",
-        "修复",
-        "补齐",
-        "完善",
-        "运行 pytest",
-        "运行测试",
-        "验证",
-        "创建",
-        "生成",
-    )
-    preparation_terms = (
-        "先确认",
-        "先看",
-        "先检查",
-        "再动手",
-        "需要先",
-        "下一步",
-        "跑一下目录",
-        "找到相关文件",
-    )
-    staged_completion_terms = (
-        "第一阶段",
-        "第一部分",
-        "阶段一",
-        "phase 1",
-        "下一步",
-        "继续写",
-        "继续补",
-        "继续完善",
-        "继续测试",
-    )
-    evidence_terms = (
-        "已修改",
-        "已创建",
-        "新增",
-        "变更文件",
-        "验证结果",
-        "pytest",
-        "通过",
-        "失败",
-        "命令",
-        "env_apply",
-    )
-    implementation_still_preparing = (
-        any(term in user_message for term in implementation_terms)
-        and any(term in assistant_reply for term in preparation_terms)
-        and not any(term in assistant_reply for term in evidence_terms)
-    )
-    staged_work_can_continue = (
-        any(term in user_message for term in implementation_terms)
-        and any(term in assistant_reply for term in staged_completion_terms)
-        and not any(term in assistant_reply for term in ("全部完成", "完整完成", "已全部", "All checks passed"))
-    )
-    if continuation_requested and len(user_message.strip()) >= 8:
-        should_continue = True
-        confidence = max(confidence, 0.72)
-        if not reason:
-            reason = "assistant_reply_indicates_requested_work_is_not_finished"
-    if implementation_still_preparing and len(user_message.strip()) >= 8:
-        should_continue = True
-        confidence = max(confidence, 0.70)
-        if not reason or "not an actual implementation" in reason:
-            reason = "implementation_request_reply_is_only_preparation"
-    if staged_work_can_continue and len(user_message.strip()) >= 8:
-        should_continue = True
-        confidence = max(confidence, 0.68)
-        if not reason or "question marks" in reason:
-            reason = "assistant_reply_indicates_staged_work_can_continue"
-
-    # Keep the endpoint conservative. The bridge can still ignore confidence if desired,
-    # but the default response should not auto-chain on ambiguous completions.
+    # Keep this endpoint as an LLM judge plus hard transport/time boundaries.
+    # Do not override the judge with phrase markers such as "next step" or
+    # "continue"; those symbolic rules drift across tasks and languages.
     if confidence < 0.55:
         should_continue = False
 

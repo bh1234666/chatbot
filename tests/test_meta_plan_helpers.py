@@ -66,3 +66,24 @@ def test_build_recall_hint_prefers_configured_layer():
 
     assert "项目X" in hint
     assert "expand_cold" in hint
+    assert "not a required route" in hint
+    assert "first three tool calls" not in hint
+
+
+def test_build_recall_hint_is_factual_without_topics():
+    from app.core.plan_helpers import build_recall_hint
+    from app.schemas.api import TendencyAnalysis
+
+    tendency = TendencyAnalysis(
+        tendencies={"严肃询问": 0.8},
+        rationale="possibly historical",
+        needs_recall=True,
+        recall_topics=[],
+        recall_layers=[],
+    )
+
+    hint = build_recall_hint(tendency)
+
+    assert "coarse fact" in hint
+    assert "Topic-like memory guesses are not evidence" in hint
+    assert "first three tool calls" not in hint

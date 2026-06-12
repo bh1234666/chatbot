@@ -35,6 +35,7 @@ import zipfile
 from typing import Any
 
 from app.llm.tools import workspace as ws_tool
+from app.llm.tools.office_locking import docx_write_lock, replace_file_with_retries
 
 log = logging.getLogger(__name__)
 
@@ -157,11 +158,13 @@ def _record_block_count_and_get_nudge(key: str, action: str, n_blocks: int) -> d
                     "recent_block_counts": recent,
                     "current_blocks_ceiling": st["blocks"],
                     "advice": (
-                        f"最近 4 次 {action} 有 {tiny_count} 次只写 1 个 block。"
-                        f"当前 blocks 上限是 {st['blocks']} (P150 自适应未触发缩小), "
-                        f"**建议把多个 block 合并成 1 次调用** (6-30 blocks/次)。"
-                        f"22 题 docx 应 1-2 次 append 写完, 不是 22 次单题 append。"
-                        f"每次 round-trip ~5-15s, 单块写法 ×22 = 浪费 ~5 分钟 LLM-API 来回。"
+                        f"Recent office {action} granularity fact: {tiny_count} of the last 4 calls wrote "
+                        f"1 block while the current adaptive ceiling is {st['blocks']} blocks and no shrink "
+                        "has occurred. A single call can carry multiple coherent paragraphs, tables, or "
+                        "section blocks within the current ceiling; choose the next granularity from the "
+                        "remaining acceptance gaps and JSON reliability.\n"
+                        f"中文摘要：最近 4 次 {action} 中 {tiny_count} 次只写 1 个 block，当前上限 "
+                        f"{st['blocks']}；可按剩余验收缺口决定是否合并多个相关 block。"
                     ),
                 }
         return None
@@ -301,7 +304,7 @@ async def handle_office(workspace_dir: str, args: dict) -> str:
         # 2026-05-04 v19.1: 增量编辑能力
         # 大文档(论文/PPT)一次性 write 容易触发 LLM thinking timeout,
         # 提供"按章节/按 block 增量改"的能力,让模型分多次小调用完成。
-        "replace_section", "replace_block", "replace_blocks", "delete_block", "insert_block",
+        "replace_section", "replace_block", "replace_blocks", "fill_empty_headings", "delete_block", "insert_block",
         # pptx 专用
         "replace_slide", "insert_slide", "delete_slide",
         # xlsx 专用
@@ -332,23 +335,31 @@ async def handle_office(workspace_dir: str, args: dict) -> str:
                 "verify_integrity is XLSX-only."
                 "\n\nDOCX 使用 read/编辑/数字或严谨性验证；嵌入图片文字用 ocr_images，verify_integrity 只适用于 XLSX。"
             )
+            next_call_fact = (
+                "This is a DOCX file. Structural acceptance facts come from office(action='read'); "
+                "numeric/data checks use verify_numbers or verify_rigor with csv_paths; verify_integrity is only for XLSX."
+            )
         elif fmt == "xlsx":
             hint = (
                 "For XLSX, use read/write/append/update_cells for sheets, ocr_images for embedded image text, "
                 "and verify_integrity for cross-sheet/formula integrity."
                 "\n\nXLSX 使用表格读写、单元格更新、嵌入图片 OCR 和跨表/公式完整性验证。"
             )
+            next_call_fact = "This is an XLSX file; verify_integrity can be used for cross-sheet/formula integrity checks."
         elif fmt == "pptx":
             hint = (
                 "For PPTX, use read/write/append/slide edit actions, extract_images or ocr_images for media, "
                 "and verify_numbers for numeric claims."
                 "\n\nPPTX 使用幻灯片读写编辑、图片提取/OCR 和数字声明验证。"
             )
+            next_call_fact = "This is a PPTX file; structural checks use read, slide edits use slide actions, and numeric checks use verify_numbers."
         else:
             hint = f"For .{fmt} files, valid actions are: {', '.join(supported)}."
+            next_call_fact = f"For .{fmt} files, valid Office actions are: {', '.join(supported)}."
         return _err(
             f"action {action!r} not supported for .{fmt}",
             hint=f"{hint}\n\n可用 action: {', '.join(supported)}",
+            extra={"supported_actions": supported, "next_call_fact": next_call_fact},
         )
 
     try:
@@ -373,17 +384,19 @@ def _office_arg_recovery_error(action: str, required_fields: list[str]) -> str:
     if is_missing_path and not is_missing_blocks:
         hint = (
             "The call is missing the `path` field. This is not caused by too many blocks; the tool-call JSON lost a required field, often because quotes or newlines inside strings were not escaped. "
-            "Retry with the same block count and add `path`; preserve the block granularity for this error.\n"
-            "缺少 path 字段；补齐 path 并保持原 blocks 粒度。"
+            "Retry with the intended target path. The previous block count may still be usable; adjust blocks only if a separate payload-size or JSON-stability warning appears.\n"
+            "缺少 path 字段；补齐 path；只有出现大小或 JSON 稳定性问题时才需要改 blocks 粒度。"
         )
-        recovery_advice = "Add the missing path field and retry with the SAME blocks count."
+        recovery_advice = "Add the missing path field; keep or adjust blocks according to any separate size/JSON warning."
+        next_call_fact = "The previous Office call was missing `path`; retry the same action with the target path and intended blocks."
     elif is_missing_blocks:
         hint = (
             "The `blocks` field is empty or missing. It must be a non-empty array such as [{type:..., text:...}, ...]. "
-            "For office.append/write, prefer 6-30 blocks per call.\n"
-            "blocks 需要是非空数组。"
+            "Current Office limits are adaptive; the tool result reports the active block and text ceilings when size matters.\n"
+            "blocks 需要是非空数组；大小相关上限以工具结果中的当前限制为准。"
         )
-        recovery_advice = "Provide a non-empty blocks array (recommended 6-30 items per call)."
+        recovery_advice = "Provide a non-empty blocks array; use the current adaptive limits from tool facts when relevant."
+        next_call_fact = "The previous Office call had no usable `blocks`; provide a non-empty blocks array."
     else:
         # 多字段缺失 / action 错误
         hint = (
@@ -392,6 +405,7 @@ def _office_arg_recovery_error(action: str, required_fields: list[str]) -> str:
             "核心字段缺失；检查 JSON 与字符串转义。"
         )
         recovery_advice = "Verify all required fields are present and JSON is valid."
+        next_call_fact = "The previous Office call was missing required fields; include action/path and content fields required by that action."
 
     return _err(
         "invalid_or_empty_args",
@@ -402,7 +416,8 @@ def _office_arg_recovery_error(action: str, required_fields: list[str]) -> str:
                 "action": "retry_with_complete_args",  # 旧的 "retry_with_smaller_blocks" 是误导
                 "required_fields": required_fields,
                 "advice": recovery_advice,
-            }
+            },
+            "next_call_fact": next_call_fact,
         },
     )
 
@@ -462,7 +477,8 @@ def _office_blocks_sizing_warning(action: str, blocks: list) -> dict | None:
         "next_action_instruction": (
             f"The {action} call exceeds the current adaptive office block limits: "
             f"blocks <= {blocks_ceiling}, block.text <= {block_text_max} characters, "
-            f"total text <= {total_max} characters.{shrunk_hint}{floor_hint}\n"
+            f"total text <= {total_max} characters (compact: blocks≤{blocks_ceiling}, "
+            f"block.text≤{block_text_max}, total_text≤{total_max}).{shrunk_hint}{floor_hint}\n"
             "拆小 blocks 或正文后重试；达到封底时检查 JSON 转义。"
         ),
     }
@@ -596,7 +612,41 @@ def _attach_block_sizing_warning(payload: dict, action: str, blocks: list) -> di
             payload["granularity_nudge"] = nudge
     except Exception:
         pass
+    normalization = _office_blocks_shape_normalization_note(blocks)
+    if normalization:
+        payload["input_normalizations"] = normalization
     return payload
+
+
+def _office_blocks_shape_normalization_note(blocks: list) -> dict | None:
+    """Return compact facts for tolerated DOCX block-shape aliases.
+
+    These are not acceptance decisions. They tell the model which input shapes were
+    interpreted as the nearest supported Office schema shape so future calls can use
+    the canonical form directly.
+    """
+    if not isinstance(blocks, list):
+        return None
+    subtitle_blocks = 0
+    table_row_objects = 0
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        if b.get("_office_normalized_type_from") == "subtitle":
+            subtitle_blocks += 1
+        table_row_objects += int(b.get("_office_normalized_table_row_objects") or 0)
+    if not subtitle_blocks and not table_row_objects:
+        return None
+    facts: dict[str, Any] = {}
+    if subtitle_blocks:
+        facts["subtitle_blocks_as_paragraph"] = subtitle_blocks
+    if table_row_objects:
+        facts["table_rows_cells_objects_as_arrays"] = table_row_objects
+    facts["canonical_docx_fact"] = (
+        "DOCX blocks use type=paragraph for subtitles/plain prose; table rows are non-empty 2D arrays, "
+        "for example rows:[[\"A\",\"B\"],[\"C\",\"D\"]]."
+    )
+    return facts
 
 
 # office 通用 helper 已抽离到 office_common.py(2026-05-20 重构);re-export 兼容。
@@ -633,7 +683,14 @@ def _save_docx_atomic(doc, target: str) -> tuple[int, str | None]:
                 shutil.copy2(target, bak_path)
             except OSError:
                 pass
-        os.replace(tmp_path, target)
+        replace_err = replace_file_with_retries(tmp_path, target)
+        if replace_err is not None:
+            return 0, (
+                f"save failed: {replace_err} "
+                "The target DOCX is likely still locked by another Office/read/write operation. "
+                "Wait briefly, avoid parallel edits to the same file, then retry the same operation from the current evidence.\n"
+                "保存失败:目标 DOCX 仍被占用；请避免并行编辑同一文件，稍后基于当前证据重试。"
+            )
         size = os.path.getsize(target) if os.path.exists(target) else 0
         return size, None
     except Exception as e:
@@ -696,7 +753,8 @@ async def _docx_write(workspace_dir: str, target: str, rel_path: str, args: dict
             return None, save_err
         return size, None
 
-    size, err = await asyncio.to_thread(_do_write)
+    async with docx_write_lock(target):
+        size, err = await asyncio.to_thread(_do_write)
     if err:
         return _err(err)
     payload = _attach_block_sizing_warning({
@@ -731,7 +789,8 @@ async def _docx_append(workspace_dir: str, target: str, rel_path: str, args: dic
             return save_err
         return None
 
-    err = await asyncio.to_thread(_do_append)
+    async with docx_write_lock(target):
+        err = await asyncio.to_thread(_do_append)
     if err:
         return _err(err)
 
@@ -891,7 +950,8 @@ async def _docx_replace_section(
             "orphan_cleanup": orphan_info,
         }, None
 
-    info, err = await asyncio.to_thread(_do)
+    async with docx_write_lock(target):
+        info, err = await asyncio.to_thread(_do)
     if err:
         return _err(err)
     return json.dumps({
@@ -1026,7 +1086,8 @@ async def _docx_replace_blocks(
             "orphan_cleanup": orphan_info,
         }, None
 
-    info, err = await asyncio.to_thread(_do)
+    async with docx_write_lock(target):
+        info, err = await asyncio.to_thread(_do)
     if err:
         return _err(err)
     return json.dumps({
@@ -1115,11 +1176,144 @@ async def _docx_replace_block(
             "orphan_cleanup": orphan_info,
         }, None
 
-    info, err = await asyncio.to_thread(_do)
+    async with docx_write_lock(target):
+        info, err = await asyncio.to_thread(_do)
     if err:
         return _err(err)
     return json.dumps({
         "ok": True, "action": "replace_block", "format": "docx",
+        "path": rel_path,
+        **info,
+    }, ensure_ascii=False)
+
+
+async def _docx_fill_empty_headings(
+    workspace_dir: str, target: str, rel_path: str, args: dict,
+) -> str:
+    """Fill empty DOCX heading paragraphs in one call, optionally inserting body blocks.
+
+    The model still supplies all titles and body content. This tool only applies
+    that decided content efficiently to existing empty Heading paragraphs.
+    """
+    if not os.path.isfile(target):
+        return _err(f"file not found: {rel_path}", action="fill_empty_headings")
+    headings = args.get("headings") or []
+    if not isinstance(headings, list) or not headings:
+        return _err(
+            "headings must be a non-empty array",
+            action="fill_empty_headings",
+            hint=(
+                "Pass headings:[{text:'...', level:1, after_blocks:[{type:'paragraph', text:'...'}]}, ...]. "
+                "Entries are applied to empty heading paragraphs in document order; level is optional and used as a guard."
+            ),
+        )
+
+    cleaned: list[dict] = []
+    for i, item in enumerate(headings):
+        if not isinstance(item, dict):
+            return _err(f"headings[{i}] must be an object", action="fill_empty_headings")
+        text = str(item.get("text") or "").strip()
+        if not text:
+            return _err(f"headings[{i}].text is required", action="fill_empty_headings")
+        level = item.get("level")
+        if level is not None:
+            try:
+                level = max(1, min(9, int(level)))
+            except (TypeError, ValueError):
+                return _err(f"headings[{i}].level must be an integer", action="fill_empty_headings")
+        after_blocks = item.get("after_blocks") or item.get("blocks_after") or []
+        if after_blocks and not isinstance(after_blocks, list):
+            return _err(f"headings[{i}].after_blocks must be an array", action="fill_empty_headings")
+        cleaned.append({"text": text, "level": level, "after_blocks": after_blocks})
+
+    def _style_level(paragraph) -> int | None:
+        name = str(getattr(getattr(paragraph, "style", None), "name", "") or "")
+        if "heading" not in name.lower():
+            return None
+        m = re.search(r"(\d+)", name)
+        return int(m.group(1)) if m else 1
+
+    def _set_paragraph_text(paragraph, text: str) -> None:
+        while len(paragraph.runs) > 1:
+            paragraph._p.remove(paragraph.runs[-1]._r)
+        if paragraph.runs:
+            paragraph.runs[0].text = text
+        else:
+            paragraph.add_run(text)
+
+    def _do():
+        try:
+            doc = _open_docx_detached(target)
+        except Exception as e:
+            return None, _docx_open_error(e, rel_path)
+
+        targets = []
+        for idx, paragraph in enumerate(doc.paragraphs):
+            level = _style_level(paragraph)
+            if level is None:
+                continue
+            if str(paragraph.text or "").strip():
+                continue
+            targets.append((idx, paragraph, level))
+        if len(cleaned) > len(targets):
+            return None, (
+                f"received {len(cleaned)} heading entries, but only {len(targets)} empty heading paragraph(s) exist. "
+                "Read the document structure and retry with the exact remaining empty headings."
+            )
+
+        filled = []
+        body = doc.element.body
+        for item, (idx, paragraph, actual_level) in zip(cleaned, targets):
+            expected_level = item.get("level")
+            if expected_level is not None and expected_level != actual_level:
+                return None, (
+                    f"heading level mismatch at paragraph {idx}: expected level {expected_level}, actual level {actual_level}. "
+                    "Read the document structure and align the heading list before retrying."
+                )
+            _set_paragraph_text(paragraph, item["text"])
+            anchor = paragraph._p
+            after_blocks = item.get("after_blocks") or []
+            if after_blocks:
+                before_list = list(body.iterchildren())
+                err = _apply_blocks_docx(doc, workspace_dir, after_blocks)
+                if err:
+                    return None, f"after_blocks for heading {idx} failed: {err}"
+                new_elements = [
+                    c for c in body.iterchildren()
+                    if not any(c is x for x in before_list)
+                ]
+                for ne in new_elements:
+                    parent = ne.getparent()
+                    if parent is not None:
+                        parent.remove(ne)
+                    anchor.addnext(ne)
+                    anchor = ne
+            filled.append({
+                "paragraph_index": idx,
+                "level": actual_level,
+                "text": item["text"],
+                "after_blocks": len(after_blocks),
+            })
+
+        _, save_err = _save_docx_atomic(doc, target)
+        if save_err:
+            return None, save_err
+        remaining = 0
+        for paragraph in doc.paragraphs:
+            if _style_level(paragraph) is not None and not str(paragraph.text or "").strip():
+                remaining += 1
+        return {
+            "filled_count": len(filled),
+            "remaining_empty_headings": remaining,
+            "filled": filled[:80],
+        }, None
+
+    async with docx_write_lock(target):
+        info, err = await asyncio.to_thread(_do)
+    if err:
+        return _err(err)
+    return json.dumps({
+        "ok": True, "action": "fill_empty_headings", "format": "docx",
         "path": rel_path,
         **info,
     }, ensure_ascii=False)
@@ -1194,7 +1388,8 @@ async def _docx_insert_block(
             "added_blocks": len(blocks),
         }, None
 
-    info, err = await asyncio.to_thread(_do)
+    async with docx_write_lock(target):
+        info, err = await asyncio.to_thread(_do)
     if err:
         return _err(err)
     return json.dumps({
@@ -1956,6 +2151,19 @@ def _apply_blocks_docx(doc, workspace_dir: str, blocks: list) -> str | None:
                 btype = "equation"
             elif "text" in b or "runs" in b:
                 btype = "paragraph"
+        if btype in {"numbered_list", "ordered_list"}:
+            btype = "list"
+            b.setdefault("ordered", True)
+        elif btype in {"bullet_list", "bulleted_list", "unordered_list"}:
+            btype = "list"
+        elif btype == "subtitle":
+            btype = "paragraph"
+            b["_office_normalized_type_from"] = "subtitle"
+        else:
+            heading_match = re.fullmatch(r"h(?:eading)?([1-6])", btype)
+            if heading_match:
+                btype = "heading"
+                b.setdefault("level", int(heading_match.group(1)))
 
         if btype == "heading":
             level = max(1, min(6, int(b.get("level", 1))))
@@ -2074,9 +2282,32 @@ def _apply_table_docx(doc, workspace_dir: str, idx: int, b: dict) -> str | None:
     现在: 把每个 cell 文本送进 _parse_rich_paragraph 渲染公式 (Unicode 优先,
     PNG 兜底), 再把结果 runs 应用到 cell 的第 1 个 paragraph。
     """
-    rows = b.get("rows") or []
+    rows = _normalize_docx_table_rows_shape(b)
     if not isinstance(rows, list) or not rows:
         return f"block[{idx}].rows must be a non-empty 2D array"
+    bad_rows: list[dict] = []
+    for r_idx, row in enumerate(rows):
+        if not isinstance(row, list):
+            bad_rows.append({"row_index": r_idx, "issue": "row_not_array", "value_type": type(row).__name__})
+            continue
+        non_empty_cells = []
+        for c_idx, cell_val in enumerate(row):
+            cell_text, _ = _normalize_docx_table_cell(cell_val)
+            if str(cell_text or "").strip():
+                non_empty_cells.append(c_idx)
+        if not non_empty_cells:
+            bad_rows.append({
+                "row_index": r_idx,
+                "issue": "row_has_no_non_empty_cells",
+                "cell_count": len(row),
+            })
+    if bad_rows:
+        return (
+            f"block[{idx}].rows contains invalid table row(s): {json.dumps(bad_rows[:8], ensure_ascii=False)}. "
+            "Each row must be an array and contain at least one non-empty cell after text/value/content normalization. "
+            "Remove empty rows or represent explanatory prose as paragraph/list blocks; keep real table rows as a 2D array.\n"
+            "表格行需为数组，且每行至少有一个归一化后的非空单元格；空行请删除，说明性文字用 paragraph/list。"
+        )
     n_cols = max((len(r) if isinstance(r, list) else 0) for r in rows)
     if n_cols == 0:
         return (
@@ -2111,6 +2342,30 @@ def _apply_table_docx(doc, workspace_dir: str, idx: int, b: dict) -> str | None:
                 for run in p.runs:
                     run.bold = True
     return None
+
+
+def _normalize_docx_table_rows_shape(block: dict) -> list:
+    """Normalize tolerated table row aliases into the canonical 2D array.
+
+    The canonical model-visible schema is rows:[[...], ...]. Logs show models may
+    naturally emit rows:[{"cells":[...]}]. That carries the same table data, so
+    the tool accepts it and reports the normalization in the success payload.
+    """
+    rows = block.get("rows") or []
+    if not isinstance(rows, list):
+        return rows
+    normalized: list = []
+    changed = 0
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("cells"), list):
+            normalized.append(row.get("cells") or [])
+            changed += 1
+        else:
+            normalized.append(row)
+    if changed:
+        block["rows"] = normalized
+        block["_office_normalized_table_row_objects"] = changed
+    return normalized
 
 
 def _configure_docx_table_geometry(tbl, block: dict, n_cols: int) -> None:
@@ -3889,6 +4144,7 @@ _DISPATCH = {
     ("docx", "replace_section"): _docx_replace_section,
     ("docx", "replace_block"): _docx_replace_block,
     ("docx", "replace_blocks"): _docx_replace_blocks,  # 2026-05-18 P201
+    ("docx", "fill_empty_headings"): _docx_fill_empty_headings,
     ("docx", "delete_block"): _docx_delete_block,
     ("docx", "insert_block"): _docx_insert_block,
     ("docx", "extract_images"): _docx_extract_images,

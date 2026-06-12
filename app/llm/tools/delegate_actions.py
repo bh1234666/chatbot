@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 
 def _sync_delegate_globals() -> None:
@@ -55,6 +56,47 @@ def _effective_delegate_trace_id(trace_id: str, helper_specs: list[dict] | None 
     return f"delegate-call-{digest or 'empty'}"
 
 
+_TOP_LEVEL_TASK_FIELDS = (
+    "task_id",
+    "prompt",
+    "kind",
+    "mode",
+    "framework",
+    "dispatch_reason",
+    "resume",
+    "fork_from",
+    "input_files",
+    "expected_outputs",
+    "acceptance_checks",
+    "helper_think",
+)
+
+
+def _normalize_top_level_delegate_task_args(args: dict) -> bool:
+    """Wrap a single top-level helper spec into tasks=[...].
+
+    This repairs a schema-shape error without changing the model's task
+    decision: task_id/prompt/kind/output/check fields are preserved exactly and
+    only moved under the canonical `tasks` array.
+    """
+    if not isinstance(args, dict):
+        return False
+    if args.get("tasks"):
+        return False
+    if not any(args.get(key) not in (None, "", [], {}) for key in ("task_id", "prompt")):
+        return False
+    task = {
+        key: args.get(key)
+        for key in _TOP_LEVEL_TASK_FIELDS
+        if key in args and args.get(key) not in (None, "", [], {})
+    }
+    if not task:
+        return False
+    args["tasks"] = [task]
+    args["_normalized_top_level_task"] = True
+    return True
+
+
 def _publish_helper_blocked_event(
     payload: dict,
     helper_specs: list[dict],
@@ -104,55 +146,6 @@ def _publish_helper_blocked_event(
         pass
 
 
-def _enrich_framework_block_payload(payload: dict, helper_specs: list[dict]) -> dict:
-    """Add actionable recovery fields to guard framework-block payloads."""
-    if not isinstance(payload, dict):
-        return payload
-    if payload.get("error") != "framework_first_required" and payload.get("error_kind") != "framework_first_required":
-        return payload
-    payload.setdefault("error_kind", "framework_first_required")
-    payload["instruction"] = (
-        "Create the shared framework or evidence contract as a focused helper output, then respawn the blocked helpers with that contract in their `framework` field. "
-        "The main process coordinates the contract, delegates focused artifact creation, and verifies the helper-produced contract before fan-out.\n\n"
-        "共享框架/证据契约应由小型 helper 产出；主进程负责协调和验收，再用 framework 字段派发分片。"
-    )
-    payload["recovery_plan"] = payload.get("recovery_plan") or [
-        "Spawn one focused framework-contract helper.",
-        "Wait until the contract output is complete and inspectable.",
-        "Pass the compact contract text through each blocked helper's `framework` field.",
-        "Respawn bounded helpers with the same logical task fields and concrete expected outputs.",
-    ]
-    kinds = {
-        str(spec.get("kind") or "").strip().lower()
-        for spec in (helper_specs or [])
-        if isinstance(spec, dict)
-    }
-    framework_kind = "edit" if kinds and kinds <= {"read", "inventory", "file_summary", "project_map", "impact_review", "summarize"} else "code"
-    payload.setdefault("suggested_next_call", {
-        "tool": "delegate",
-        "action": "spawn",
-        "tasks": [{
-            "task_id": "shared_framework_contract",
-            "kind": framework_kind,
-            "mode": "easy",
-            "prompt": (
-                "Create one compact shared framework contract for the blocked helper batch. "
-                "Define the evidence schema, source coverage fields, output filenames, ownership, validation checks, and merge order. "
-                "Produce only the contract file; do not read or summarize all source files in this helper."
-            ),
-            "expected_outputs": ["_helpers_shared/shared_framework_contract.md"],
-            "acceptance_checks": [
-                "contract names every downstream evidence output",
-                "contract defines read status, missing-resource, and validation fields",
-                "contract is compact enough to pass through later helpers' framework field",
-            ],
-        }],
-    })
-    if "next_delegate_shape" not in payload:
-        payload["next_delegate_shape"] = payload["suggested_next_call"]
-    return payload
-
-
 def _attention_fact_from_guard_record(record: dict, *, source: str) -> dict:
     """Convert deterministic guard records into neutral facts for the LLM guard."""
     if not isinstance(record, dict):
@@ -165,36 +158,239 @@ def _attention_fact_from_guard_record(record: dict, *, source: str) -> dict:
     fact = {
         "kind": "guard_attention_fact",
         "source": source,
-        "needs_attention": True,
+        # Reassuring facts (e.g. legitimate candidate reuse) may set
+        # needs_attention=False explicitly; default stays True.
+        "needs_attention": bool(record.get("needs_attention", True)),
         "task_id": record.get("task_id") or "",
     }
     for key in (
         "reason",
         "current_kind",
-        "suggested_kind",
-        "suggested_mode",
         "mode_reason",
-        "split_into",
-        "should_split",
+        "expected_outputs",
+        "expected_outputs_count",
+        "prompt_len",
+        "signals",
+        "details",
+        "issue",
+        "signals",
+        "workspace_input_files",
+        "workspace_input_count",
     ):
         value = record.get(key)
         if value not in (None, "", [], {}):
-            neutral_key = {
-                "suggested_kind": "candidate_kind",
-                "suggested_mode": "candidate_mode",
-                "split_into": "candidate_boundaries",
-            }.get(key, key)
-            fact[neutral_key] = value
+            fact[key] = value
+    split_values = record.get("observed_split_boundary_names") or record.get("split_into")
+    if split_values not in (None, "", [], {}):
+        fact["observed_split_boundary_names"] = split_values
+    observed_kind = record.get("observed_helper_kind_name") or record.get("suggested_kind")
+    if observed_kind not in (None, "", [], {}):
+        fact["observed_helper_kind_name"] = observed_kind
+    observed_mode = record.get("observed_helper_mode_name") or record.get("suggested_mode")
+    if observed_mode not in (None, "", [], {}):
+        fact["observed_helper_mode_name"] = observed_mode
     return fact
 
 
-def _attach_guard_attention_facts(helper_specs: list[dict]) -> list[dict]:
+def _explicit_workspace_input_file_facts(helper_specs: list[dict], main_workspace: str = "") -> list[dict]:
+    """Return neutral facts for explicit input_files already present in the main workspace.
+
+    Blocked direct-write candidates and other staged workspace evidence are not
+    project-root files. When the main process explicitly passes such paths as
+    input_files, the guard needs the existence fact before judging the handoff.
+
+    显式 input_files 若已在主工作区存在，只向守卫陈述可用事实，不替守卫决策。
+    """
+    if not helper_specs or not main_workspace:
+        return []
+    try:
+        from pathlib import Path
+
+        workspace_root = Path(main_workspace).resolve()
+    except Exception:
+        return []
+
+    records: list[dict] = []
+    for spec in helper_specs:
+        if not isinstance(spec, dict):
+            continue
+        raw_inputs = spec.get("input_files") or spec.get("source_files") or spec.get("transferred_files") or spec.get("files") or []
+        if isinstance(raw_inputs, str):
+            inputs = [raw_inputs]
+        elif isinstance(raw_inputs, (list, tuple, set)):
+            inputs = list(raw_inputs)
+        else:
+            inputs = []
+        available: list[dict] = []
+        for raw in inputs[:60]:
+            norm = str(raw or "").replace("\\", "/").strip().strip("`\"'").lstrip("./")
+            if not norm or norm.startswith("../") or "/../" in f"/{norm}/":
+                continue
+            try:
+                candidate = (workspace_root / norm).resolve()
+                candidate.relative_to(workspace_root)
+            except Exception:
+                continue
+            if not candidate.is_file():
+                continue
+            try:
+                size = candidate.stat().st_size
+            except OSError:
+                size = None
+            available.append({
+                "path": norm,
+                "size_bytes": size,
+                "workspace_relative": True,
+            })
+            if len(available) >= 20:
+                break
+        if not available:
+            continue
+        records.append({
+            "task_id": spec.get("task_id") or "",
+            "issue": "explicit_input_files_exist_in_main_workspace",
+            "workspace_input_count": len(available),
+            "workspace_input_files": available,
+            "details": (
+                "These explicit input_files already exist in the main workspace. They may be staged project copies, "
+                "preserved candidates, or other workspace evidence; this is an availability fact for the guard."
+            ),
+        })
+    return records
+
+
+def _blocked_create_candidate_reuse_facts(helper_specs: list[dict]) -> list[dict]:
+    """Return neutral guard facts for explicit blocked-create candidate reuse.
+
+    A preserved `.blocked_creates/...` candidate passed via input_files is an
+    availability and provenance fact for main-authored document content.
+
+    候选文件经 input_files 显式复用属于正常恢复路径；给守卫一个中性事实而不是让它猜测来源。
+    """
+    facts: list[dict] = []
+    for spec in helper_specs or []:
+        if not isinstance(spec, dict):
+            continue
+        candidates = [
+            str(x).replace("\\", "/")
+            for x in (spec.get("input_files") or [])
+            if ".blocked_creates/" in str(x).replace("\\", "/")
+        ]
+        if not candidates:
+            continue
+        facts.append({
+            "kind": "guard_observation",
+            "issue": "blocked_create_candidate_reuse",
+            "needs_attention": False,
+            "task_id": str(spec.get("task_id") or "").strip(),
+            "workspace_input_files": candidates[:6],
+            "details": (
+                "These input_files are preserved candidates from an earlier blocked direct create. "
+                "Their content was authored by the main workflow from evidence it had already read. "
+                "This is an availability and provenance fact for guard judgment; the current task "
+                "evidence and dispatch reason still determine whether the delegation should run."
+            ),
+        })
+    return facts
+
+
+_BROWSER_AUTOMATION_EVIDENCE_RE = re.compile(
+    r"(?is)\b(playwright|puppeteer|selenium|chromium|chrome|firefox|webkit)\b"
+    r"|(?:host[-\s]?browser|browser\s+automation|scripted\s+browser|page\.goto)"
+    r"|(?:宿主浏览器|浏览器自动化)"
+)
+
+
+def _browser_automation_kind_facts(helper_specs: list[dict]) -> list[dict]:
+    """Return neutral guard facts for browser evidence that needs runtime commands.
+
+    This does not allow or block a delegation. It gives the guard the concrete
+    capability fact so browser evidence collection is not mistaken for ordinary
+    material reading merely because the final evidence is text.
+
+    浏览器自动化取证需要命令/runtime 能力；这里只向守卫陈述事实。
+    """
+    facts: list[dict] = []
+    for spec in helper_specs or []:
+        if not isinstance(spec, dict):
+            continue
+        text = "\n".join(
+            str(spec.get(key) or "")
+            for key in ("prompt", "framework", "dispatch_reason")
+        )
+        checks = spec.get("acceptance_checks") or spec.get("checks") or []
+        if isinstance(checks, (list, tuple, set)):
+            text += "\n" + "\n".join(str(item or "") for item in checks)
+        else:
+            text += "\n" + str(checks or "")
+        if not _BROWSER_AUTOMATION_EVIDENCE_RE.search(text):
+            continue
+        facts.append({
+            "kind": "guard_observation",
+            "issue": "browser_automation_evidence_capability",
+            "needs_attention": False,
+            "task_id": str(spec.get("task_id") or "").strip(),
+            "current_kind": str(spec.get("kind") or "").strip(),
+            "details": (
+                "This helper envelope explicitly asks for browser/host-browser or Playwright/Puppeteer/Selenium/"
+                "Chromium-style evidence. That evidence needs browser automation or command runtime capability, "
+                "so kind='code' can be appropriate even when the extracted facts are textual. Plain HTTP fetches, "
+                "source reads, or docs-file reads are separate evidence types unless the active task accepts them."
+            ),
+        })
+    return facts
+
+
+def _attach_guard_attention_facts(helper_specs: list[dict], *, trace_id: str = "", main_workspace: str = "") -> list[dict]:
     """Attach non-LLM deterministic quality facts before the LLM guard judges."""
     if not helper_specs:
         return helper_specs
+    _sync_delegate_globals()
     _deterministic_splits = _deterministic_source_read_split_recommendations(helper_specs)
     _deterministic_kinds = _deterministic_kind_recommendations(helper_specs)
-    if not (_deterministic_splits or _deterministic_kinds):
+    _compact_text_splits = _deterministic_compact_text_bundle_split_observations(helper_specs)
+    try:
+        _compact_text_owner_facts = _deterministic_compact_text_owner_observations(helper_specs)
+    except Exception as exc:
+        debug.log("delegate.guard_attention.compact_owner_failed", f"{type(exc).__name__}: {exc}")
+        _compact_text_owner_facts = []
+    _workspace_input_facts = _explicit_workspace_input_file_facts(helper_specs, main_workspace)
+    _candidate_reuse_facts = _blocked_create_candidate_reuse_facts(helper_specs)
+    _browser_automation_facts = _browser_automation_kind_facts(helper_specs)
+    _same_batch_overlaps = _deterministic_same_batch_output_overlap_observations(helper_specs)
+    _recent_overlaps = []
+    _ready_artifact_overlaps = []
+    if trace_id:
+        try:
+            _recent_overlaps = _deterministic_recent_output_overlap_observations(
+                helper_specs,
+                recent_records=_get_completion_ledger(trace_id, last_n=16),
+            )
+        except Exception as exc:
+            debug.log("delegate.guard_attention.recent_overlap_failed", f"{type(exc).__name__}: {exc}")
+            _recent_overlaps = []
+        try:
+            from app.core import agent_state as _agent_state
+            _state = _agent_state.structured_status(trace_id)
+            _ready_artifact_overlaps = _deterministic_ready_artifact_overlap_observations(
+                helper_specs,
+                ready_artifacts=list(_state.get("artifacts_ready") or []),
+            )
+        except Exception as exc:
+            debug.log("delegate.guard_attention.ready_artifact_overlap_failed", f"{type(exc).__name__}: {exc}")
+            _ready_artifact_overlaps = []
+    if not (
+        _deterministic_splits
+        or _deterministic_kinds
+        or _compact_text_splits
+        or _compact_text_owner_facts
+        or _workspace_input_facts
+        or _candidate_reuse_facts
+        or _browser_automation_facts
+        or _same_batch_overlaps
+        or _recent_overlaps
+        or _ready_artifact_overlaps
+    ):
         return helper_specs
     by_tid = {
         str(spec.get("task_id") or "").strip(): spec
@@ -210,7 +406,81 @@ def _attach_guard_attention_facts(helper_specs: list[dict]) -> list[dict]:
         fact = _attention_fact_from_guard_record(rec, source="deterministic_kind_check")
         target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
         target.setdefault("guard_observations", []).append(fact)
+    for rec in _compact_text_splits:
+        fact = _attention_fact_from_guard_record(rec, source="compact_text_material_bundle_check")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
+    for rec in _compact_text_owner_facts:
+        fact = _attention_fact_from_guard_record(rec, source="compact_text_owner_shape_check")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
+    for rec in _workspace_input_facts:
+        fact = _attention_fact_from_guard_record(rec, source="workspace_input_file_availability")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
+    for rec in _candidate_reuse_facts:
+        fact = _attention_fact_from_guard_record(rec, source="blocked_create_candidate_reuse_check")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
+    for rec in _browser_automation_facts:
+        fact = _attention_fact_from_guard_record(rec, source="browser_automation_capability_check")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
+    for rec in _same_batch_overlaps:
+        fact = _attention_fact_from_guard_record(rec, source="same_batch_output_overlap_check")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
+    for rec in _recent_overlaps:
+        fact = _attention_fact_from_guard_record(rec, source="recent_output_overlap_check")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
+    for rec in _ready_artifact_overlaps:
+        fact = _attention_fact_from_guard_record(rec, source="ready_artifact_overlap_check")
+        target = by_tid.get(str(fact.get("task_id") or "").strip()) or batch_target
+        target.setdefault("guard_observations", []).append(fact)
     return helper_specs
+
+
+def _model_visible_warning_fact(record: dict) -> dict:
+    """Return a non-prescriptive warning fact for model-visible outputs."""
+    if not isinstance(record, dict):
+        return {"issue": "warning", "details": str(record)[:800]}
+    fact: dict = {}
+    for key, value in record.items():
+        if value in (None, "", [], {}):
+            continue
+        if key in {"suggested_action", "suggestion"}:
+            continue
+        if key in {"suggested_kind", "observed_helper_kind_name"}:
+            fact["observed_helper_kind_name"] = value
+            continue
+        if key in {"suggested_mode", "observed_helper_mode_name"}:
+            fact["observed_helper_mode_name"] = value
+            continue
+        if key in {"split_into", "observed_split_boundary_names"}:
+            fact["observed_split_boundary_names"] = value
+            continue
+        if key == "should_split":
+            continue
+        fact[key] = value
+    return fact
+
+
+def _model_visible_warning_facts(records: list[dict]) -> list[dict]:
+    """Strip symbolic recommendations before returning warnings to the LLM."""
+    return [_model_visible_warning_fact(record) for record in (records or [])]
+
+
+def _keep_guard_result_after_fact_attachment(guard_result, helper_specs: list[dict]):
+    """Return the LLM guard result unchanged.
+
+    Deterministic checks are allowed to attach neutral guard_observations before
+    the LLM guard runs. They must not become split/kind/framework decisions by
+    themselves; only the guard LLM may produce a hard planning intervention.
+
+    符号化检测只给守卫事实，不能自行生成硬拦截结论。
+    """
+    return guard_result
 
 
 async def _run_hard_pair_preflight_guard(
@@ -218,6 +488,7 @@ async def _run_hard_pair_preflight_guard(
     helper_specs: list[dict],
     trace_id: str,
     *,
+    main_workspace: str = "",
     archive_id: str = "",
     group_id: str = "",
     user_id: str = "",
@@ -245,6 +516,7 @@ async def _run_hard_pair_preflight_guard(
                 "mode": s.get("mode", "easy"),
                 "prompt": s.get("prompt", ""),
                 "framework": s.get("framework", ""),
+                "dispatch_reason": s.get("dispatch_reason", ""),
                 "input_files": s.get("input_files", []),
                 "expected_outputs": s.get("expected_outputs", []),
                 "acceptance_checks": s.get("acceptance_checks", []),
@@ -252,12 +524,17 @@ async def _run_hard_pair_preflight_guard(
             }
             for s in _guard_specs
         ]
-        _guard_specs = _attach_guard_attention_facts(_guard_specs)
+        _guard_specs = _attach_guard_attention_facts(
+            _guard_specs,
+            trace_id=trace_id,
+            main_workspace=main_workspace,
+        )
         _guard_result = await _persona_consent_guard(
             _current_persona_excerpt.get(""),
             _current_user_message.get(""),
             _guard_specs,
         )
+        _guard_result = _keep_guard_result_after_fact_attachment(_guard_result, _guard_specs)
         from app.llm.tools.delegate_wait import _build_guard_intervention
         _effective_trace = _effective_delegate_trace_id(trace_id, _guard_specs)
         _payload = await _build_guard_intervention(
@@ -267,7 +544,6 @@ async def _run_hard_pair_preflight_guard(
             helper_specs=_guard_specs,
         )
         if _payload is not None:
-            _payload = _enrich_framework_block_payload(_payload, _guard_specs)
             _payload["helpers_initially_spawned"] = 0
             _payload["preflight_guard"] = True
             _publish_helper_blocked_event(
@@ -298,6 +574,7 @@ async def _run_delegate_preflight_guard(
     helper_specs: list[dict],
     trace_id: str,
     *,
+    main_workspace: str = "",
     archive_id: str = "",
     group_id: str = "",
     user_id: str = "",
@@ -328,6 +605,7 @@ async def _run_delegate_preflight_guard(
                 "mode": s.get("mode", "easy"),
                 "prompt": s.get("prompt", ""),
                 "framework": s.get("framework", ""),
+                "dispatch_reason": s.get("dispatch_reason", ""),
                 "input_files": s.get("input_files", []),
                 "expected_outputs": s.get("expected_outputs", []),
                 "acceptance_checks": s.get("acceptance_checks", []),
@@ -335,12 +613,17 @@ async def _run_delegate_preflight_guard(
             }
             for s in _guard_specs
         ]
-        _guard_specs = _attach_guard_attention_facts(_guard_specs)
+        _guard_specs = _attach_guard_attention_facts(
+            _guard_specs,
+            trace_id=trace_id,
+            main_workspace=main_workspace,
+        )
         _guard_result = await _persona_consent_guard(
             _current_persona_excerpt.get(""),
             _current_user_message.get(""),
             _guard_specs,
         )
+        _guard_result = _keep_guard_result_after_fact_attachment(_guard_result, _guard_specs)
         from app.llm.tools.delegate_wait import _build_guard_intervention
         _effective_trace = _effective_delegate_trace_id(trace_id, _guard_specs)
         _payload = await _build_guard_intervention(
@@ -350,7 +633,6 @@ async def _run_delegate_preflight_guard(
             helper_specs=_guard_specs,
         )
         if _payload is not None:
-            _payload = _enrich_framework_block_payload(_payload, _guard_specs)
             _payload["helpers_initially_spawned"] = 0
             _payload["preflight_guard"] = True
             _publish_helper_blocked_event(
@@ -405,6 +687,7 @@ def _auto_fetch_environment_workspace_refs(main_workspace: str, tasks: list[dict
             project_root=project_root,
         )
         refs: set[str] = set()
+        explicit_refs: set[str] = set()
         context_refs: set[str] = set()
         visual_doc_exts = _env_resources.VISUAL_DOC_EXTS
         code_text_exts = _env_resources.CODE_TEXT_EXTS
@@ -416,7 +699,7 @@ def _auto_fetch_environment_workspace_refs(main_workspace: str, tasks: list[dict
             _re.IGNORECASE,
         )
 
-        def _add_explicit_ref(raw_ref: str, *, from_env_prefix: bool = False) -> None:
+        def _add_explicit_ref(raw_ref: str, *, from_env_prefix: bool = False, from_task_field: bool = False) -> None:
             text = str(raw_ref or "").replace("\\", "/").strip().strip("`\"'")
             if not text:
                 return
@@ -442,9 +725,18 @@ def _auto_fetch_environment_workspace_refs(main_workspace: str, tasks: list[dict
                 return
             if source.is_file() or source.is_dir():
                 refs.add(text)
+                if from_task_field:
+                    explicit_refs.add(text)
 
         for task in tasks:
             prompt = str(task.get("prompt") or "").replace("\\", "/")
+            for field in ("input_files", "source_files", "transferred_files", "files"):
+                raw_values = task.get(field) if isinstance(task, dict) else None
+                if isinstance(raw_values, (list, tuple, set)):
+                    for raw_ref in raw_values:
+                        _add_explicit_ref(str(raw_ref), from_env_prefix=True, from_task_field=True)
+                elif isinstance(raw_values, str):
+                    _add_explicit_ref(raw_values, from_env_prefix=True, from_task_field=True)
             for match in _re.finditer(
                 r"_env/([^`\"'<>|\r\n]+?\.(?:"
                 + "|".join(known_exts)
@@ -618,6 +910,7 @@ def _auto_fetch_environment_workspace_refs(main_workspace: str, tasks: list[dict
                 continue
             if source.is_dir():
                 copied = 0
+                explicit_dir = rel in explicit_refs
                 for child in sorted(source.rglob("*")):
                     if not child.is_file():
                         continue
@@ -630,7 +923,7 @@ def _auto_fetch_environment_workspace_refs(main_workspace: str, tasks: list[dict
                     if ext not in source_material_exts:
                         skipped.append({"path": child_rel, "reason": "directory_source_type_skipped"})
                         continue
-                    if output_name_re.search(_Path(child_rel).name):
+                    if output_name_re.search(_Path(child_rel).name) and not explicit_dir and child_rel not in explicit_refs:
                         skipped.append({"path": child_rel, "reason": "looks_like_generated_output"})
                         continue
                     _fetch_one(child_rel)
@@ -886,6 +1179,7 @@ async def _spawn_helpers_only(
         guard_args or {"_paired_task_map": {s["task_id"]: s.get("paired_with") for s in initial_helper_specs if s.get("paired_with")}},
         initial_helper_specs,
         debug.current_trace_id() or "unknown",
+        main_workspace=main_workspace,
         archive_id=archive_id,
         group_id=group_id,
         user_id=user_id,
@@ -946,8 +1240,10 @@ async def _spawn_helpers_only(
             kind=spec.get("kind", "code"),
             mode=spec.get("mode", "normal"),  # 2026-05-12 P20
             helper_think=helper_think,
+            input_files=spec.get("input_files") or [],
             expected_outputs=spec.get("expected_outputs") or [],  # 1.C
             write_scopes=spec.get("write_scopes") or spec.get("expected_outputs") or [],
+            acceptance_checks=spec.get("acceptance_checks") or [],
             batch_sibling_outputs=_siblings_only,  # 2026-05-15 P98
         ))
         await _register_helper_with_autoclean(
@@ -1002,6 +1298,105 @@ def _log_delegate_start_event(initial_helper_specs: list[dict]) -> None:
             "kind": s.get("kind"),
         } for s in initial_helper_specs],
     )
+
+
+async def _already_completed_delegate_response(
+    *,
+    trace_id: str,
+    main_owner: str,
+    main_workspace: str,
+    task_ids: list[str],
+    note: str,
+) -> dict:
+    """Return completed-task facts for duplicate delegate attempts.
+
+    Duplicate task_id dispatch is usually a coordinator attention failure, not a
+    new helper failure. Present recovered helper facts in the same shape as a
+    clean delegate result when possible so the main model can continue from
+    producer-owned evidence instead of treating the duplicate block as work to
+    repair.
+    """
+    _sync_delegate_globals()
+    recovered: list[dict] = []
+    unrecovered: list[str] = []
+    for tid in task_ids:
+        try:
+            result = await _recover_completed_result_for_collect(
+                trace_id,
+                tid,
+                main_owner=main_owner,
+                main_workspace=main_workspace,
+            )
+        except Exception:
+            log.exception("duplicate completed result recovery failed for %s", tid)
+            result = None
+        if isinstance(result, dict) and result:
+            result = dict(result)
+            result.setdefault("task_id", tid)
+            result.setdefault("recovered_from_duplicate_dispatch", True)
+            recovered.append(result)
+        else:
+            unrecovered.append(tid)
+
+    success_count = sum(
+        1
+        for result in recovered
+        if result.get("ok") and not result.get("interrupted") and not result.get("stuck")
+    )
+    incomplete_count = len([result for result in recovered if not result.get("ok")]) + len(unrecovered)
+    response = {
+        "ok": True,
+        "already_completed": True,
+        "duplicate_task_ids": task_ids,
+        "helpers_initially_spawned": 0,
+        "helpers_completed": len(recovered),
+        "helpers_still_running": 0,
+        "task_ok": bool(recovered) and success_count > 0 and incomplete_count == 0,
+        "success_count": success_count,
+        "incomplete_count": incomplete_count,
+        "results": recovered,
+        "note": note,
+        "_duplicate_completed_fact": (
+            "The requested task_id(s) already completed in this trace. No helper was spawned. "
+            "Recovered results, if present, are the relevant producer-owned helper evidence. "
+            "Continue from those facts unless outputs are missing, warnings/blockers remain, "
+            "or the active task requires a semantically different helper with a new task_id.\n"
+            "这些 task_id 已在本 trace 完成；未启动新 helper。若已恢复结果，请把它们作为生产者自有证据继续。"
+        ),
+    }
+    if unrecovered:
+        response["unrecovered_completed_task_ids"] = unrecovered
+        response["_unrecovered_completed_fact"] = (
+            "Some completed task_id(s) had no recoverable helper result. This is an evidence gap, "
+            "not proof the work failed. Use existing workspace/output facts, collect/status facts, "
+            "or dispatch a new semantically named helper only if the active acceptance contract still has a gap.\n"
+            "部分已完成 task_id 无可恢复结果；这是证据缺口，不等于工作失败。"
+        )
+    if (
+        recovered
+        and incomplete_count == 0
+        and all(
+            result.get("_post_helper_action") == "output_json_directly"
+            for result in recovered
+            if result.get("ok")
+        )
+    ):
+        response["_stage_status"] = "clean_helper_batch"
+        response["_stage_evidence_facts"] = (
+            "The duplicate dispatch resolved to clean producer-self-verified helper completion facts. "
+            "Trust the helper-owned content judgment and avoid respawning or re-reading helper-owned artifacts "
+            "merely to validate them again. Handle only separate boundaries such as project apply/diff, "
+            "missing requested outputs, warnings/contradictions, or explicit display requests; send helper-owned "
+            "verifier/build/acceptance gaps to the producer helper or a verify helper.\n"
+            "重复派发已解析为干净 helper 完成事实；信任 helper 产物判断，仅处理独立边界。"
+        )
+        response["_completion_guidance"] = (
+            response["_stage_evidence_facts"]
+            + "\nIf no separate boundary remains in the active task, the next step is final synthesis from these compact facts, not another helper/content read.\n"
+            "若当前任务没有独立边界，下一步是基于这些精简事实收尾，而不是再读内容或重派。"
+        )
+    return response
+
 
 async def _handle_delegate_spawn_async(
     main_workspace: str, args: dict,
@@ -1253,12 +1648,11 @@ async def _handle_delegate_spawn_async(
                     + "\n\n引用文件缺少生产者；先补资源或调整依赖顺序。"
                 ),
                 "unsatisfied_files": _unsatisfied,
-                "suggested_action": "wait_or_spawn_producer",
-                "suggestion": (
-                    "Choose one recovery path: spawn the producer first and wait for outputs_complete=true; "
-                    "include a weak producer in the same batch with declared expected_outputs and let the consumer request_resource if needed; "
-                    "or treat the reference as non-material only when it is clearly template text rather than a real dependency.\n\n"
-                    "先确认引用是否真实依赖；真实依赖要有 producer 或等待完成。"
+                "observed_dependency_gap_fact": (
+                    "The referenced filenames are not present in completed helper outputs and are not declared as expected outputs "
+                    "in this spawn batch. They may be real missing dependencies, non-material template text, or resources that "
+                    "need an explicit producer/request path.\n\n"
+                    "观察到引用文件暂无已完成产物或本批生产者；可能是真依赖、模板文本或需显式补资源。"
                 ),
             })
 
@@ -1315,11 +1709,10 @@ async def _handle_delegate_spawn_async(
                 ),
                 "unsatisfied_files": [f for f, _ in _intra_batch_prereq],
                 "producer_task_ids": _producer_tids,
-                "suggested_action": "sequence_producer_first",
-                "suggestion": (
-                    f"Sequence the work: spawn producer task(s) {_producer_tids}, wait_any/collect until outputs_complete=true, "
-                    f"then spawn consumer task '{_tid}'. Build-time prerequisites must exist before consumers compile, test, or import them.\n\n"
-                    "先产出接口/框架，再并行实现消费者。"
+                "observed_dependency_order_fact": (
+                    f"Build-time prerequisite producer task(s) {_producer_tids} are in the same spawn batch as consumer task '{_tid}' "
+                    "and have not completed. Headers, Makefiles, schemas, or equivalent files must exist before compile, test, or import consumers use them.\n\n"
+                    "观察到编译期依赖与消费者同批且未完成；接口/框架文件需先存在。"
                 ),
             })
 
@@ -1347,22 +1740,16 @@ async def _handle_delegate_spawn_async(
                         "多次未完成时先读最新报告并修根因；hard 是同类严谨续作，不是跨类型修复。"
                     ),
                     "previous_attempts": _prev_attempts,
-                    "suggested_action": "change_strategy",
-                    "suggestion": (
-                        f"Read the latest report for task_id='{_tid}' and identify the verified gap. "
-                        "If the workspace is still useful, resume the same task_id with a sharper prompt. "
-                        "If the method keeps failing, inspect whether the base kind, resources, dependency order, paths, and acceptance evidence are correct. "
-                        "When the same kind is still correct, keep that base kind and use mode='hard' for a stricter same-kind workflow. "
-                        "For non-code helpers, hard should mean richer evidence handling and validation, not broader tool access. "
-                        "If the boundary is too broad, split it into focused helpers. "
-                        "Completion claims should be based on verified outputs or acceptance evidence.\n\n"
-                        "先核对缺口，再按类型续跑、修流程或拆分；完成结论以验收证据为准。"
+                    "observed_retry_history_fact": (
+                        f"task_id='{_tid}' has repeated attempts without outputs_complete=true. The latest report and acceptance evidence "
+                        "are needed to distinguish a useful same-task resume from a kind/resource/dependency/path/boundary problem. "
+                        "Hard mode is same-kind stricter resource discipline, not broader tool access.\n\n"
+                        "观察到同一任务多次未完成；需结合最新报告和验收证据判断续跑、修流程或拆分。"
                     ),
                 })
 
         # 2026-05-11 P1.2: granularity_warnings 结构化(参照 Claude Code hookSpecificOutput)
-        # 旧版本只有文本 ⚠️ ...,LLM 要 parse 才知道怎么改。新版本加 issue/suggestion 字段,
-        # LLM 直接看到结构化建议,能照建议重派。
+        # 只向模型暴露结构化事实。避免 suggested_* 字段把程序启发误读成决策。
         # 多 deliverable 检测
         if len(_types_found) >= 3:
             granularity_warnings.append({
@@ -1375,12 +1762,11 @@ async def _handle_delegate_spawn_async(
                     "Use separate focused helpers when outputs require different skills or validation paths.\n\n"
                     "一个 helper 不宜同时包揽多类产物；按产物/技能拆分。"
                 ),
-                "suggested_action": "kill_and_fan_out",
-                "suggestion": (
-                    "Split into multiple focused helpers, usually one deliverable family per helper. "
-                    "Keep dependencies explicit: independent producers may run in parallel; consumers should wait "
-                    "for the required files or request resources.\n\n"
-                    "按产物族拆分；独立任务并行，依赖任务等待资源。"
+                "observed_parallel_boundary_fact": (
+                    "The prompt includes several deliverable families that may require different skills or validation paths. "
+                    "Independent producers can run in parallel when their inputs are already available; consumers need the "
+                    "required files or resource requests before assembly.\n\n"
+                    "观察到多类产物和多条验收路径；是否拆分由主进程结合依赖判断。"
                 ),
                 "deliverable_types": sorted(_types_found),
             })
@@ -1426,12 +1812,10 @@ async def _handle_delegate_spawn_async(
                     "does not consume the whole task.\n\n"
                     "多模块编译/测试应隔离；避免一个模块失败拖住整批。"
                 ),
-                "suggested_action": "fan_out_per_module",
-                "suggestion": (
-                    "Fan out by independently verifiable module or experiment. Each helper should build/test one "
-                    "unit and emit concrete evidence. After producers finish, use a merge/report helper only for "
-                    "combining validated outputs.\n\n"
-                    "先按模块并行验证，再由合并/报告 helper 汇总。"
+                "observed_parallel_boundary_fact": (
+                    "The detected build or integration command mentions multiple modules that can fail independently. "
+                    "Module-level build/test evidence can reduce cross-module recovery coupling before any later merge/report work.\n\n"
+                    "观察到多个可能独立失败的模块；模块级验证可降低恢复耦合。"
                 ),
                 "detected_signals": {
                     "gcc_multi_source": _gcc_multi,
@@ -1456,11 +1840,10 @@ async def _handle_delegate_spawn_async(
                     "多个独立实体应按实体拆分 helper。"
                 ),
                 "entity_items": [x[:30] for x in _enum_items[:6]],
-                "suggested_action": "fan_out_per_entity",
-                "suggestion": (
-                    f"Spawn focused helpers by entity. Keep each prompt narrow, name the concrete inputs and "
-                    "acceptance checks, and keep expected_outputs small and explicit.\n\n"
-                    "每个 helper 只负责一个实体，产物和验收条件写清楚。"
+                "observed_parallel_boundary_fact": (
+                    "The prompt lists several entities that appear independently implementable or verifiable. "
+                    "Concrete inputs, output filenames, and acceptance checks are needed for whichever boundary the main thread chooses.\n\n"
+                    "观察到多个实体；所选边界需要明确输入、产物和验收事实。"
                 ),
             })
 
@@ -1476,11 +1859,10 @@ async def _handle_delegate_spawn_async(
                     "A helper should have one clear work boundary and a compact acceptance target.\n\n"
                     "helper 边界应清晰，验收目标应紧凑。"
                 ),
-                "suggested_action": "consider_split",
-                "suggestion": (
-                    "Consider splitting the work into focused helpers. Use parallel helpers for independent "
-                    "work and a later synthesis helper when integration is needed.\n\n"
-                    "独立工作并行，集成工作后置。"
+                "observed_parallel_boundary_fact": (
+                    "The prompt length or expected output count is high for one helper. This may indicate multiple "
+                    "work boundaries, or it may be justified by a tightly coupled task; the main thread has the dependency context.\n\n"
+                    "观察到单 helper 输入或产物较重；是否拆分取决于耦合关系。"
                 ),
             })
 
@@ -1537,12 +1919,11 @@ async def _handle_delegate_spawn_async(
                     "检测到多独立单元；应拆成可并行、可验收的小任务。"
                 ),
                 "enum_signals": _enum_signals,
-                "suggested_action": "split_into_parallel_tasks",
-                "suggestion": (
-                    "Split into N independent helper tasks in one delegate call when the work units do not depend "
-                    "on each other. Each task should own one algorithm, module, dataset slice, or verification loop. "
-                    "Use a synthesis helper only after evidence exists.\n\n"
-                    "一批派发多个独立 helper；证据齐了再综合。"
+                "observed_parallel_boundary_fact": (
+                    "The detected units appear independently checkable from the prompt. If the active task evidence "
+                    "supports that boundary, separate helper ownership can reduce recovery coupling; if not, keep the "
+                    "current helper boundary and explain the coupling in dispatch_reason.\n\n"
+                    "观察到多个可能独立验收的单元；是否拆分由主进程结合任务证据决定。"
                 ),
             })
 
@@ -1566,14 +1947,13 @@ async def _handle_delegate_spawn_async(
                     "Use a helper kind whose tool surface matches the work.\n\n"
                     "edit 负责文档组装；代码、计算、绘图应交给对应 helper。"
                 ),
-                "suggested_action": "change_kind",
-                "suggested_kind": "draw" if _is_draw_task else "code",
-                "suggestion": (
+                "observed_helper_kind_name": "draw" if _is_draw_task else "code",
+                "observed_tool_surface_fact": (
                     (
-                        "Use kind='draw' for chart generation so the helper can validate source labels and output images.\n\n"
-                        "绘图任务交给 draw。"
+                        "The prompt names chart/image generation work that requires rendering and image-output checks.\n\n"
+                        "提示词包含绘图/图片产物事实，需要能渲染并验收图像。"
                     ) if _is_draw_task
-                    else "Use kind='code' for implementation, computation, benchmark, compile, and test work.\n\n代码/计算任务交给 code。"
+                    else "The prompt names implementation, computation, benchmark, compile, or test work that requires code-runner evidence.\n\n提示词包含代码/计算/测试事实，需要代码运行证据。"
                 ),
             })
         # 2026-05-11 P10: kind=code + 任务核心是画图 → 推荐 draw
@@ -1593,11 +1973,12 @@ async def _handle_delegate_spawn_async(
                     "The draw helper is a better fit because it validates source labels before rendering and produces image artifacts with focused checks.\n\n"
                     "核心是绘图时优先使用 draw，避免标签或字段错配。"
                 ),
-                "suggested_action": "consider_change_kind",
-                "suggested_kind": "draw",
-                "suggestion": (
-                    "Use kind='draw' when the main deliverable is an image/chart. Require it to inspect real source labels, confirm the plotted fields, and then render the requested image.\n\n"
-                    "draw 先核对真实数据标签，再生成图表。"
+                "observed_helper_kind_name": "draw",
+                "observed_tool_surface_fact": (
+                    "The main deliverable appears to be an image or chart. The next delegation should preserve the "
+                    "real source labels, plotted fields, and rendered output evidence in the helper envelope if the "
+                    "main thread chooses this boundary.\n\n"
+                    "观察到主要产物像图像/图表；若按此边界派发，应保留真实数据标签、字段和图像验收事实。"
                 ),
             })
         _has_doc_output = _has_office_document_output(_prompt, _t.get("expected_outputs") or [])
@@ -1611,11 +1992,12 @@ async def _handle_delegate_spawn_async(
                     "(docx, pptx, or xlsx). Document assembly belongs to the edit helper so outputs can be produced and validated through the document tools.\n\n"
                     "Office/正式文档产物应由 edit 负责。"
                 ),
-                "suggested_action": "change_kind",
-                "suggested_kind": "edit",
-                "suggestion": (
-                    "Use kind='edit' for document assembly. Provide a section outline, source evidence, expected output filenames, and validation checks.\n\n"
-                    "文档 helper 需要大纲、证据、文件名和验收条件。"
+                "observed_helper_kind_name": "edit",
+                "observed_tool_surface_fact": (
+                    "The requested deliverable is an Office-style document. The next delegation should preserve the "
+                    "section outline, source evidence, expected output filenames, and validation checks if the main "
+                    "thread chooses a document-assembly boundary.\n\n"
+                    "观察到 Office/正式文档产物；若按文档组装边界派发，应保留大纲、证据、文件名和验收。"
                 ),
             })
 
@@ -1643,11 +2025,11 @@ async def _handle_delegate_spawn_async(
                         "The edit helper should assemble verified image artifacts, not rediscover or recreate charts from ambiguous instructions.\n\n"
                         "嵌图任务要明确图片文件名；edit 只组装已验证图片。"
                     ),
-                    "suggested_action": "rewrite_prompt",
-                    "suggestion": (
-                        "Rewrite the prompt with explicit image filenames and their target sections. "
-                        "If charts do not exist yet, spawn a draw helper first; then pass its image outputs to edit.\n\n"
-                        "先由 draw 产图，再把明确文件名交给 edit 嵌入。"
+                    "observed_missing_artifact_reference_fact": (
+                        "The prompt mentions charts or embedded images but no concrete image filenames. If image "
+                        "artifacts already exist, pass their exact paths and target sections; if they do not exist, "
+                        "record that resource gap before document assembly.\n\n"
+                        "观察到嵌图要求缺少具体图片文件名；已有图片应传精确路径，未有则先记录资源缺口。"
                     ),
                 })
 
@@ -1687,11 +2069,10 @@ async def _handle_delegate_spawn_async(
                     "Rewrite it with concrete inputs, evidence, target files, acceptance checks, and the intended dependency position.\n\n"
                     "委派提示要具体交付输入、证据、目标文件和验收条件。"
                 ),
-                "suggested_action": "rewrite_prompt_with_specifics",
-                "suggestion": (
-                    "Before delegating, convert shared context into a self-contained worker prompt: paths, relevant facts, constraints, success criteria, and required evidence. "
-                    "Use concise references to exact artifacts instead of relying on prior conversation.\n\n"
-                    "先把上下文转成自包含任务，再交给 helper。"
+                "observed_prompt_specificity_fact": (
+                    "The helper prompt relies on prior findings instead of naming concrete paths, facts, constraints, success criteria, "
+                    "and required evidence. Helper context is isolated from the main thread except for the dispatched envelope and resources.\n\n"
+                    "观察到委派提示依赖前文；helper 只可靠接收派发信封和资源。"
                 ),
                 "matched_patterns": _matched_patterns,
             })
@@ -1814,18 +2195,12 @@ async def _handle_delegate_spawn_async(
                 "sibling_task_ids_in_history": sorted(_hist_task_set),
                 "missing_dims_by_task": {k: sorted(v) for k, v in _missing_by_task.items()},
                 "all_dims": sorted(_all_dims),
-                "suggested_action": "align_test_dimensions",
-                "suggestion": (
-                    f"Use the same benchmark matrix in every sibling prompt. Include all dimensions "
-                    f"{sorted(_all_dims)}, the same N values, the same repetition policy, and the same CSV schema. "
-                    + (
-                        f" Historical task(s) {sorted(_hist_task_set)} used different coverage; either rerun missing dimensions "
-                        f"or complete the current batch to the same matrix."
-                        if _is_cross_batch else
-                        " Copy the matrix exactly into each sibling prompt."
-                    )
-                    + "\n\n兄弟任务要使用同一矩阵、同一 CSV schema。"
-                ),
+                "observed_benchmark_matrix_fact": {
+                    "union_dimensions": sorted(_all_dims),
+                    "cross_batch": _is_cross_batch,
+                    "history_task_ids": sorted(_hist_task_set),
+                    "schema_note": "Sibling comparison outputs need compatible dimensions, N values, repetition policy, and CSV schema before charting or conclusions.",
+                },
             })
 
         # 2026-05-15 P94: 把本批的 dims 存进 registry, 供后续批 spawn 时跨批检测
@@ -1862,12 +2237,10 @@ async def _handle_delegate_spawn_async(
                     "The user-visible document artifact currently has no completed assembly owner.\n\n"
                     "用户要文档/论文/PPT，但当前批次和历史记录未显示已完成的正式文档装配产物。"
                 ),
-                "suggested_action": "document_artifact_needs_owner",
-                "suggestion": (
-                    "When supporting evidence is ready, assign a document assembly owner, typically a kind='edit' "
-                    "task with concrete input evidence, expected output path, and acceptance checks. If this batch "
-                    "only gathers evidence, record the later draw/edit steps explicitly in the plan.\n\n"
-                    "若当前批次只收集证据，应在计划中明确后续图表和文档装配归属。"
+                "observed_workflow_gap_fact": (
+                    "The current batch and completed ledger do not show a document assembly owner for the requested user-facing artifact. "
+                    "If this batch only gathers evidence, the plan still needs a later owner and acceptance evidence.\n\n"
+                    "观察到文档交付物暂无完成的装配归属；若当前只取证，计划需保留后续归属。"
                 ),
             })
         if not _had_draw_done and _user_wants_chart:
@@ -1881,11 +2254,10 @@ async def _handle_delegate_spawn_async(
                     "The requested visual artifact currently has no completed producer.\n\n"
                     "用户要图表，但当前批次和历史记录未显示已完成的可验证图片产物。"
                 ),
-                "suggested_action": "visual_artifact_needs_owner",
-                "suggestion": (
-                    "After source data is ready, assign a visual producer, typically a kind='draw' task with "
-                    "concrete data paths, chart titles, expected PNG names, and validation checks.\n\n"
-                    "图表产物需要明确数据路径、图片文件名和验收条件。"
+                "observed_workflow_gap_fact": (
+                    "The current batch and completed ledger do not show a visual producer for the requested chart or image artifact. "
+                    "A future visual boundary needs concrete data paths, image filenames, and validation evidence.\n\n"
+                    "观察到图表/图片交付物暂无完成生产者；后续视觉边界需数据路径、文件名和验收事实。"
                 ),
             })
 
@@ -1908,11 +2280,10 @@ async def _handle_delegate_spawn_async(
                     "The system cannot determine outputs_complete or run output-oriented quality checks reliably.\n\n"
                     "缺少 expected_outputs 会削弱自动验收。"
                 ),
-                "suggested_action": "add_expected_outputs",
-                "suggestion": (
-                    "Give every producer task expected_outputs with concrete filenames. This enables outputs_complete, "
-                    "outputs_missing, and quality_warnings to guide resume or fan-in decisions.\n\n"
-                    "每个生产型 helper 都要声明预期产物文件。"
+                "observed_acceptance_gap_fact": (
+                    "No task in this batch declares expected_outputs. Output-oriented completion checks, missing-output facts, "
+                    "and fan-in decisions are less reliable without concrete filenames.\n\n"
+                    "观察到整批缺少 expected_outputs；自动验收和汇总判断会变弱。"
                 ),
             })
 
@@ -1973,11 +2344,10 @@ async def _handle_delegate_spawn_async(
                 ),
                 "task_ids": _all_tids,
                 "cross_ref_pairs": _ref_pairs[:5],
-                "suggested_action": "merge_into_single_helper",
-                "suggestion": (
-                    f"Consider one combined helper, for example task_id='{list(_prefixes)[0]}_combined', with the base kind chosen by the final artifact. "
-                    "List all expected outputs and perform the dependent steps internally. Use fan-out only when tasks are genuinely independent.\n\n"
-                    "强依赖链内部串行；真独立任务才 fan-out。"
+                "observed_dependency_coupling_fact": (
+                    "The batch has a short chain of cross-task output dependencies and a small total output count. "
+                    "A single helper can be more reliable when the steps are tightly coupled; fan-out remains useful for genuinely independent work.\n\n"
+                    "观察到小型强依赖链；是否合并取决于步骤耦合和独立性。"
                 ),
             })
 
@@ -1987,113 +2357,6 @@ async def _handle_delegate_spawn_async(
     spawned: list[dict] = []
 
     try:
-        try:
-            from app.llm.tools.delegate_framework import blocking_framework_warnings
-            _trace_total = _guard_framework_block_trace_total.get(trace_id, 0)
-            _blocking_framework = blocking_framework_warnings(
-                granularity_warnings,
-                trace_total=_trace_total,
-                cap=_GUARD_SPLIT_TRACE_HARD_CAP,
-            )
-        except Exception:
-            _blocking_framework = []
-            _trace_total = 0
-        if _blocking_framework:
-            _guard_framework_block_trace_total[trace_id] = _trace_total + 1
-            _actions = {
-                str(w.get("suggested_action") or "")
-                for w in _blocking_framework
-                if isinstance(w, dict)
-            }
-            _split_existing = bool(_actions and _actions <= {"split_using_existing_framework", "split_after_framework"})
-            _error_kind = "helper_split_required" if _split_existing else "framework_first_required"
-            _reason = (
-                "Helper delegation is too concentrated for the current spawn attempt. Use the existing framework contract and split into bounded slice helpers."
-                if _split_existing
-                else "Helper delegation is too concentrated for one spawn attempt without an explicit shared framework contract."
-            )
-            _recovery_plan = (
-                [
-                    "Keep the existing shared framework contract.",
-                    "Respawn bounded slice helpers with the same `framework` field.",
-                    "Split by independent module, algorithm, chapter, source range, data shard, experiment, or verification target.",
-                    "Give each helper 1-3 concrete expected outputs.",
-                    "Merge and verify after slice helpers finish.",
-                ]
-                if _split_existing else
-                [
-                    "Create a shared framework contract first.",
-                    "If the framework already exists as files or a skeleton, extract its compact text into the next delegate call.",
-                    "Use the `framework` field when spawning slice helpers.",
-                    "Split by independent module, algorithm, chapter, source range, data shard, experiment, or verification target.",
-                    "Merge and verify after slice helpers finish.",
-                ]
-            )
-            _instruction = (
-                "The framework is sufficient, but the helper slice is too broad. Reuse the same `framework` field and respawn narrower helpers. "
-                "Each helper should own one bounded module, algorithm, chapter, source range, data shard, experiment, or verification target. "
-                "Change the work boundary rather than re-submitting the same broad helper prompt under a new task_id.\n\n"
-                "框架已经可用；当前 helper 过大。保留 framework 字段并改派明确分片。"
-                if _split_existing else
-                (
-                    "Rebuild the plan as framework-first fan-out. First produce a compact framework contract or spec "
-                    "covering interfaces/schema, outline, evidence map, ownership, validation, segment outputs, and merge order. "
-                    "If a skeleton or contract file already exists, summarize it into compact contract text. "
-                    "Then call delegate again with bounded slice helpers; each task should include the `framework` field and a narrow prompt. "
-                    "Change the work boundary rather than re-submitting the same broad helper prompt under a new task_id.\n\n"
-                    "任务过集中；先建立或提炼共享框架契约，再通过 framework 字段派发明确分片。"
-                )
-            )
-            _payload = {
-                "ok": False,
-                "error": _error_kind,
-                "error_kind": _error_kind,
-                "reason": _reason,
-                "framework_warnings": _blocking_framework,
-                "granularity_warnings": granularity_warnings,
-                "helpers_initially_spawned": 0,
-                "preflight_guard": True,
-                "recovery_plan": _recovery_plan,
-                "instruction": _instruction,
-            }
-            if not _split_existing:
-                _blocked_kinds = {
-                    str(s.get("kind") or "").strip().lower()
-                    for s in (cleaned_tasks or [])
-                    if isinstance(s, dict)
-                }
-                _framework_kind = "edit" if _blocked_kinds and _blocked_kinds <= {"read", "inventory", "file_summary", "project_map", "impact_review", "summarize"} else "code"
-                _payload["suggested_next_call"] = {
-                    "tool": "delegate",
-                    "action": "spawn",
-                    "tasks": [{
-                        "task_id": "shared_framework_contract",
-                        "kind": _framework_kind,
-                        "mode": "easy",
-                        "prompt": (
-                            "Create one compact shared framework contract for the blocked helper batch. "
-                            "Define the evidence schema, source coverage fields, output filenames, ownership, "
-                            "validation checks, and merge order. Produce only the contract file; do not read or "
-                            "summarize all source files in this helper."
-                        ),
-                        "expected_outputs": ["_helpers_shared/shared_framework_contract.md"],
-                        "acceptance_checks": [
-                            "contract names every downstream evidence output",
-                            "contract defines read status, missing-resource, and validation fields",
-                            "contract is compact enough to pass through later helpers' framework field",
-                        ],
-                    }],
-                }
-            _publish_helper_blocked_event(
-                _payload,
-                cleaned_tasks,
-                trace_id=trace_id,
-                archive_id=archive_id,
-                group_id=group_id,
-                user_id=user_id,
-            )
-            return json.dumps(_payload, ensure_ascii=False)
-
         helper_specs, register_done = await _spawn_helpers_only(
             cleaned_tasks=cleaned_tasks,
             main_workspace=main_workspace,
@@ -2111,7 +2374,7 @@ async def _handle_delegate_spawn_async(
                 _payload = json.loads(_msg)
                 if isinstance(_payload, dict) and _payload.get("preflight_guard"):
                     if granularity_warnings:
-                        _payload.setdefault("granularity_warnings", granularity_warnings)
+                        _payload.setdefault("granularity_warnings", _model_visible_warning_facts(granularity_warnings))
                     return json.dumps(_payload, ensure_ascii=False)
             except Exception:
                 pass
@@ -2252,7 +2515,7 @@ async def _handle_delegate_spawn_async(
             "ok": True,
             "action": "spawn_async",
             "spawned": spawned,
-            "granularity_warnings": granularity_warnings,
+            "granularity_warnings": _model_visible_warning_facts(granularity_warnings),
             # P14.I: 结构化 ledger summary 供主线程消化
             "ledger_summary": {
                 "completed_ok": _completed_ok_tids,
@@ -2260,14 +2523,14 @@ async def _handle_delegate_spawn_async(
             } if (_completed_ok_tids or _outputs_missing_tids) else None,
             "hint": (
                 (
-                    "Task granularity warnings are present. Follow the structured granularity_warnings field "
-                    "before waiting on these helpers:\n  "
+                    "Task granularity warning facts are present. Review the structured granularity_warnings field "
+                    "before deciding whether to wait, collect, continue, revise, or dispatch more work:\n  "
                     + "\n  ".join(
-                        f"[{w.get('issue', '?')}] task={w.get('task_id', '?')} → "
-                        f"{w.get('suggested_action', '?')}: {w.get('suggestion', '')}"
-                        for w in granularity_warnings
+                        f"[{w.get('issue', '?')}] task={w.get('task_id', '?')}: "
+                        f"{w.get('details', '')}"
+                        for w in _model_visible_warning_facts(granularity_warnings)
                     )
-                    + "\n粒度警告表示需要按结构化建议拆分、续作或调整 helper 请求。\n\n"
+                    + "\n粒度警告只提供事实；后续等待、收集、重派或调整由主模型判断。\n\n"
                 ) if granularity_warnings else ""
             ) + (
                 f"Spawned {len(spawned)} helper(s) in background. "
@@ -2412,7 +2675,7 @@ async def _handle_delegate_status(
                f"to fetch done results. " if helpers_pending else "")
             + ("⚠️ Stuck helpers detected — inspect the report first; repair scope/resources/routing/dependencies, then use mode='hard' only as a stricter same-kind retry when the kind is still correct. "
                if n_stuck > 0 else "")
-            + ("**有 ok+outputs_complete=true 的 helper 不要 resume**(查看 recently_completed)。"
+            + ("Clean producer-verified helpers normally should not be resumed; use recently_completed facts to distinguish clean completion from warning/resource/partial states. "
                if any(r.get("outputs_complete") for r in recently_completed) else "")
         ),
     }, ensure_ascii=False)
@@ -2443,6 +2706,7 @@ async def _handle_delegate_poll(
             ensure_ascii=False,
         )
 
+    wait_window_supplied = "wait_window_sec" in args
     snapshots = []
     for tid in task_ids:
         # 1. 看 pending_results(已完成)
@@ -2474,8 +2738,8 @@ async def _handle_delegate_poll(
             snap["status"] = "running"
             snap["collect_now"] = False
             snap["hint"] = (
-                "Task is still running. Wait, collect, or inspect status instead of respawning or resuming it. "
-                "Use delegate(action='collect', task_ids=['" + tid + "']) to wait for the result, "
+                "Task is still running. This poll result is an immediate heartbeat only; poll does not wait even if wait_window_sec was supplied. "
+                "Use delegate(action='collect', task_ids=['" + tid + "'], wait_window_sec=N) to wait for the result, "
                 "or delegate(action='kill', task_id='" + tid + "', reason='...') only if you deliberately want to abort it."
             )
             snapshots.append(snap)
@@ -2498,8 +2762,9 @@ async def _handle_delegate_poll(
                 "collect_now": False,
                 "hint": (
                     "Task already completed and is no longer pending for collect. "
-                    "Use delegate(action='status') to inspect recently_completed; do not respawn unless outputs are missing.\n\n"
-                    "任务已完成且不可重复收集；先看 status/recently_completed，缺产物才重派。"
+                    "Use delegate(action='status') only if compact historical facts are needed; clean helper-owned completion "
+                    "facts are producer evidence, not a reason to respawn or re-read content.\n\n"
+                    "任务已完成且不可重复收集；干净 helper 完成事实就是生产者证据，不为复核内容重派或复读。"
                 ),
             })
             continue
@@ -2516,10 +2781,19 @@ async def _handle_delegate_poll(
                 ),
             })
 
-    return json.dumps({
+    response = {
         "ok": True, "action": "poll",
         "polled": snapshots,
-    }, ensure_ascii=False)
+    }
+    if wait_window_supplied:
+        response["wait_window_ignored"] = True
+        response["wait_window_note"] = (
+            "delegate(action='poll') is a non-blocking heartbeat/status query. "
+            "The supplied wait_window_sec was ignored. To wait, call delegate(action='collect', task_ids=[...], wait_window_sec=N) "
+            "or delegate(action='wait_any', task_ids=[...], wait_window_sec=N).\n\n"
+            "poll 是即时状态查询，不等待；需要等待请用 collect 或 wait_any。"
+        )
+    return json.dumps(response, ensure_ascii=False)
 
 
 async def _handle_delegate_collect(
@@ -2654,6 +2928,25 @@ async def _handle_delegate_collect(
         1 for r in results
         if r.get("ok") and not r.get("interrupted") and not r.get("stuck")
     )
+    partial_artifact_results = [
+        r for r in results
+        if (
+            (r.get("interrupted") or r.get("stuck"))
+            and (
+                bool(r.get("outputs_check", {}).get("outputs_complete"))
+                or bool(r.get("user_visible_files"))
+                or bool(r.get("workspace_files"))
+                or bool(r.get("files"))
+            )
+            and r.get("terminal_reason") != "resource_required"
+            and not r.get("resource_required")
+        )
+    ]
+    _partial_artifact_ids = {
+        str(r.get("task_id") or "")
+        for r in partial_artifact_results
+        if str(r.get("task_id") or "")
+    }
     resource_required_count = sum(
         1 for r in results
         if r.get("terminal_reason") == "resource_required" or r.get("resource_required")
@@ -2663,12 +2956,14 @@ async def _handle_delegate_collect(
         if r.get("interrupted")
         and r.get("terminal_reason") != "resource_required"
         and not r.get("resource_required")
+        and str(r.get("task_id") or "") not in _partial_artifact_ids
     )
     stuck_count = sum(
         1 for r in results
         if r.get("stuck")
         and r.get("terminal_reason") != "resource_required"
         and not r.get("resource_required")
+        and str(r.get("task_id") or "") not in _partial_artifact_ids
     )
     quality_blocked_count = sum(
         1 for r in results
@@ -2694,7 +2989,7 @@ async def _handle_delegate_collect(
         + failed_count
     )
 
-    return json.dumps({
+    response = {
         "ok": True, "action": "collect",
         "helpers_requested": len(task_ids),
         "helpers_completed": len(results),
@@ -2705,6 +3000,7 @@ async def _handle_delegate_collect(
         "failed_count": failed_count,
         "interrupted_count": interrupted_count,
         "stuck_count": stuck_count,
+        "partial_artifact_count": len(partial_artifact_results),
         "quality_blocked_count": quality_blocked_count,
         "resource_required_count": resource_required_count,
         "results": results,
@@ -2721,7 +3017,25 @@ async def _handle_delegate_collect(
             ) if pending_tids else
             f"Terminal states: [{_term_summary}]. All {len(results)} task(s) collected."
         ),
-    }, ensure_ascii=False)
+    }
+    if partial_artifact_results:
+        response["partial_artifacts"] = [
+            {
+                "task_id": r.get("task_id"),
+                "terminal_reason": r.get("terminal_reason"),
+                "user_visible_files": r.get("user_visible_files") or [],
+                "workspace_files": r.get("workspace_files") or r.get("files") or [],
+                "outputs_check": r.get("outputs_check") or {},
+            }
+            for r in partial_artifact_results[:8]
+        ]
+        response["_partial_artifact_policy"] = (
+            "Some interrupted or stuck helpers already produced artifacts. This is not an automatic PASS. "
+            "Treat the listed files and outputs_check as facts, then decide whether targeted inspection/verification is needed "
+            "to accept, repair, or resume the same task_id.\n\n"
+            "部分中断/卡住 helper 已有产物；这不是自动完成。请把文件存在与验收信息作为事实，再判断是否需要定向读取/验证。"
+        )
+    return json.dumps(response, ensure_ascii=False)
 
 
 async def _handle_delegate_wait_any(
@@ -2750,6 +3064,31 @@ async def _handle_delegate_wait_any(
                 "ok": True, "action": "wait_any",
                 "winner_task_id": tid,
                 "result": r,
+            }, ensure_ascii=False)
+
+    # 2026-06-10: interlock fix. _consume_pending_result clears the completion
+    # event, so a second wait_any on an already-collected task used to block on
+    # a cleared event for the full window before falling back to poll. Mirror
+    # collect's unwaitable check: a task with no active helper can never set
+    # its event again — recover from the ledger/disk instead of waiting.
+    for tid in task_ids:
+        try:
+            h = await proc_registry().find_helper_by_task_id(tid, owner=main_owner)
+            if h is None:
+                h = await proc_registry().find_helper_by_task_id(tid, same_trace_as=main_owner)
+        except Exception:
+            h = object()  # lookup failure -> assume active, keep waiting
+        if h is not None:
+            continue
+        recovered = await _recover_completed_result_for_collect(
+            trace_id, tid, main_owner=main_owner,
+        )
+        if recovered is not None:
+            return json.dumps({
+                "ok": True, "action": "wait_any",
+                "winner_task_id": tid,
+                "result": recovered,
+                "recovered_from_ledger": True,
             }, ensure_ascii=False)
 
     # 等任一 event
@@ -2826,6 +3165,26 @@ async def handle_delegate(
     action = str(args.get("action", "")).strip().lower()
     if not action:
         action = "spawn"  # backward compat
+    _normalized_top_level_task = False
+    if action in ("spawn", "spawn_async"):
+        _normalized_top_level_task = _normalize_top_level_delegate_task_args(args)
+        if _normalized_top_level_task:
+            args["_schema_repair_fact"] = (
+                "The delegate call supplied one helper task as top-level task fields. "
+                "The runtime preserved those fields and wrapped them as tasks=[...] before execution."
+            )
+            try:
+                debug.log(
+                    "delegate.top_level_task_args_normalized",
+                    "wrapped top-level helper task fields into tasks=[...]",
+                    {
+                        "task_id": args["tasks"][0].get("task_id"),
+                        "kind": args["tasks"][0].get("kind"),
+                        "action": action,
+                    },
+                )
+            except Exception:
+                pass
 
     # 2026-05-09 Patch 36: task_ids + spawn 误用兜底(适用于 spawn / spawn_async)
     # 病因(trace 779bbcf0 iter 11):模型调
@@ -3040,7 +3399,7 @@ async def handle_delegate(
     # 2026-05-21: spawn 路径不再 mirror 一整套清洗/配对逻辑。
     # _sanitize_and_validate_tasks(上面已调用)是唯一清洗入口,直接复用其结果。
     # (历史上这里 mirror 了 sanitize 全部逻辑 → 双份维护 + 日志双打印,实测 trace
-    #  c6e42ed6 17:58 code_hard_paired 打印两次;现统一为单一来源。)
+    #  c6e42ed6 17:58 hard-pair 日志打印两次;现统一为单一来源。)
     cleaned = cleaned_tasks
     _twin_map = args.get("_paired_task_map") or {}
 
@@ -3195,10 +3554,11 @@ async def handle_delegate(
                 "delegate.duplicate_completed_blocked",
                 "; ".join(_why_parts),
             )
-        # ── 2026-05-08 Fix 6: 去重后若只剩 auto-final 则一起拦截 ──
-        # 否则 auto_final 运行完 → LLM 又 delegate → repair_pairing → 死循环。
-        _is_auto_final = _is_legacy_paired_hard_task
-        _orig_cleaned = [c for c in cleaned if not _is_auto_final(c)]
+        # ── 2026-05-08 Fix 6: legacy paired hard tasks are auxiliary ──
+        # If every primary task was already completed, do not let an old paired
+        # hard sibling keep a duplicate delegation alive.
+        _is_legacy_auxiliary_pair = _is_legacy_paired_hard_task
+        _orig_cleaned = [c for c in cleaned if not _is_legacy_auxiliary_pair(c)]
         _all_orig_dup = _orig_cleaned and all(
             c["task_id"] in _all_dup_tids for c in _orig_cleaned
         )
@@ -3209,24 +3569,20 @@ async def handle_delegate(
         # + 旧 note "换一个不同的 task_id"→ 创建 _v2 helper, 真正在跑的旧 helper 被搁置。
         # 修复:cleaned 为空说明一切都走 adoption 路径,不应早返回,让 wait_loop 处理。
         if cleaned and (set(c["task_id"] for c in cleaned) == _all_dup_tids or _all_orig_dup):
-            # 所有 task(含或不含 auto-final)都是已完成重复 → 全部拦截
+            # 所有 primary task 都是已完成重复；legacy auxiliary pair 不应单独保持 spawn。
             _dup_hint = sorted(_all_dup_tids)
-            return json.dumps({
-                "ok": True,
-                "already_completed": True,
-                "duplicate_task_ids": _dup_hint,
-                "note": (
-                    f"task_id(s) {_dup_hint} already completed successfully in this conversation, and their "
-                    "outputs have been merged into the main workspace. Continue from the existing outputs: "
-                    "read, report, integrate, or edit them directly when needed. Spawn a new helper only for "
-                    "a semantically different task with a clearly different task_id.\n"
-                    "这些 task_id 已完成且产物可用；基于现有产物继续，只有语义不同的新任务才新派 helper。"
+            return json.dumps(await _already_completed_delegate_response(
+                trace_id=trace_id,
+                main_owner=main_owner,
+                main_workspace=main_workspace,
+                task_ids=_dup_hint,
+                note=(
+                    f"task_id(s) {_dup_hint} already completed successfully in this conversation. "
+                    "Continue from the recovered helper-owned output facts when present. Spawn a new helper only "
+                    "for a semantically different task with a clearly different task_id.\n"
+                    "这些 task_id 已完成；优先基于已恢复的 helper 产物事实继续，只有语义不同的新任务才新派 helper。"
                 ),
-                "helpers_initially_spawned": 0,
-                "helpers_completed": 0,
-                "helpers_still_running": 0,
-                "results": [],
-            }, ensure_ascii=False)
+            ), ensure_ascii=False)
         if _all_dup_tids:
             # 部分重复 → 只过滤重复的,其余正常 spawn
             cleaned = [c for c in cleaned if c["task_id"] not in _all_dup_tids]
@@ -3234,26 +3590,24 @@ async def handle_delegate(
                 "delegate.partial_duplicate_filtered",
                 f"filtered {sorted(_all_dup_tids)}, proceeding with {len(cleaned)} remaining",
             )
-            # 去重后若只剩 auto-final 则一起拦截(防止无用 auto_final→LLM 误以为还需 delegate)
-            if cleaned and all(_is_auto_final(c) for c in cleaned):
+            # 去重后若只剩历史 paired hard sibling，则一起拦截。
+            if cleaned and all(_is_legacy_auxiliary_pair(c) for c in cleaned):
                 debug.log(
-                    "delegate.auto_final_blocked_after_dedup",
-                    "all real tasks blocked by dedup; blocking auto-final too",
+                    "delegate.legacy_aux_pair_blocked_after_dedup",
+                    "all primary tasks blocked by dedup; blocking legacy auxiliary pair too",
                 )
-                return json.dumps({
-                    "ok": True,
-                    "already_completed": True,
-                    "duplicate_task_ids": sorted(_all_dup_tids),
-                    "note": (
-                        f"task_id(s) {sorted(_all_dup_tids)} already completed. "
-                        "The outputs are in the main workspace; continue the main workflow without spawning an auto-final helper.\n"
-                        "这些任务已完成，直接基于主工作区产物继续。"
+                _dup_hint = sorted(_all_dup_tids)
+                return json.dumps(await _already_completed_delegate_response(
+                    trace_id=trace_id,
+                    main_owner=main_owner,
+                    main_workspace=main_workspace,
+                    task_ids=_dup_hint,
+                    note=(
+                        f"task_id(s) {_dup_hint} already completed. "
+                        "Continue from the recovered helper-owned output facts when present; no legacy paired helper was spawned.\n"
+                        "这些任务已完成；若已恢复结果，直接基于 helper 产物事实继续，未启动旧配对 helper。"
                     ),
-                    "helpers_initially_spawned": 0,
-                    "helpers_completed": 0,
-                    "helpers_still_running": 0,
-                    "results": [],
-                }, ensure_ascii=False)
+                ), ensure_ascii=False)
 
         # 处理 fork_from + resume 迁移:每个 task 的 workspace
         for c in cleaned:
@@ -3345,6 +3699,7 @@ async def handle_delegate(
             args,
             initial_helper_specs,
             trace_id,
+            main_workspace=main_workspace,
             archive_id=archive_id,
             group_id=group_id,
             user_id=user_id,
@@ -3382,10 +3737,9 @@ async def handle_delegate(
 
         # The LLM delegation guard now runs before helpers start
         # (_run_delegate_preflight_guard above). Do not start a second blocking
-        # guard after helper streams open: late split/kind feedback can otherwise
-        # return task_too_broad_should_split after helpers are already FRESH,
-        # leaving orphan work and confusing the main process. Keep the wait-loop
-        # guard plumbing for older callers, but normal delegate spawn passes None.
+        # guard after helper streams open: late guard_blocked feedback can leave
+        # orphan work and confuse the main process. Keep the wait-loop guard
+        # plumbing for older callers, but normal delegate spawn passes None.
         #
         # helper 启动前已经过统一守卫；启动后不再二次阻断，避免先拉起再返回拆分错误。
         _guard_task: asyncio.Task | None = None
@@ -3431,8 +3785,10 @@ async def handle_delegate(
                 kind=spec.get("kind", "code"),
                 mode=spec.get("mode", "easy"),
                 helper_think=args.get("helper_think", False),
+                input_files=spec.get("input_files") or [],
                 expected_outputs=spec.get("expected_outputs") or [],  # 1.C
                 write_scopes=spec.get("write_scopes") or spec.get("expected_outputs") or [],
+                acceptance_checks=spec.get("acceptance_checks") or [],
                 batch_sibling_outputs=_siblings_only2,  # P98
             ))
             await _register_helper_with_autoclean(
@@ -3525,25 +3881,11 @@ async def handle_delegate(
             helper_specs=initial_helper_specs,
         )
 
-        # 2026-05-10 P83: _dynamic_wait_loop 守卫否决时返回 dict(persona_veto)
-        # 而不是 list[dict]。直接返回给主线程。
-        # 2026-05-12 P19: 拆分拦截 task_too_broad_should_split 也是 dict, 同样处理
-        # 2026-05-12 P21: kind 拦截 task_kind_mismatch 也是 dict, 同样处理
-        # 2026-05-12 P19 hotfix: 任何 dict 都拦住 — 否则 dict 进入 line 7995 的
-        # `for r in results` 会迭代 keys (str), `r.get("ok")` 抛 AttributeError。
+        # Guard/blocking paths return a dict, not list[dict]. Return it directly
+        # so the main model sees the guard's free-form reason and can replan or
+        # re-dispatch with dispatch_reason.
         if isinstance(results, dict):
-            _err = results.get("error", "")
-            if _err in ("persona_veto", "task_too_broad_should_split", "task_kind_mismatch"):
-                return json.dumps(results, ensure_ascii=False)
-            debug.log(
-                "delegate.unexpected_dict_results",
-                f"results 是 dict 但 error={_err!r} 不在已知列表, 包装成 error 返回"
-            )
-            return json.dumps({
-                "ok": False,
-                "error": _err or "unexpected_dict_result",
-                "details": results,
-            }, ensure_ascii=False)
+            return json.dumps(results, ensure_ascii=False)
 
         # request_resource is a freeze/report path only. Round2/main decides
         # whether an existing sibling resource helper satisfies it, whether to
@@ -3673,17 +4015,38 @@ async def handle_delegate(
     # A resource-frozen helper may also carry interrupted=true because the
     # local loop stops to preserve its workspace. Count it once as
     # resource_required so the main process sees one blocker, not two failures.
+    partial_artifact_results = [
+        r for r in ordered
+        if (
+            (r.get("interrupted") or r.get("stuck"))
+            and (
+                bool(r.get("outputs_check", {}).get("outputs_complete"))
+                or bool(r.get("user_visible_files"))
+                or bool(r.get("workspace_files"))
+                or bool(r.get("files"))
+            )
+            and r.get("terminal_reason") != "resource_required"
+            and not r.get("resource_required")
+        )
+    ]
+    _partial_artifact_ids = {
+        str(r.get("task_id") or "")
+        for r in partial_artifact_results
+        if str(r.get("task_id") or "")
+    }
     interrupted_count = sum(
         1 for r in ordered
         if r.get("interrupted")
         and r.get("terminal_reason") != "resource_required"
         and not r.get("resource_required")
+        and str(r.get("task_id") or "") not in _partial_artifact_ids
     )
     stuck_count = sum(
         1 for r in ordered
         if r.get("stuck")
         and r.get("terminal_reason") != "resource_required"
         and not r.get("resource_required")
+        and str(r.get("task_id") or "") not in _partial_artifact_ids
     )
     # 2026-05-09 Patch 24: helper 异常路径(_copy_results_to_main 内部 crash 等)
     # 走 except 分支返回 {ok:False, report:"执行失败:..."},不会带 stuck/interrupted=True。
@@ -3764,11 +4127,29 @@ async def handle_delegate(
         "interrupted_count": interrupted_count,
         "stuck_count": stuck_count,
         "failed_count": failed_count,
+        "partial_artifact_count": len(partial_artifact_results),
         "quality_blocked_count": quality_blocked_count,
         "resource_required_count": resource_required_count,
         "total_elapsed_seconds": round(_time.monotonic() - _start, 1),
         "results": ordered,
     }
+    if partial_artifact_results:
+        response["partial_artifacts"] = [
+            {
+                "task_id": r.get("task_id"),
+                "terminal_reason": r.get("terminal_reason"),
+                "user_visible_files": r.get("user_visible_files") or [],
+                "workspace_files": r.get("workspace_files") or r.get("files") or [],
+                "outputs_check": r.get("outputs_check") or {},
+            }
+            for r in partial_artifact_results[:8]
+        ]
+        response["_partial_artifact_policy"] = (
+            "Some interrupted or stuck helpers already produced artifacts. This is not an automatic PASS. "
+            "Treat the listed files and outputs_check as facts, then decide whether targeted inspection/verification is needed "
+            "to accept, repair, or resume the same task_id.\n\n"
+            "部分中断/卡住 helper 已有产物；这不是自动完成。请把文件存在与验收信息作为事实，再判断是否需要定向读取/验证。"
+        )
     if not task_ok:
         response["_task_status"] = (
             "incomplete" if helpers_still_running or incomplete_count else "no_successful_helper"
@@ -3785,14 +4166,9 @@ async def handle_delegate(
             "or main-thread tool results for exact task facts.\n\n"
             "失败/阻塞 helper 报告只说明状态；事实结论来自成功产物、验收证据或主线程工具结果。"
         )
-    # 2026-06-03: keep clean-helper fast-path local to the helper result.
-    # A clean helper batch is only stage evidence. Promoting it to a top-level
-    # "output JSON directly" command caused multi-stage jobs to stop before
-    # final assembly (for example, analysis slices completed but the requested
-    # Word artifact did not exist). The main thread must compare helper outputs
-    # against the current acceptance checklist and expected final deliverables.
-    #
-    # 干净 helper 批次只是阶段证据；是否收尾由主进程按验收清单和最终产物判断。
+    # Clean helper batches are trustworthy content evidence for their owned
+    # outputs. The main thread still owns external acceptance boundaries such as
+    # missing final artifacts, project apply/diff, and verifier commands.
     if (helpers_completed > 0
             and helpers_still_running == 0
             and interrupted_count == 0
@@ -3803,13 +4179,19 @@ async def handle_delegate(
                 for r in ordered if r.get("ok")
             )):
         response["_stage_status"] = "clean_helper_batch"
-        response["_action_required"] = (
+        response["_stage_evidence_facts"] = (
             "All helpers in this delegate batch completed cleanly and their declared outputs are available. "
-            "Treat this as stage evidence, then compare the current user request, agent_state deliverables, "
-            "todos, and acceptance checks. If a requested final artifact or verification step is still missing, "
-            "continue with the next assembly or verification helper; if the full acceptance checklist is satisfied, "
-            "finalize with the verified deliverables.\n"
-            "本批 helper 已干净完成；先核对用户最终产物和验收清单，缺总装或验证就继续，全部满足才收尾。"
+            "Trust the successful helpers' content judgment for the files they owned. The main process should not "
+            "re-read helper-produced text, Markdown, source, or project artifacts merely to re-verify content. Continue "
+            "only for separate task boundaries: missing requested final artifacts, project apply/diff, explicit external "
+            "verifier/check commands, helper warnings or contradictions, or a user request to quote/display file content.\n"
+            "本批 helper 已干净完成且产物可用；信任 helper 对其产物内容的判断，主进程只处理缺失交付物、项目应用/差异、外部验收、警告矛盾或用户显式展示需求。"
+        )
+        response["_completion_guidance"] = (
+            response["_stage_evidence_facts"]
+            + "\nIf no separate boundary remains in the active task, synthesize/finalize from these compact helper facts. "
+            "A clean helper batch by itself does not require another main-thread read, edit, or verification loop.\n"
+            "若当前任务没有独立边界，直接用 helper 精简事实综合/收尾；干净 helper 批次本身不要求主进程再读、再改或再验。"
         )
     # 仅在 fork 数 > 0 时才暴露给 LLM(避免 0 噪音)
     if n_spawned_via_fork > 0:
@@ -3836,13 +4218,13 @@ async def handle_delegate(
             "Treat their partial artifacts as recovery evidence, not as completed deliverables.\n\n"
             "helper 已冻结等待资源；部分产物不能当完整交付。"
         )
-        response["_action_required"] = (
-            "First inspect this batch and existing helper outputs for `resource_required[].needed_outputs`. "
-            "If the resource already exists, resume the same task_id and pass the concrete resource path. "
-            "If it does not exist, spawn the matching resource helper. If the resource is refused, resume the "
-            "same task_id with a downgrade/impossibility decision, or cooperatively interrupt the frozen helper.\n\n"
-            "先查资源是否已有；有则同 task_id 续作，无则派资源 helper 或明确拒绝。"
+        response["_resource_recovery_facts"] = (
+            "`resource_required[].needed_outputs`, existing helper outputs, same-batch resources, concrete resource paths, "
+            "resource refusal, and the frozen helper state are the relevant recovery facts. The active task determines "
+            "whether same-task resume, a resource helper, refusal/reporting, or cooperative interruption fits.\n\n"
+            "资源需求、已有产物、同批资源、资源路径、拒绝事实和冻结状态是恢复事实；续作、派资源、拒绝或中断由当前任务决定。"
         )
+        response["_action_required"] = response["_resource_recovery_facts"]
 
     # ── wait_window 触发: 把还在跑的 helper 心跳快照加进 response (2026-05-02 加) ──
     # 主线程拿到部分结果 + 未完成 helper 心跳后,可以决定:
@@ -3898,7 +4280,7 @@ async def handle_delegate(
                             entry["_runaway"] = True
                             entry["_runaway_reason"] = str(public.get("_runaway_reason") or "")
                             entry["severity"] = "high"
-                            entry["suggested_action"] = "intervene_before_waiting_longer"
+                            entry["attention_fact"] = "helper reports runaway risk; unchanged waiting may waste context and call budget"
                     except Exception:
                         pass
                     # ── workspace 文件清单(让主线程知道 helper 有什么 partial 产物)──
@@ -3980,7 +4362,7 @@ async def handle_delegate(
                             entry["_runaway"] = True
                             entry["_runaway_reason"] = str(public.get("_runaway_reason") or "")
                             entry["severity"] = "high"
-                            entry["suggested_action"] = "intervene_before_waiting_longer"
+                            entry["attention_fact"] = "helper reports runaway risk; unchanged waiting may waste context and call budget"
                     except Exception:
                         pass
                     still_running.append(entry)
@@ -4001,7 +4383,7 @@ async def handle_delegate(
             response["still_running"] = still_running
             runaway_helpers = [
                 e for e in still_running
-                if e.get("_runaway") or str(e.get("wait_or_continue") or "").lower() == "kill"
+                if e.get("_runaway") or str(e.get("wait_or_continue") or "").lower() in {"intervene", "kill"}
             ]
             if runaway_helpers:
                 runaway_tids = [e.get("task_id") for e in runaway_helpers if e.get("task_id")]
@@ -4012,14 +4394,14 @@ async def handle_delegate(
                     "helper 需要介入；不要原样继续等待。"
                 )
                 response["runaway_helpers"] = runaway_helpers
-                response["_action_required"] = (
-                    "Treat runaway_helpers as a blocking workflow state. Inspect their partial files and last_thought, "
-                    "then choose the smallest explicit recovery: delegate(action='kill', task_id=..., "
-                    "reason='content_deemed_useless') when the helper is circling; collect usable partial evidence "
-                    "and continue with a smaller focused helper; or accept a clearly marked PARTIAL result. "
-                    "Change the broad task boundary before spawning or resuming.\n"
-                    "跑飞 helper 是阻塞状态：先看部分产物与 last_thought，再 kill、拆小续作或明确部分完成；不要原样继续等。"
+                response["_runaway_recovery_facts"] = (
+                    "runaway_helpers are a blocking workflow state. Partial files, last_thought, heartbeat freshness, "
+                    "allowed kill reasons, usable partial evidence, and the current acceptance boundary are the relevant "
+                    "facts for deciding whether waiting, collecting, cooperative interruption, a smaller helper, or a "
+                    "clearly marked PARTIAL result fits.\n"
+                    "跑飞 helper 是阻塞状态；部分产物、last_thought、心跳、kill 理由、可用证据和验收边界是恢复事实。"
                 )
+                response["_action_required"] = response["_runaway_recovery_facts"]
                 response["escalation_advice"] = (
                     "⚠ helper_runaway_requires_intervention: "
                     f"task_ids={runaway_tids}. Stop waiting unchanged; resolve or split these helpers before fan-in.\n"
@@ -4055,27 +4437,27 @@ async def handle_delegate(
                     "results=[] means no report has arrived yet; it does not mean the helpers failed.\n\n"
                     "等待窗口到期但 helper 仍在跑；先看心跳再决定。"
                 )
-                response["_action_required"] = (
-                    "Do not spawn the same still_running task_id with a new prompt. Choose one next step: "
-                    "(a) wait/poll the same task_id with a larger window when heartbeat is healthy; "
-                    "(b) cooperatively kill a pathological helper and inspect its report; "
-                    "(c) use clearly available partial outputs only when they satisfy the user-visible goal.\n\n"
-                    "运行中的同 task_id 不接收新 prompt；等待、协作中断或明确部分交付。"
+                response["_wait_window_recovery_facts"] = (
+                    "The same still_running task_id cannot accept a new prompt while its helper is live. Healthy heartbeat, "
+                    "pathological heartbeat, helper reports after cooperative interruption, and clearly available partial outputs "
+                    "are the relevant facts for deciding whether collect/wait_any, cooperative kill, or partial delivery fits.\n\n"
+                    "运行中的同 task_id 不能接收新 prompt；心跳、协作中断报告和可用部分产物是恢复事实。"
                 )
+                response["_action_required"] = response["_wait_window_recovery_facts"]
                 if _overbroad_active:
                     response["active_overbroad_warning"] = {
                         "issue": "active_but_no_results_after_long_wait",
                         "severity": "high",
-                        "running_for_sec_max": round(_max_running_sec, 1),
-                        "workspace_file_count_max": _max_workspace_files,
-                        "high_iter_task_ids": [tid for tid in _high_iter_tids if tid],
-                        "suggested_action": "stop_waiting_and_replan_or_collect_later",
-                        "suggestion": (
-                            "A healthy heartbeat with long zero-result runtime usually means the task boundary is too broad or the workspace is noisy. "
-                            "Poll/collect first; if you must replan, split by module, resource dependency, or acceptance evidence before using a stricter same-kind hard retry.\n\n"
-                            "健康但久无结果时先收集状态，再拆小或同类 hard 续作。"
-                        ),
-                    }
+                            "running_for_sec_max": round(_max_running_sec, 1),
+                            "workspace_file_count_max": _max_workspace_files,
+                            "high_iter_task_ids": [tid for tid in _high_iter_tids if tid],
+                            "details": (
+                                "A healthy heartbeat with long zero-result runtime can mean the task boundary is too broad, the workspace is noisy, "
+                                "or the helper is still producing useful partial evidence. Current heartbeat/status, partial files, dependency facts, "
+                                "and acceptance evidence should determine whether to wait, collect, interrupt, replan, split, or retry.\n\n"
+                                "健康但久无结果是事实信号；等待、收集、中断、重派、拆分或重试由主模型结合证据判断。"
+                            ),
+                        }
                     debug.log(
                         "delegate.wait_window.active_overbroad_warning",
                         f"0 results after {wait_window_sec}s; max_running={_max_running_sec:.1f}s, "
@@ -4094,7 +4476,7 @@ async def handle_delegate(
             response["escalation_advice"] = (
                 response.get("escalation_advice", "") +
                 f" wait_window={wait_window_sec}s expired while {len(still_running)} helper(s) are still running. "
-                "Use still_running heartbeat to choose: healthy progress -> wait/poll longer; pathological repetition -> cooperative kill and inspect the report; "
+                "Use still_running heartbeat to choose: healthy progress -> collect or wait_any with a larger window; pathological repetition -> cooperative kill and inspect the report; "
                 "self-reported completion -> wait for natural done; repeated failure -> fix kind, resources, paths, dependency order, task scope, or acceptance evidence. "
                 "Use mode='hard' only as a stricter same-kind retry after root-cause review.\n\n"
                 "根据心跳决定等待、协作中断、修根因或同类 hard 续作。"

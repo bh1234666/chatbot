@@ -39,7 +39,7 @@ def test_inspect_file_warns_when_docx_has_image_but_stale_chart_placeholder(tmp_
     assert result["ok"] is True
     assert result["metadata"]["image_count"] == 1
     assert result["metadata"]["stale_chart_placeholder_hit"]
-    assert any("已包含图片但正文仍有阶段性占位说法" in w for w in result["warnings"])
+    assert any("transitional chart-placeholder wording" in w for w in result["warnings"])
 
 
 def test_inspect_file_does_not_warn_stale_chart_placeholder_without_images(tmp_path):
@@ -53,7 +53,7 @@ def test_inspect_file_does_not_warn_stale_chart_placeholder_without_images(tmp_p
 
     assert result["ok"] is True
     assert result["metadata"]["image_count"] == 0
-    assert not any("已包含图片但正文仍有阶段性占位说法" in w for w in result.get("warnings", []))
+    assert not any("transitional chart-placeholder wording" in w for w in result.get("warnings", []))
 
 
 def test_inspect_file_reports_directory_with_actionable_guidance(tmp_path):

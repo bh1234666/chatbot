@@ -15,6 +15,10 @@ def test_extract_progress_pct_percent():
     assert _extract_progress_pct("完成 75%") == 75
 
 
+def test_extract_progress_pct_ignores_numeric_tolerance():
+    assert _extract_progress_pct("28 of 31 claims matched within 50% tolerance") is None
+
+
 def test_extract_progress_pct_fraction():
     pct = _extract_progress_pct("done 3/4 tasks")
     assert pct is not None and pct > 0
@@ -38,7 +42,7 @@ def test_compute_wait_or_continue_stale():
     verdict = _compute_wait_or_continue(
         last_heartbeat_age_sec=400, iter=3, recent_tools=["ls", "dir", "ls", "dir"],
     )
-    assert verdict in ("wait", "check", "kill")
+    assert verdict in ("wait", "check", "intervene")
 
 
 def test_compute_wait_or_continue_fresh():

@@ -60,3 +60,29 @@ def test_configure_logging_routes_tty_to_file_unless_enabled(tmp_path, monkeypat
             logging.getLogger().removeHandler(handler)
             handler.close()
         logging.basicConfig(level=logging.WARNING, force=True)
+
+
+def test_configure_logging_keeps_file_when_console_enabled(tmp_path, monkeypatch):
+    from app import main
+
+    fake_stderr = io.StringIO()
+    monkeypatch.setattr(main.sys, "stderr", fake_stderr)
+    monkeypatch.setattr(main.settings, "debug_console", True)
+    monkeypatch.setattr(main.settings, "debug_log_dir", str(tmp_path))
+    monkeypatch.setattr(main.settings, "log_level", "INFO")
+
+    try:
+        main._configure_logging()
+        logging.getLogger("unit.logging").info("console plus file route check")
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+
+        assert "console plus file route check" in fake_stderr.getvalue()
+        files = list(tmp_path.glob("app_*.log"))
+        assert len(files) == 1
+        assert "console plus file route check" in files[0].read_text(encoding="utf-8")
+    finally:
+        for handler in logging.getLogger().handlers[:]:
+            logging.getLogger().removeHandler(handler)
+            handler.close()
+        logging.basicConfig(level=logging.WARNING, force=True)

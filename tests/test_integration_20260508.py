@@ -8,7 +8,7 @@ This test simulates:
 4. Synthetic result is injected
 5. LLM sees synthetic result and does NOT re-issue delegate
 6. If LLM DOES re-issue, delegate dedup (Fix 4) blocks it
-7. auto_final is blocked when all real tasks are duplicates (Fix 6)
+7. legacy auxiliary paired helper is blocked when all primary tasks are duplicates (Fix 6)
 
 This is read-only — no files are modified outside temp dirs.
 """

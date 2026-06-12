@@ -50,19 +50,25 @@ _USER_VISIBLE_PROTOCOL_MARKERS = (
     "</｜tool_calls｜>",
     "tool_calls name=",
 )
+_USER_VISIBLE_INTERNAL_ACTION_RE = re.compile(
+    r"<\s*(?:read|write|edit|glob|search|run|tool|env_[a-z_]+)\b",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_user_visible_protocol_text(text: str) -> bool:
-    """Detect hidden tool-call protocol fragments before streaming final text.
+    """Detect hidden tool/protocol fragments before streaming final text.
 
     This is a presentation safety check for Round3 output. It does not rewrite
-    planning decisions or tool choices; it prevents internal protocol text from
-    becoming the user-facing answer.
+    planning decisions or tool choices; it prevents internal protocol/action
+    markup from becoming the user-facing answer.
 
     Round3 最终文本协议泄漏检测；只用于展示安全，不改工具决策。
     """
     value = str(text or "")
-    return any(marker in value for marker in _USER_VISIBLE_PROTOCOL_MARKERS)
+    if any(marker in value for marker in _USER_VISIBLE_PROTOCOL_MARKERS):
+        return True
+    return bool(_USER_VISIBLE_INTERNAL_ACTION_RE.search(value))
 
 
 def _plan_fallback_user_reply(plan) -> str:
@@ -618,7 +624,7 @@ async def orchestrate(
 
     # 2026-05-02 part7:并行起飞读上次的暂停快照(用户上次主动 abort 时持久化的状态)。
     # 通常文件不存在(没暂停过)→ 立即返回 None,不影响延迟。
-    # 存在时 inject 到 base_msgs system 段顶部,告诉模型上次 paused 了哪些 helper。
+    # 存在时 inject 到 base_msgs 动态 user 区,告诉模型上次 paused 了哪些 helper。
     pause_snapshot_task = asyncio.create_task(
         _pause_state.load_pause(
             archive_id=req.archive_id, group_id=req.group_id, user_id=req.user_id,
@@ -627,7 +633,7 @@ async def orchestrate(
 
     # 2026-05-02 part10 F1:并行起飞读 user profile(per archive × user)。
     # 通常 chat 数 < EXTRACTION_INTERVAL 时还没建,返回 None。
-    # 存在时 inject 到 base_msgs system 段末尾,让 round2/round3 看到用户偏好。
+    # 存在时 inject 到 base_msgs 动态 user 区,让 round2/round3 看到用户偏好。
     user_profile_task = asyncio.create_task(
         _user_profile.load_profile(
             archive_id=req.archive_id, user_id=req.user_id,
@@ -765,6 +771,7 @@ async def orchestrate(
     await debug.report()
     _td = tendency_obj.tendencies or {}
     _context_followup_intent = _has_context_followup_intent(req.message)
+    _constraint_review_followup_intent = _has_current_turn_constraint_review_language(req.message)
     _tool_concept_intent = _is_tool_concept_question(req.message)
     _env_project_tool_intent = False
     _env_project_coding_intent = False
@@ -797,6 +804,7 @@ async def orchestrate(
         bool(needs_recall)
         or bool(needs_tools)
         or _context_followup_intent
+        or _constraint_review_followup_intent
         or _td.get("严肃询问", 0) >= 0.7
         or any(
             kw in (req.message or "")
@@ -853,6 +861,7 @@ async def orchestrate(
         bool(needs_recall)
         or _has_implicit_recall_intent(req.message)
         or _context_followup_intent
+        or _constraint_review_followup_intent
         or _td.get("严肃询问", 0) >= 0.7
         or _td.get("闲聊", 0) >= 0.5
         or _td.get("情感倾诉", 0) >= 0.5
@@ -894,8 +903,24 @@ async def orchestrate(
     )
     debug.log("ctx.built", f"base_msgs={len(base_msgs)}", base_msgs)
 
-    # 2026-05-02 part7:把暂停快照渲染成一段中文,**追加为额外 system 消息**
-    # (放在 base_msgs 的 system 段最后,确保模型在生成回复前能看到)。
+    _constraint_review_requires_round2 = _should_route_constraint_review_to_round2(
+        req.message,
+        base_msgs,
+    )
+    if complexity == "easy" and _constraint_review_requires_round2:
+        complexity = "medium"
+        parallelizable = False
+        debug.log(
+            "round1.constraint_review_route",
+            "current turn asks to compare prior task evidence with explicit constraints; keeping Round2 planning",
+            {
+                "needs_tools": bool(needs_tools),
+                "needs_recall": bool(needs_recall),
+            },
+        )
+
+    # 2026-05-02 part7:把暂停快照渲染成一段中文；后续统一放入 user 动态上下文，
+    # 避免把 per-turn 状态追加到 system 前缀。
     # 没有上次暂停时 pause_snapshot 是 None — 跳过即可,零代价。
     pause_snapshot = None
     try:
@@ -920,7 +945,8 @@ async def orchestrate(
     # ── 2026-05-02 part10 F1:user profile 注入 ──
     # 上次 chat maintenance 后台任务积累的用户偏好画像(代码风格、兴趣、不喜欢的话题等)。
     # 第一次见的用户没 profile → user_profile_task 返回 None,跳过。
-    # 注入到最后一条 system msg 末尾(和 pause_state、feedback retry 用同一通道)。
+    # 后续通过 SYSTEM_MEMORY_INJECTION 放入 user 动态上下文(和 pause_state、
+    # feedback retry 用同一通道)。
     user_profile = None
     try:
         user_profile = await user_profile_task
@@ -943,7 +969,7 @@ async def orchestrate(
     # 找具体错因,本轮明确避开同样错误。设计:
     #   - 纯 prompt 引导,无新表 / 无新 LLM 调用
     #   - 触发条件保守(否定+重做+明确情绪标记 三类关键词,加 120 字长度上限)
-    #   - 注入位置和 pause_state 同——append 到最后一条 system msg 尾部
+    #   - 注入位置和 pause_state 同——写入动态 user 上下文
     # 不直接告诉模型"你错了",让它自己读 bot_log 判断—— bot_log 里有 deliverables/
     # complexity/was_aborted 等信号,模型可以基于事实纠错而非盲目 apologize。
     # 负反馈"复盘 mode"提示(构造逻辑见 orchestrator_prompts.build_feedback_retry_text)
@@ -958,8 +984,8 @@ async def orchestrate(
     # ── 2026-05-02 part12 (Bug C):语言一致性硬约束 ──
     # 实测 trace 74b1295b:用户中文消息,round1/round3 输出中文,但主线程调
     # office.write 写 docx/pptx/xlsx 全部英文。根因:中间环节没有"用户语言"信号传递。
-    # 解决:base_msgs 准备完成后,根据用户原 message 检测语言,在最后一条 system msg
-    # 末尾追加硬约束。round2 / round3 / 通过 delegate 给 helper 的 prompt 都看得见。
+    # 解决:base_msgs 准备完成后,根据用户原 message 检测语言,写入动态会话信息。
+    # round2 / round3 / 通过 delegate 给 helper 的 prompt 都看得见。
     _user_lang = _detect_user_language(req.message or "")
     # 2026-05-02 part12:set ContextVar,delegate 模块的 handle_delegate /
     # handle_spawn_helper 调用 _run_one_helper 时通过 current_user_lang() 读取,
@@ -1026,15 +1052,29 @@ async def orchestrate(
         _mode_text = ""
         _project_context_text = ""
 
-    _task_facts_text = ""
+    _task_fact_parts: list[str] = []
+    try:
+        _current_is_coding_task = bool(getattr(tendency_obj, "is_coding_task", False))
+    except Exception:
+        _current_is_coding_task = False
+    if _env_project_coding_intent or _current_is_coding_task:
+        _task_fact_parts.append(
+            "Current coding task contract: project path discovery facts from env_list_tree/env_inventory/env_search are enough to start a code helper. "
+            "In environment project mode, workspace listings and workspace.locate are chat/staged-workspace facts, not real-project-root source/test search facts. "
+            "The first code helper should receive likely project paths in input_files plus acceptance_checks; it owns source-body reading, optional baseline failure reproduction, diagnosis, edits, and test iteration. "
+            "If the user explicitly requested browser/host-browser evidence, collect or delegate browser evidence once URL/path facts are known before broad source reads or edits. "
+            "The main thread keeps route facts, env_diff/env_apply_*, and acceptance summaries compact; if a local URL is already running, staged helper edits affect it only after main-thread apply.\n"
+            "当前代码任务契约：环境项目路径以 env_* 为准；显式浏览器任务路径/URL 已知后先取或委派浏览器证据；路径发现足以派发 code helper；helper 负责源码阅读、诊断、修改和测试；已有 URL 需主进程 apply 后才反映 _env 改动。"
+        )
     if _audio_artifact_intent:
-        _task_facts_text = (
+        _task_fact_parts.append(
             "The current user request asks for a user-facing audio artifact. "
             "For spoken/random test voice, use the TTS audio-generation path with a short spoken test phrase when the user did not supply text. "
             "Do not ask a TTS helper to write Python wave/noise scripts unless the user explicitly requested synthetic tones/noise instead of speech. "
             "Final deliverables should name the actual verified audio file path.\n"
             "当前请求是面向用户的音频文件产物；随机测试语音优先用 TTS 合成可听语句，最终 deliverables 写真实已验证音频文件。"
         )
+    _task_facts_text = "\n\n".join(_task_fact_parts)
 
     # 2026-05-15 Item 3: 4 段 per-turn 动态信息一次性塞进独立 user 消息,
     # 不再 append 到 system 尾部,保 prefix cache 稳定。
@@ -1296,7 +1336,7 @@ async def orchestrate(
         # 病因(实测 16:28 comp_custom): 上一轮 sorting 任务的 radix_bench/*.c/h 残留, 被
         # 误算成本任务 helper 的"已交付到主区"产物 → 主线程被误导。
         _cleanup_stale_helpers_shared(workspace_dir, max_age_days=3, keep_recent=10, debug=debug)
-        # ── 清理跨对话污染:删旧的 .helper_*_summary.txt,防止 auto_final 误触发 ──
+        # ── 清理跨对话污染:删旧的 .helper_*_summary.txt,防止历史 helper 残留误触发 ──
         _stale_summaries = (
             glob.glob(os.path.join(workspace_dir, ".helper_*_summary.txt"))
             + glob.glob(os.path.join(main_workspace_dir, ".helper_*_summary.txt"))
@@ -1872,38 +1912,48 @@ async def orchestrate(
                 if missing:
                     _all_ws = ws_tool.list_generated_files(workspace_dir)
                     _resolved: dict[str, str] = {}
+                    _ambiguous_resolve_facts: list[str] = []
                     for _m in sorted(missing):
                         _suffix = "_" + _m
                         _candidates = [
                             f for f in _all_ws
                             if f.endswith(_suffix) and f not in delivered_names
                         ]
+                        _fresh_candidates = [f for f in _candidates if f not in _files_before]
+                        if _fresh_candidates or not redeliver_existing:
+                            _candidates = _fresh_candidates
                         if len(_candidates) == 1:
                             _resolved[_m] = _candidates[0]
                         elif len(_candidates) > 1:
-                            # P58: 多候选 — 取最新修改的(最近的 helper 通常是最终版本)
-                            try:
-                                _by_mtime = sorted(
-                                    _candidates,
-                                    key=lambda f: os.path.getmtime(
-                                        os.path.join(workspace_dir, f)
-                                    ),
-                                    reverse=True,  # 新的在前
+                            _ambiguous_resolve_facts.append(
+                                f"{_m}: multiple prefixed candidates exist; no automatic choice was made: "
+                                + ", ".join(sorted(_candidates)[:8])
+                            )
+                            debug.log(
+                                "workspace.prefix_resolve.ambiguous",
+                                f"'{_m}' has {len(_candidates)} fresh prefixed candidates; leaving unresolved",
+                                sorted(_candidates)[:20],
+                            )
+                        elif not _candidates:
+                            _preexisting_candidates = [
+                                f for f in _all_ws
+                                if f.endswith(_suffix) and f not in delivered_names and f in _files_before
+                            ]
+                            if _preexisting_candidates and not redeliver_existing:
+                                _ambiguous_resolve_facts.append(
+                                    f"{_m}: only pre-existing prefixed candidate(s) were found; no automatic re-delivery was made: "
+                                    + ", ".join(sorted(_preexisting_candidates)[:8])
                                 )
-                                _resolved[_m] = _by_mtime[0]
                                 debug.log(
-                                    "workspace.prefix_resolve.multi",
-                                    f"P58: '{_m}' 有 {len(_candidates)} 个候选, "
-                                    f"取最新 '{_by_mtime[0]}' (其他: {_by_mtime[1:]})",
+                                    "workspace.prefix_resolve.preexisting_only",
+                                    f"'{_m}' only matched pre-existing prefixed candidate(s); leaving unresolved",
+                                    sorted(_preexisting_candidates)[:20],
                                 )
-                            except OSError as _e:
-                                # 拿不到 mtime → 退而取字典序最大(通常含较高 task_id 顺序)
-                                _resolved[_m] = sorted(_candidates, reverse=True)[0]
-                                debug.log(
-                                    "workspace.prefix_resolve.multi_fallback",
-                                    f"P58: '{_m}' mtime 失败 ({_e}), 取字典序最大 "
-                                    f"'{_resolved[_m]}'",
-                                )
+                    if _ambiguous_resolve_facts:
+                        plan.key_points = list(plan.key_points or []) + [
+                            "Delivery fact: prefix-based deliverable resolution was ambiguous or only matched pre-existing artifacts. "
+                            + " | ".join(_ambiguous_resolve_facts)
+                        ]
                     if _resolved:
                         _STALE_EXTS = (
                             ".png", ".jpg", ".jpeg", ".gif", ".svg",
@@ -2634,7 +2684,7 @@ async def orchestrate(
                         "excerpt": (
                             f"以下 helper 报告**未经独立验证**,可能包含未发现的 bug。"
                             f"用户追问准确性时,应说明结果尚未独立验证,不要当作确凿事实引用。"
-                            f"验证建议: {all_verification_advice[:300]}"
+                            f"验证相关事实: {all_verification_advice[:300]}"
                         ),
                     })
                 for tid, text in all_helper_excerpts.items():
@@ -3353,7 +3403,7 @@ async def orchestrate(
     finally:
         # 2026-05-10 Patch 55 + Patch 59: chat 回合彻底结束 → cancel 整棵 helper 树
         # 用户原话:"主进程结束后向用户回复,此时所有子进程都应该结束,没有意义了"
-        # P55 用 owner 过滤,但 P40 派的 sub-helper(woat_impl_auto_final 等)owner
+        # P55 用 owner 过滤,但 P40 派的 paired sub-helper owner
         # 是 helper:{trace_id}:{parent},不是 main_owner → P55 漏掉。
         # P59:改用 trace_id 过滤,cancel 整棵树。
         # 不存在合理的"主进程结束后子进程继续跑"场景:

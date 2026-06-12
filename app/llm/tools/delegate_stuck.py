@@ -46,7 +46,8 @@ class StuckDetector:
     _FATAL_ERROR_KEYWORDS = (
         "空对象 {}",                  # max_tokens 截断: workspace 收到空 args
         "SecurityError: name not",    # python 沙箱拒绝 (open / __import__ 等)
-        "persona_veto",               # 人格守卫拒绝
+        "guard_blocked",              # task-quality guard blocked delegation
+        "persona_veto",               # legacy guard block name
     )
 
     # ── 2026-05-02 part13:edit 不验证检测(trace 74b1295b iter 80-118 教训)──
@@ -100,7 +101,7 @@ class StuckDetector:
     # 错误计数器永远凑不齐同一 sig × 6 次, 不 stuck。same_file_edit_fail soft hint 只
     # 发一次, helper 不响应继续 edit 到 50+。
     # 修法: 当 same_file_edit_fail 触发后(N=4), 如果 edit 继续到 M=12, 升级为 hard stuck。
-    # 主线程应该 kill 并换 task_id / 拆任务。
+    # 主线程应基于报告事实决定协作中断、同 task_id 续作、换边界或拆任务。
     _EDIT_SAME_FILE_HARD_STUCK = 12  # 同文件累计 12 次 edit + 仍有 run fail → 硬 stuck
     # ── 2026-05-15 P70: bash 失败率 stuck 检测(comp_bench 教训)──
     # comp_bench 1026 bash 调用里 66 次 FAIL: rc=N (6.4%), 但集中爆发 — 任一编译阶段
@@ -222,7 +223,7 @@ class StuckDetector:
         self._pending_missing_dependency_hint: str | None = None
         # 2026-05-11 P12.H: progress_note 跟踪
         # 病因(实测 18:46-19:09 pptx): helper 跑 22 分钟没 progress_note,
-        # 主线程不知道在干嘛, 也不知道何时该 kill 强制接管。
+        # 主线程不知道在干嘛, 也不知道何时需要介入。
         # 跟踪自上次 progress_note 以来的工具调用数, 阈值后给 helper hint。
         self._tool_calls_since_progress_note: int = 0
         self._last_progress_note_at_call: int = 0

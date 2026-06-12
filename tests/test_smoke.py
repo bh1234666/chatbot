@@ -139,6 +139,109 @@ def test_round1_messages_light():
     print("[OK] round1 messages light")
 
 
+def test_round1_messages_light_includes_candidate_signals_and_bot_log_facts():
+    now = datetime.now(timezone.utc)
+    hot = [
+        HotMessage(role="user", content="写一个说明文档", turn_id="t1", created_at=now),
+        HotMessage(
+            role="assistant",
+            content=(
+                "已完成"
+                "<bot_log>complexity=medium | intent=write report | "
+                "key_points=[needs citations] | deliverables=[report.md] | "
+                "in_main=[report.md] | helpers={done:[report_edit]}</bot_log>"
+            ),
+            turn_id="t1",
+            created_at=now,
+        ),
+    ]
+
+    msgs = ctx_build.round1_messages_light(
+        "Bob",
+        "Can you put together a clear explainer for me with sources I can click through?",
+        hot,
+    )
+    user_text = msgs[1]["content"]
+
+    assert "Observed Text Facts" in user_text
+    assert "creation/persistence wording" in user_text
+    assert "candidate_" not in user_text
+    assert "not decisions" in user_text
+    assert "deliverables=[report.md]" in user_text
+    assert "helpers={done:[report_edit]}" in user_text
+
+
+def test_round1_messages_light_frames_task_quality_reminder_as_possible_followup():
+    now = datetime.now(timezone.utc)
+    hot = [
+        HotMessage(
+            role="user",
+            content=(
+                "users.db has all our signup data. Tell me how many active users "
+                "from Europe signed up in 2026 and output a CSV."
+            ),
+            turn_id="t1",
+            created_at=now,
+        ),
+        HotMessage(
+            role="assistant",
+            content=(
+                "CSV generated."
+                "<bot_log>complexity=medium | intent=query users.db and output CSV | "
+                "key_points=[JOIN TRAP avoided; verifier PASS] | "
+                "deliverables=[active_eu_2026_channels.csv] | "
+                "helpers={done:[gen_csv]}</bot_log>"
+            ),
+            turn_id="t1",
+            created_at=now,
+        ),
+    ]
+
+    msgs = ctx_build.round1_messages_light(
+        "Bob",
+        "If anything in the schema is weird, double-check before assuming.",
+        hot,
+    )
+    sys_text = msgs[0]["content"]
+    user_text = msgs[1]["content"]
+
+    assert "follow-up instructions/corrections about recent task evidence" in sys_text
+    assert "Follow-up constraints or corrections" in sys_text
+    assert "schema" in sys_text
+    assert "users.db" in user_text
+    assert "JOIN TRAP avoided" in user_text
+    assert "active_eu_2026_channels.csv" in user_text
+    assert "Current Message To Route" in user_text
+    assert "double-check before assuming" in user_text
+
+
+def test_round1_messages_light_includes_environment_project_facts(monkeypatch):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+
+    env = EnvironmentContext(
+        root_dir="C:/tmp/current-project",
+        archive_id="arch",
+        group_id="env_user_u",
+        user_id="u",
+        project_key="current-project",
+        project_name="Current Project",
+    )
+
+    with runtime_context("environment", env):
+        msgs = ctx_build.round1_messages_light(
+            "Bob",
+            "My profile is in the usual place; put together the plan.",
+            [],
+        )
+
+    user_text = msgs[1]["content"]
+    assert "Environment Project Facts" in user_text
+    assert "Current Environment Project" in user_text
+    assert "current-project" in user_text
+    assert "not route decisions" in user_text
+    assert "Concrete project files" in user_text
+
+
 def test_round2_messages():
     base = ctx_build.build_base_context(
         user_name="A", current_message="hi",
@@ -152,7 +255,7 @@ def test_round2_messages():
     assert "internal_note" in all_text
     assert "deliverables" in all_text
     assert "finish with one strict JSON plan" in all_text
-    assert "Stay outside the conversation and produce execution metadata only" in all_text
+    assert "Stay outside the conversation and finish with one strict JSON plan" in all_text
     print("[OK] round2 messages")
 
 
@@ -402,8 +505,9 @@ def test_round3_visual_internal_terms_prompt_has_exceptions():
     assert "Rewrite internal paths or tool errors into user-understandable file/material status" in sys_text
     assert "Round3 只基于计划和工具证据表达事实" in sys_text
     user_text = "\n".join(m["content"] for m in msgs if m["role"] == "user")
-    assert "Confirmed content may be treated as fact" in user_text
-    assert "Possible/uncertain content remains uncertain" in user_text
+    assert "Real helper/tool evidence for this reply" in user_text
+    assert "缺失细节按未知表达" in user_text
+    assert "With partial evidence, state the uncertainty or need for further inspection" in sys_text
     assert "永远别说" not in sys_text
 
 
@@ -514,8 +618,80 @@ def test_workspace_edit_helper_allows_small_data_python_but_blocks_plotting(tmp_
         ))
         assert r["ok"] is False
         assert r["blocked_reason"] == "edit_helper_writing_out_of_scope_python"
+        assert r["matching_helper_kind"] == "draw"
+        assert r["observed_recovery_tool"] == "request_resource"
+        assert r["observed_recovery_shape"]["resource_kind"] == "draw"
         assert r["suggested_helper_kind"] == "draw"
         assert r["suggested_tool"] == "request_resource"
+    finally:
+        reset_current_helper_kind(token)
+
+
+def test_workspace_edit_helper_allows_docx_repair_python_with_benchmark_text(tmp_path):
+    """edit helper 可写短小 python-docx 文档修复脚本，即使报告正文含 benchmark 字样。"""
+    import asyncio
+    from app.core.core_processes import set_current_helper_kind, reset_current_helper_kind
+    from app.llm.tools import workspace as ws
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_edit"
+    helper_ws.mkdir(parents=True)
+    token = set_current_helper_kind("edit")
+    try:
+        r = asyncio.run(ws.handle_write(
+            str(helper_ws),
+            "fix_headings.py",
+            (
+                "from docx import Document\n"
+                "doc = Document('_env/reports/compression_report.docx')\n"
+                "for p in doc.paragraphs:\n"
+                "    if 'Heading' in p.style.name and not p.text.strip():\n"
+                "        p.text = 'benchmark results section'\n"
+                "doc.save('_env/reports/compression_report.docx')\n"
+            ),
+        ))
+        assert r["ok"] is True
+
+        r = asyncio.run(ws.handle_write(
+            str(helper_ws),
+            "run_benchmark.py",
+            "import timeit\nprint(timeit.timeit('1+1'))\n",
+        ))
+        assert r["ok"] is False
+        assert r["blocked_reason"] == "edit_helper_writing_out_of_scope_python"
+    finally:
+        reset_current_helper_kind(token)
+
+
+def test_workspace_edit_helper_blocks_verifier_wrapper_without_code_resource(tmp_path):
+    """edit helper 不应写聚合脚本来调用已有检查；应直接运行检查命令。"""
+    import asyncio
+    from app.core.core_processes import set_current_helper_kind, reset_current_helper_kind
+    from app.llm.tools import workspace as ws
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_edit"
+    helper_ws.mkdir(parents=True)
+    token = set_current_helper_kind("edit")
+    try:
+        r = asyncio.run(ws.handle_write(
+            str(helper_ws),
+            "run_all_verifiers.py",
+            (
+                "import subprocess\n"
+                "checks = ['python verify_format.py', 'python check_outputs.py']\n"
+                "for cmd in checks:\n"
+                "    subprocess.run(cmd, shell=True, check=True)\n"
+            ),
+        ))
+        assert r["ok"] is False
+        assert r["blocked_reason"] == "edit_helper_writing_out_of_scope_python"
+        assert r["matching_helper_kind"] == "edit"
+        assert r["observed_recovery_tool"] == "workspace.run"
+        assert r["observed_recovery_shape"]["resource_kind"] == "edit"
+        assert "Run the existing verifier/check commands directly" in r["observed_recovery_shape"]["shape"]
+        assert r["suggested_helper_kind"] == "edit"
+        assert r["suggested_tool"] == "workspace.run"
+        assert "Run the existing verifier/check commands directly" in r["suggested_request"]
+        assert "code helper" not in r["error"].lower()
     finally:
         reset_current_helper_kind(token)
 

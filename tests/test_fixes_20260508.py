@@ -2,7 +2,7 @@
 Dynamic test for all 2026-05-08 fixes:
   1. repair_pairing: synthetic tool results for delegate/spawn orphans
   2. Fix 4: duplicate completed check blocks resume spawns too
-  3. Fix 6: auto_final blocked when all real tasks are duplicates
+  3. Fix 6: legacy auxiliary paired helper blocked when all primary tasks are duplicates
   4. Fix 3: _helpers_shared preserved to .prev/ before cleanup
   5. Fix 5: manifest captures ALL main_ws root files
   6. fetch_to_temp: file copy from main/prev

@@ -203,7 +203,7 @@ def test_helper_blocked_summary_does_not_expose_unstarted_task_text():
                 "description": "Implement Skip List with long algorithm requirements.",
             },
         ],
-        "reason": "framework_first_required",
+        "reason": "guard_blocked",
         "description": "Create a shared framework contract first.",
     })
 
@@ -288,7 +288,7 @@ def test_delegate_tool_done_summary_preserves_completed_and_running_sets():
 def test_delegate_preflight_block_summary_marks_helpers_not_running():
     result = {
         "ok": False,
-        "error": "framework_first_required",
+        "error": "guard_blocked",
         "reason": "Need one shared comparison framework before peer helpers.",
         "helpers_initially_spawned": 0,
         "preflight_guard": True,
@@ -302,7 +302,7 @@ def test_delegate_preflight_block_summary_marks_helpers_not_running():
 
     assert "event_fact=helper_blocked_before_start" in summary
     assert "state=blocked_not_running" in summary
-    assert "error=framework_first_required" in summary
+    assert "error=guard_blocked" in summary
     assert "Build the common contract first" in summary
     assert "requested=0" in summary
     assert "blocked before startup and are not running" in summary

@@ -33,6 +33,7 @@ RESOURCE_WAITING = "waiting_resource"
 RESOURCE_READY = "ready_to_resume"
 RESOURCE_REFUSED = "refused"
 RESOURCE_CLOSED = "closed"
+RESOURCE_FAILED = "failed"
 
 
 @dataclass
@@ -161,6 +162,33 @@ _id_counter = 0
 _published_resource_events: dict[str, set[tuple[str, str]]] = {}
 
 
+def _merge_unique(existing: list[str], incoming: list[str] | None, *, limit: int = 80) -> tuple[list[str], list[str]]:
+    """Append new items without losing earlier task facts."""
+    merged: list[str] = []
+    seen: set[str] = set()
+    for values in (existing or [], incoming or []):
+        for source in values:
+            item = str(source or "").strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+            if len(merged) >= limit:
+                break
+        if len(merged) >= limit:
+            break
+    added = [item for item in merged if item not in set(existing or [])]
+    return merged, added
+
+
+def _is_retained_prior_note(item: str) -> bool:
+    return str(item or "").strip().startswith("Retained prior ")
+
+
+def _retained_prior_note_prefix(field_name: str) -> str:
+    return f"Retained prior {field_name} not repeated in latest update:"
+
+
 def _new_id(prefix: str) -> str:
     global _id_counter
     _id_counter += 1
@@ -192,18 +220,74 @@ def upsert_task_contract(
     deliverables: list[str] | None = None,
     risks: list[str] | None = None,
     current_stage: str = "",
+    merge: bool = True,
 ) -> dict[str, Any]:
     records = _contracts.setdefault(trace_id, deque(maxlen=_CONTRACT_LIMIT))
     for record in records:
         if record.task_id == task_id:
             record.goal = goal or record.goal
-            record.acceptance = list(acceptance or record.acceptance)
-            record.evidence_required = list(evidence_required or record.evidence_required)
-            record.deliverables = list(deliverables or record.deliverables)
-            record.risks = list(risks or record.risks)
+            retained: dict[str, list[str]] = {}
+            added: dict[str, list[str]] = {}
+            if merge:
+                old_acceptance = list(record.acceptance)
+                old_evidence = list(record.evidence_required)
+                old_deliverables = list(record.deliverables)
+                old_risks = [item for item in record.risks if not _is_retained_prior_note(item)]
+                record.acceptance, added_acceptance = _merge_unique(record.acceptance, acceptance, limit=100)
+                record.evidence_required, added_evidence = _merge_unique(record.evidence_required, evidence_required, limit=120)
+                record.deliverables, added_deliverables = _merge_unique(record.deliverables, deliverables, limit=80)
+                record.risks, added_risks = _merge_unique(record.risks, risks, limit=80)
+                if acceptance is not None:
+                    retained_acceptance = [item for item in old_acceptance if item not in set(acceptance or [])]
+                    if retained_acceptance:
+                        retained["acceptance"] = retained_acceptance
+                if evidence_required is not None:
+                    retained_evidence = [item for item in old_evidence if item not in set(evidence_required or [])]
+                    if retained_evidence:
+                        retained["evidence_required"] = retained_evidence
+                if deliverables is not None:
+                    retained_deliverables = [item for item in old_deliverables if item not in set(deliverables or [])]
+                    if retained_deliverables:
+                        retained["deliverables"] = retained_deliverables
+                if risks is not None:
+                    retained_risks = [item for item in old_risks if item not in set(risks or [])]
+                    if retained_risks:
+                        retained["risks"] = retained_risks
+                if added_acceptance:
+                    added["acceptance"] = added_acceptance
+                if added_evidence:
+                    added["evidence_required"] = added_evidence
+                if added_deliverables:
+                    added["deliverables"] = added_deliverables
+                if added_risks:
+                    added["risks"] = added_risks
+                for field_name, items in retained.items():
+                    if field_name == "risks":
+                        continue
+                    prefix = _retained_prior_note_prefix(field_name)
+                    note = (
+                        f"{prefix} "
+                        + "; ".join(items[:6])
+                    )
+                    record.risks = [
+                        item for item in record.risks
+                        if not str(item or "").startswith(prefix)
+                    ]
+                    record.risks.append(note[:1000])
+                    record.risks = record.risks[-80:]
+            else:
+                record.acceptance = list(acceptance or record.acceptance)
+                record.evidence_required = list(evidence_required or record.evidence_required)
+                record.deliverables = list(deliverables or record.deliverables)
+                record.risks = list(risks or record.risks)
             record.current_stage = current_stage or record.current_stage
             record.updated_at = time.time()
-            return record.to_public_dict()
+            public = record.to_public_dict()
+            if retained:
+                public["retained_prior_contract_items"] = retained
+            if added:
+                public["added_contract_items"] = added
+            return public
     record = TaskContract(
         trace_id=trace_id,
         task_id=task_id,
@@ -287,12 +371,15 @@ def register_helper_result(trace_id: str, task_id: str, result: dict[str, Any]) 
     ok = bool(result.get("ok"))
     outputs_check = result.get("outputs_check") if isinstance(result.get("outputs_check"), dict) else {}
     outputs_complete = outputs_check.get("outputs_complete")
+    producer_self_verified = outputs_check.get("producer_self_verified") is True
     resource_request = result.get("resource_required") if isinstance(result.get("resource_required"), dict) else None
 
     if terminal == "resource_required" or resource_request:
         status = EVIDENCE_PARTIAL
-    elif ok and outputs_complete is not False:
+    elif ok and producer_self_verified:
         status = EVIDENCE_VERIFIED
+    elif ok and outputs_complete is not False:
+        status = EVIDENCE_PARTIAL
     else:
         status = EVIDENCE_FAILED
 
@@ -308,6 +395,7 @@ def register_helper_result(trace_id: str, task_id: str, result: dict[str, Any]) 
             "terminal_reason": terminal,
             "ok": ok,
             "outputs_complete": outputs_complete,
+            "producer_self_verified": producer_self_verified,
             "outputs_missing": outputs_check.get("outputs_missing"),
             "quality_warnings": outputs_check.get("quality_warnings") or [],
         },
@@ -328,16 +416,16 @@ def register_helper_result(trace_id: str, task_id: str, result: dict[str, Any]) 
         if not path:
             continue
         artifact_type = _guess_artifact_type(path)
-        artifact_status = ARTIFACT_READY if ok and outputs_complete is not False else ARTIFACT_INTERMEDIATE
+        artifact_status = ARTIFACT_READY if ok and producer_self_verified else ARTIFACT_INTERMEDIATE
         register_artifact(
             trace_id=trace_id,
             path=path,
             artifact_type=artifact_type,
             created_by=task_id,
             status=artifact_status,
-            verified_by="helper_outputs_check" if outputs_complete is True else "",
+            verified_by="helper_producer_self_verified" if producer_self_verified else "",
             evidence_ids=[evidence["evidence_id"]],
-            metadata={"terminal_reason": terminal},
+            metadata={"terminal_reason": terminal, "producer_self_verified": producer_self_verified},
         )
 
     if terminal == "resource_required" or resource_request:
@@ -453,7 +541,17 @@ def update_resource_request(
     satisfied_by: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Update a resource wait after the main process decides to refuse or close it."""
-    if state not in {RESOURCE_WAITING, RESOURCE_READY, RESOURCE_REFUSED, RESOURCE_CLOSED}:
+    state_aliases = {
+        "ready": RESOURCE_READY,
+        "ready_to_resume": RESOURCE_READY,
+        "waiting": RESOURCE_WAITING,
+        "waiting_resource": RESOURCE_WAITING,
+        "refused": RESOURCE_REFUSED,
+        "closed": RESOURCE_CLOSED,
+        "failed": RESOURCE_FAILED,
+    }
+    state = state_aliases.get(str(state or "").strip().lower(), state)
+    if state not in {RESOURCE_WAITING, RESOURCE_READY, RESOURCE_REFUSED, RESOURCE_CLOSED, RESOURCE_FAILED}:
         state = RESOURCE_WAITING
     for record in _resources.get(trace_id, ()):
         if record.request_id != request_id:
@@ -504,12 +602,25 @@ def ready_to_resume(trace_id: str) -> list[dict[str, Any]]:
 
 
 def structured_status(trace_id: str) -> dict[str, Any]:
+    contracts = list_contracts(trace_id)
+    evidence_recent = list_evidence(trace_id, last_n=20)
+    artifacts_recent = list_artifacts(trace_id, last_n=50)
+    latest_contract_at = max((float(x.get("updated_at") or 0) for x in contracts), default=0.0)
+    latest_evidence_at = max((float(x.get("created_at") or 0) for x in evidence_recent), default=0.0)
+    latest_artifact_at = max((float(x.get("created_at") or 0) for x in artifacts_recent), default=0.0)
+    latest_fact_at = max(latest_evidence_at, latest_artifact_at)
     return {
-        "contracts": list_contracts(trace_id),
-        "evidence_recent": list_evidence(trace_id, last_n=20),
+        "contracts": contracts,
+        "freshness": {
+            "latest_contract_updated_at": round(latest_contract_at, 3) if latest_contract_at else None,
+            "latest_evidence_at": round(latest_evidence_at, 3) if latest_evidence_at else None,
+            "latest_artifact_at": round(latest_artifact_at, 3) if latest_artifact_at else None,
+            "latest_fact_after_contract": bool(latest_fact_at and latest_contract_at and latest_fact_at > latest_contract_at),
+        },
+        "evidence_recent": evidence_recent,
         "verified_evidence_recent": list_evidence(trace_id, status=EVIDENCE_VERIFIED, last_n=20),
         "artifacts_ready": list_artifacts(trace_id, status=ARTIFACT_READY, last_n=50),
-        "artifacts_recent": list_artifacts(trace_id, last_n=50),
+        "artifacts_recent": artifacts_recent,
         "resource_requests": list_resource_requests(trace_id),
         "blocked_helpers": list_resource_requests(trace_id, state=RESOURCE_WAITING),
         "ready_to_resume_helpers": ready_to_resume(trace_id),

@@ -44,7 +44,8 @@ def test_todo_write_schema_warns_parallel_helpers_keep_single_in_progress():
     assert "At most one todo may be `in_progress`" in description
     assert "multiple helpers run in parallel" in description
     assert "keep other parallel branches `pending`" in description
-    assert "并行 helper 场景也只能有一个主控步骤处于 in_progress" in description
+    assert "not to carry long prose" in description
+    assert "不承载长正文" in description
 
 
 def test_edit_helper_prompt_requests_resources_instead_of_docx_placeholders():
@@ -53,8 +54,18 @@ def test_edit_helper_prompt_requests_resources_instead_of_docx_placeholders():
     prompt = _select_helper_system("edit")
     assert "When a resource is missing, request or report the needed resource" in prompt
     assert "Deliverables should contain confirmed content, not placeholders for absent resources" in prompt
+    assert "not template tokens such as TODO, TKTK, INSERT, PLACEHOLDER_*" in prompt
+    assert "do not insert template placeholder tokens" in prompt
     assert "Rewrite internal-only source notes into user-facing conclusions" in prompt
     assert "缺资源时请求主线程" in prompt
+
+
+def test_helper_report_verification_recommendation_does_not_invite_rechecking_when_passed():
+    from app.llm.tools.delegate import _select_helper_system
+
+    prompt = _select_helper_system("edit")
+    assert "Use `recommend: no` when you already performed the requested checks" in prompt
+    assert "Use `recommend: yes` only when a specific unverified risk" in prompt
 
 
 def test_text_mojibake_quality_helpers_repair_common_gbk_case():
@@ -204,6 +215,25 @@ async def test_dispatch_rejects_main_thread_implementation_aliases():
         assert "instead of retrying blocked aliases" in data["error"]
 
 
+async def test_workspace_missing_action_returns_fact_without_execution(tmp_path):
+    from app.llm.tools import registry
+
+    result = await registry.dispatch(
+        "workspace",
+        {"path": "accidental.txt", "content": "should not be written"},
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        workspace_dir=str(tmp_path),
+    )
+
+    data = json.loads(result)
+    assert data["ok"] is False
+    assert data["error"] == "workspace_action_required"
+    assert data["candidate_actions_from_fields"] == ["write"]
+    assert not (tmp_path / "accidental.txt").exists()
+
+
 
 async def test_translate_shared_cd_python_collapses_duplicate_helpers_shared_prefix():
     from app.llm.tools.workspace import _translate_windows_command
@@ -254,7 +284,12 @@ async def test_read_file_rejects_office_and_images(tmp_path):
 
     assert docx_result["ok"] is False
     assert docx_result["error"] == "binary_or_structured_file_not_readable_as_text"
-    assert "office read" in docx_result["suggested_tools"]
+    assert "office(action='read')" in docx_result["suggested_tools"]
+    assert docx_result["next_call_fact"] == {
+        "tool": "office",
+        "action": "read",
+        "path": "report.docx",
+    }
     assert image_result["ok"] is False
     assert image_result["error"] == "binary_or_structured_file_not_readable_as_text"
     assert "ocr" in image_result["suggested_tools"]
@@ -590,6 +625,21 @@ def test_windows_python_c_translation_preserves_stderr_redirect_suffix(tmp_path)
     assert (tmp_path / script_name).read_text(encoding="utf-8") == 'print("hello")'
 
 
+def test_windows_translate_unix_null_device_output_targets(tmp_path):
+    from app.llm.tools.workspace import _translate_windows_command
+
+    translated = _translate_windows_command(
+        'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:1234/',
+        str(tmp_path),
+    )
+    assert "-o NUL" in translated
+    assert "/dev/null" not in translated
+    assert "http://127.0.0.1:1234/" in translated
+
+    stderr_redirect = _translate_windows_command("python check.py 2>/dev/null", str(tmp_path))
+    assert stderr_redirect == "python check.py 2>NUL"
+
+
 def test_windows_cmd_wrapped_multiline_python_c_translation_writes_temp_script(tmp_path):
     from app.llm.tools.workspace import _translate_windows_command
 
@@ -615,8 +665,8 @@ async def test_read_file_redundant_warning_gives_next_action(tmp_path):
     assert second["ok"] is True
     assert second["_already_read_full"] is True
     assert "复用已有上下文" in second["_redundant_read_warning"]
-    assert "直接基于已有上下文执行下一步" in second["_next_action_instruction"]
-    assert "read_minimal_fragment" in second["_suggested_next_actions"]
+    assert "事实：全文已在本轮返回过" in second["_next_action_instruction"]
+    assert "read_minimal_fragment" in second["_available_next_actions"]
 
 
 async def test_read_file_fragment_paging_does_not_trigger_outline_fallback(tmp_path):
@@ -642,6 +692,45 @@ async def test_read_file_fragment_paging_does_not_trigger_outline_fallback(tmp_p
     assert results[-1].get("_fragment_read_count", 0) >= 4
 
 
+async def test_read_file_duplicate_fragment_omits_repeated_content(tmp_path):
+    from app.llm.tools.workspace import handle_read_file
+
+    path = tmp_path / "notes.txt"
+    path.write_text("\n".join(f"line {i}" for i in range(1, 11)), encoding="utf-8")
+
+    first = await handle_read_file(str(tmp_path), "notes.txt", start_line=3, end_line=6)
+    second = await handle_read_file(str(tmp_path), "notes.txt", start_line=3, end_line=6)
+    forced = await handle_read_file(str(tmp_path), "notes.txt", start_line=3, end_line=6, force=True)
+
+    assert first["ok"] is True
+    assert "3:" in first["content"]
+    assert second["ok"] is True
+    assert second["content"] == ""
+    assert second["content_omitted"] is True
+    assert second["content_omitted_reason"] == "duplicate_read_range_already_returned"
+    assert second["coverage_reason"] == "covered_by_prior_fragment_read"
+    assert "force=true" in second["note"]
+    assert "3:" in forced["content"]
+
+
+async def test_read_file_subfragment_after_full_read_omits_repeated_content(tmp_path):
+    from app.llm.tools.workspace import handle_read_file
+
+    path = tmp_path / "brief.md"
+    path.write_text("\n".join(f"section line {i}" for i in range(1, 9)), encoding="utf-8")
+
+    full = await handle_read_file(str(tmp_path), "brief.md")
+    sub = await handle_read_file(str(tmp_path), "brief.md", start_line=4, end_line=5)
+
+    assert full["ok"] is True
+    assert full["shown_range"] == [1, 8]
+    assert sub["ok"] is True
+    assert sub["content"] == ""
+    assert sub["content_omitted"] is True
+    assert sub["coverage_reason"] == "covered_by_prior_full_read"
+    assert sub["covered_by_ranges"] == [[1, 8]]
+
+
 async def test_todo_write_overuse_returns_direct_execution_instruction(tmp_path):
     from app.llm.tools.workspace import handle_todo_write
 
@@ -652,8 +741,30 @@ async def test_todo_write_overuse_returns_direct_execution_instruction(tmp_path)
 
     assert result is not None
     assert result["todo_write_count"] == 30
-    assert "直接执行、验证或交付" in result["throttle_warning"]
-    assert "直接调用能推进任务的工具" in result["next_action_instruction"]
+    assert result["throttle_warning"]["issue"] == "frequent_todo_write_calls"
+    assert result["throttle_warning"]["count"] == 30
+    assert "does not execute work" in result["throttle_warning"]["fact"]
+    assert "No workspace artifact is created by todo_write itself." in result["next_action_facts"]
+    assert "next_action_instruction" not in result
+
+
+async def test_todo_write_long_content_returns_fact_warning_without_rejecting(tmp_path):
+    from app.llm.tools.workspace import handle_todo_write
+
+    long_body = "Write section. " + ("This is document body text. " * 40)
+    result = await handle_todo_write(str(tmp_path), [
+        {"id": "1", "content": long_body, "status": "in_progress"},
+    ])
+
+    assert result["ok"] is True
+    assert result["counts"]["total"] == 1
+    warning = result["content_length_warning"]
+    assert warning["issue"] == "todo_content_long_for_planning_state"
+    assert warning["long_items"][0]["id"] == "1"
+    assert "submitted todos were still recorded" in warning["fact"]
+    assert "workspace" in warning["fact"]
+    assert "office" in warning["fact"]
+    assert result["next_action_facts"]
 
 
 def test_normalize_tool_call_args_recovers_double_encoded_json_string():
@@ -694,6 +805,18 @@ async def test_office_append_empty_args_suggests_complete_args(tmp_path):
     assert result["error"] == "invalid_or_empty_args"
     assert result["recovery"]["action"] == "retry_with_complete_args"
     assert "blocks" in result["recovery"]["required_fields"]
+
+
+async def test_office_missing_path_recovery_is_fact_not_fixed_batch_rule(tmp_path):
+    from app.llm.tools.office import handle_office
+
+    result = json.loads(await handle_office(str(tmp_path), {"action": "append"}))
+
+    assert result["ok"] is False
+    assert result["error"] == "invalid_or_empty_args"
+    assert "path" in result["recovery"]["required_fields"]
+    assert "same blocks" not in result["hint"].lower()
+    assert "intended blocks" in result["next_call_fact"]
 
 
 async def test_office_docx_read_supports_block_paging(tmp_path):
@@ -749,6 +872,39 @@ async def test_office_docx_read_save_to_writes_segment_text(tmp_path):
     assert "second paragraph" in saved
 
 
+async def test_office_verify_numbers_skips_context_metadata(tmp_path):
+    from docx import Document
+    from app.llm.tools.office import handle_office
+
+    (tmp_path / "bench.csv").write_text(
+        "distribution,op_type,mean_time_ns\n"
+        "zipfian,lookup,38.5\n"
+        "random,delete,203.9\n",
+        encoding="utf-8",
+    )
+    doc = Document()
+    doc.add_paragraph(
+        "Benchmarks ran on a 13th Gen Intel Core i9-13980HX with 48 GB RAM, "
+        "Windows 11, GCC 13.2, and Section 3.1 reports 38.5 ns for zipfian lookup."
+    )
+    doc.save(tmp_path / "paper.docx")
+
+    result = json.loads(await handle_office(str(tmp_path), {
+        "action": "verify_numbers",
+        "path": "paper.docx",
+        "csv_paths": ["bench.csv"],
+        "tolerance": 0.05,
+    }))
+
+    assert result["ok"] is True
+    assert result["mismatches_count"] == 0
+    skipped = result["skipped_context_numbers_sample"]
+    assert any(item["number_str"] == "13980" for item in skipped)
+    assert any(item["number_str"] == "13.2" for item in skipped)
+    assert "candidate CSV-backed numeric claims" in result["hint"]
+    assert "强烈建议" not in result["hint"]
+
+
 async def test_office_docx_append_keeps_backup_and_valid_zip(tmp_path):
     from docx import Document
     from app.llm.tools.office import handle_office
@@ -773,6 +929,48 @@ async def test_office_docx_append_keeps_backup_and_valid_zip(tmp_path):
     texts = [p["text"] for p in reread["paragraphs"]]
     assert "before" in texts
     assert "after" in texts
+
+
+async def test_office_docx_fill_empty_headings_batches_heading_repair(tmp_path):
+    from docx import Document
+    from app.llm.tools.office import handle_office
+
+    doc = Document()
+    doc.add_heading("Compression Report", level=0)
+    doc.add_heading("", level=1)
+    doc.add_heading("", level=2)
+    doc.save(tmp_path / "report.docx")
+
+    result = json.loads(await handle_office(str(tmp_path), {
+        "action": "fill_empty_headings",
+        "path": "report.docx",
+        "headings": [
+            {
+                "level": 1,
+                "text": "引言与背景",
+                "after_blocks": [{"type": "paragraph", "text": "正文第一段。"}],
+            },
+            {
+                "level": 2,
+                "text": "实验设计",
+                "after_blocks": [{"type": "paragraph", "text": "正文第二段。"}],
+            },
+        ],
+    }))
+
+    assert result["ok"] is True
+    assert result["filled_count"] == 2
+    assert result["remaining_empty_headings"] == 0
+
+    reread = json.loads(await handle_office(str(tmp_path), {
+        "action": "read",
+        "path": "report.docx",
+    }))
+    texts = [p["text"] for p in reread["paragraphs"]]
+    assert "引言与背景" in texts
+    assert "实验设计" in texts
+    assert "正文第一段。" in texts
+    assert "正文第二段。" in texts
 
 
 def test_office_embedded_image_ocr_reports_batch_offsets(tmp_path, monkeypatch):
@@ -1258,6 +1456,119 @@ async def test_dispatch_helper_aliases_route_to_workspace_tools(tmp_path):
     assert data2.get("_alias_note")
 
 
+async def test_dispatch_helper_caller_sets_owner_for_bash_and_resource_tools(tmp_path):
+    from app.core.core_processes import current_owner
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import registry
+
+    (tmp_path / "_env").mkdir()
+    target = tmp_path / "_env" / "app.js"
+    target.write_text("old\n", encoding="utf-8")
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        result = await registry.dispatch(
+            "bash",
+            {
+                "command": (
+                    "python -c \"from pathlib import Path; "
+                    "Path('_env/app.js').write_text('new', encoding='utf-8')\""
+                ),
+                "timeout_sec": 10,
+            },
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+            workspace_dir=str(tmp_path),
+            caller="helper",
+        )
+
+    data = json.loads(result)
+    assert data["ok"] is True
+    assert target.read_text(encoding="utf-8") == "new"
+    assert current_owner() == "main:unknown"
+
+    resource = await registry.dispatch(
+        "request_resource",
+        {"kind": "read", "reason": "need exact source evidence", "needed_outputs": ["evidence.txt"]},
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        workspace_dir=str(tmp_path),
+        caller="helper",
+    )
+    resource_data = json.loads(resource)
+    assert resource_data["ok"] is False
+    assert resource_data["action"] == "request_resource"
+    assert resource_data["suggested_helper_kind"] == "read"
+
+
+async def test_environment_edit_file_missing_project_path_points_to_staged_edit_path(tmp_path):
+    import json
+
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import registry
+
+    staged = tmp_path / "_env" / "service"
+    staged.mkdir(parents=True)
+    (staged / "render.py").write_text("def render():\n    return 'old'\n", encoding="utf-8")
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        result = await registry.dispatch(
+            "edit_file",
+            {
+                "path": "service/render.py",
+                "old_str": "return 'old'",
+                "new_str": "return 'new'",
+            },
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+            workspace_dir=str(tmp_path),
+            caller="helper",
+        )
+
+    data = json.loads(result)
+    assert data["ok"] is False
+    assert data["staged_candidate"] == "_env/service/render.py"
+    assert data["staged_candidate_exists"] is True
+    assert "workspace editing" in data["error"]
+    assert "Retry read_file" not in data["error"]
+
+
+async def test_dispatch_helper_caller_large_read_does_not_hit_main_guard(tmp_path):
+    from app.llm.tools import registry
+
+    (tmp_path / "large.txt").write_text("x" * 130_000, encoding="utf-8")
+
+    result = await registry.dispatch(
+        "read_file",
+        {"path": "large.txt"},
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        workspace_dir=str(tmp_path),
+        caller="helper",
+    )
+    data = json.loads(result)
+
+    assert data["ok"] is True
+    assert data.get("error_kind") != "main_thread_large_read_should_delegate_or_target"
+
+
 def test_main_thread_tools_do_not_expose_implementation_tool_names():
     from app.llm.tools.registry import ROUND2_TOOLS
 
@@ -1349,12 +1660,11 @@ def test_task_quality_guard_keeps_summarize_environment_only():
 
 
 def test_task_quality_guard_keeps_selected_source_files_as_file_summary():
-    from app.llm.tools import delegate
+    from pathlib import Path
 
-    src = inspect.getsource(delegate._persona_consent_guard)
-
-    assert "summarizing selected source/config files in a code project -> file_summary" in src
-    assert "source/config files" in src
+    prompt = Path("app/llm/aux_prompts.py").read_text(encoding="utf-8")
+    assert "summarizing selected source/config files in a code project -> file_summary" in prompt
+    assert "source/config files" in prompt
 
 
 def test_delegate_schema_clarifies_kind_routing_for_draw_code_verify():
@@ -1421,7 +1731,26 @@ def test_helper_tool_filter_keeps_main_thread_alias_boundary():
     assert verify_action["enum"] == ["run", "locate"]
 
 
-async def test_edit_helper_workspace_runtime_guard_rejects_run(tmp_path):
+async def test_edit_helper_workspace_runtime_guard_allows_existing_check_run(tmp_path):
+    from app.core.core_processes import reset_current_helper_kind, set_current_helper_kind
+    from app.llm.tools import registry
+
+    (tmp_path / "verify_report.py").write_text("print('PASS')\n", encoding="utf-8")
+    token = set_current_helper_kind("edit")
+    try:
+        run_data = json.loads(await registry._handle_workspace(
+            str(tmp_path),
+            {"action": "run", "command": "python verify_report.py", "timeout_sec": 5},
+        ))
+    finally:
+        reset_current_helper_kind(token)
+
+    assert run_data["ok"] is True
+    assert run_data["returncode"] == 0
+    assert "PASS" in run_data["stdout"]
+
+
+async def test_edit_helper_workspace_runtime_guard_rejects_non_check_run(tmp_path):
     from app.core.core_processes import reset_current_helper_kind, set_current_helper_kind
     from app.llm.tools import registry
 
@@ -1435,7 +1764,7 @@ async def test_edit_helper_workspace_runtime_guard_rejects_run(tmp_path):
         reset_current_helper_kind(token)
 
     assert run_data["ok"] is False
-    assert run_data["blocked_reason"] == "edit_helper_workspace_run_forbidden"
+    assert run_data["blocked_reason"] == "edit_helper_workspace_run_limited_to_existing_checks"
     assert run_data["suggested_helper_kind"] == "code"
 
 
@@ -1485,6 +1814,74 @@ def test_selected_helper_prompts_include_actual_tool_boundary():
             assert "python" in tool_names
 
 
+def test_helper_user_prompt_adds_ordered_acceptance_facts_only_when_needed():
+    from app.llm.tools.delegate_runner import _build_helper_user_prompt
+
+    ordered_prompt = _build_helper_user_prompt(
+        prompt="Reproduce the current failure before editing the parser, then verify the fix.",
+        dynamic_prompt_prefix_parts=[],
+        kind="code",
+        task_contract_context='{"acceptance_checks":["baseline before change"]}',
+    )
+    plain_prompt = _build_helper_user_prompt(
+        prompt="Fix the parser and verify it.",
+        dynamic_prompt_prefix_parts=[],
+        kind="code",
+        task_contract_context='{"acceptance_checks":["tests pass"]}',
+    )
+
+    assert "## Ordered Acceptance Facts" in ordered_prompt
+    assert "pre-change evidence before editing" in ordered_prompt
+    assert "## Ordered Acceptance Facts" not in plain_prompt
+
+
+def test_helper_user_prompt_turns_main_apply_tools_into_boundary_facts():
+    from app.llm.tools.delegate_runner import _build_helper_user_prompt
+
+    prompt = _build_helper_user_prompt(
+        prompt=(
+            "### Deliverable 1: report.md (create with env_apply_create)\n"
+            "Write the report from supplied evidence."
+        ),
+        dynamic_prompt_prefix_parts=[],
+        kind="edit",
+        task_contract_context='{"expected_outputs":["report.md"]}',
+    )
+
+    assert "## Helper Tool Boundary Facts" in prompt
+    assert "main-process routing, apply, or helper-result consumption steps" in prompt
+    assert "not executable helper tools" in prompt
+    assert "Create text/Markdown/Office artifacts with your visible edit" in prompt
+    assert "### Deliverable 1: report.md (create with env_apply_create)" in prompt
+
+
+def test_helper_source_field_provenance_marks_structured_input_summaries():
+    from app.llm.tools.delegate import _mark_unverified_helper_source_interpretations
+
+    prompt, observations = _mark_unverified_helper_source_interpretations(
+        "Create artifact.md. Source summary says service cost is $220 for 3 nights.",
+        input_files=["source.json", "profile.yaml"],
+    )
+
+    assert "## Source Field Provenance" in prompt
+    assert "read the raw field names/values/notes from input_files" in prompt
+    assert "A total, package, included" in prompt
+    assert observations == [{"kind": "source_field_provenance_added", "input_files": 2}]
+
+
+def test_helper_source_field_provenance_skips_plain_input_prompts():
+    from app.llm.tools.delegate import _mark_unverified_helper_source_interpretations
+
+    original = "Create artifact.md from the listed files and preserve the requested headings."
+    prompt, observations = _mark_unverified_helper_source_interpretations(
+        original,
+        input_files=["outline.md"],
+    )
+
+    assert prompt == original
+    assert observations == []
+
+
 def test_code_and_verify_helper_prompts_preserve_statistic_units():
     from app.llm.tools.delegate import _HELPER_SYSTEM_CODE, _HELPER_SYSTEM_VERIFY
 
@@ -1493,6 +1890,15 @@ def test_code_and_verify_helper_prompts_preserve_statistic_units():
         assert "not interchangeable" in text or "different metrics" in text
     assert "统计结果要区分字符、字节、行数" in _HELPER_SYSTEM_CODE
     assert "核对统计单位" in _HELPER_SYSTEM_VERIFY
+
+
+def test_code_helper_prompt_uses_search_evidence_for_symbol_migrations():
+    from app.llm.tools.delegate import _HELPER_SYSTEM_CODE
+
+    assert "identifier, API, schema, field, import, or contract migrations" in _HELPER_SYSTEM_CODE
+    assert "use search/index evidence to discover impacted references" in _HELPER_SYSTEM_CODE
+    assert "verify remaining old/new references" in _HELPER_SYSTEM_CODE
+    assert "迁移/契约变更" in _HELPER_SYSTEM_CODE
 
 
 def test_project_analysis_helper_filters_are_read_only_and_light():
@@ -1596,6 +2002,78 @@ async def test_inventory_helper_workspace_runtime_guard_allows_only_temporary_wr
         assert locate_data["ok"] is True
     finally:
         reset_current_helper_kind(token)
+
+
+async def test_environment_workspace_locate_reports_chat_workspace_scope_fact(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import registry
+
+    project = tmp_path / "project"
+    chat_ws = tmp_path / "chat"
+    project.mkdir()
+    chat_ws.mkdir()
+    (project / "app.py").write_text("print('project')\n", encoding="utf-8")
+
+    env = EnvironmentContext(
+        root_dir=str(project),
+        archive_id="arch_test",
+        group_id="env_user_test",
+        user_id="user",
+        project_key="project",
+    )
+    with runtime_context("environment", env):
+        result = json.loads(await registry._handle_workspace(
+            str(chat_ws),
+            {"action": "locate", "pattern": "*.py"},
+        ))
+
+    fact = result["environment_workspace_scope_fact"]
+    assert result["ok"] is True
+    assert result["searched_scope"] == "chat_workspace_only"
+    assert result["project_search_performed"] is False
+    assert result["project_search_tools"] == ["env_list_tree", "env_search", "env_inventory", "env_read"]
+    assert "not the real environment project root" in fact
+    assert "env_list_tree" in fact
+    assert "not evidence that a project file is absent" in fact
+
+
+async def test_environment_search_files_reports_chat_scope_fact(tmp_path, monkeypatch):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import registry
+
+    project = tmp_path / "project"
+    chat_ws = tmp_path / "chat"
+    project.mkdir()
+    chat_ws.mkdir()
+    (project / "users.db").write_bytes(b"sqlite")
+    (chat_ws / "note.txt").write_text("chat workspace only\n", encoding="utf-8")
+
+    async def fake_search_files(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(registry.kb_mem, "search_files", fake_search_files)
+
+    env = EnvironmentContext(
+        root_dir=str(project),
+        archive_id="arch_test",
+        group_id="env_user_test",
+        user_id="user",
+        project_key="project",
+    )
+    with runtime_context("environment", env):
+        result = json.loads(await registry._handle_search_files(
+            "arch_test",
+            "env_user_test",
+            str(chat_ws),
+            {"query": "users.db", "limit": 5},
+        ))
+
+    fact = result["environment_search_scope_fact"]
+    assert result["searched_scope"] == "chat_history_and_chat_workspace_only"
+    assert result["project_search_performed"] is False
+    assert result["project_search_tools"] == ["env_list_tree", "env_search", "env_inventory", "env_read"]
+    assert "does not search the real environment project root" in fact
+    assert "not evidence that a project file is absent" in fact
 
 
 def test_resource_helper_tool_filters_isolate_tts_and_read():
@@ -1743,9 +2221,15 @@ async def test_legacy_spawn_wait_helper_runtime_paths_are_disabled(tmp_path):
     assert spawn_data["ok"] is False
     assert spawn_data["error"] == "helper_spawn_disabled"
     assert "coordinated by the main process through delegate" in spawn_data["blocked_reason"]
+    assert spawn_data["recovery_facts"]["coordinator"] == "main_process"
+    assert "spawn_resource_helper" in spawn_data["recovery_facts"]["available_shapes"]
+    assert "Only the main process can create helpers" in spawn_data["dispatch_boundary_facts"]
     assert wait_data["ok"] is False
     assert wait_data["error"] == "helper_wait_disabled"
     assert "coordinated by the main process" in wait_data["blocked_reason"]
+    assert wait_data["recovery_facts"]["coordinator"] == "main_process"
+    assert "inspect_helper_state" in wait_data["recovery_facts"]["available_shapes"]
+    assert "Only the main process can inspect global helper state" in wait_data["dispatch_boundary_facts"]
 
 
 async def test_read_helper_workspace_runtime_guard_only_allows_text_evidence(tmp_path):
@@ -1872,6 +2356,9 @@ async def test_helper_env_write_contract_blocks_undeclared_project_copy(tmp_path
         ))
         assert blocked["ok"] is False
         assert blocked["blocked_reason"] == "helper_env_write_outside_expected_outputs"
+        assert blocked["matching_helper_kind"] == "code"
+        assert blocked["observed_recovery_tool"] == "request_resource"
+        assert blocked["observed_recovery_shape"]["needed_outputs"] == ["_env/src/algolab/graph.py"]
 
         allowed = json.loads(await registry._handle_workspace(
             str(tmp_path),
@@ -1920,6 +2407,8 @@ async def test_helper_env_write_scope_allows_component_directory_without_changin
         ))
         assert outside["ok"] is False
         assert outside["blocked_reason"] == "helper_env_write_outside_expected_outputs"
+        assert outside["matching_helper_kind"] == "code"
+        assert outside["observed_recovery_shape"]["needed_outputs"] == ["_env/ui/app.js"]
     finally:
         reset_current_helper_write_scopes(scopes_token)
         reset_current_helper_expected_outputs(outputs_token)
@@ -1961,14 +2450,14 @@ def test_environment_expected_outputs_expand_paths_with_spaces():
     assert expanded == [f"_env/docs/{name}"]
 
 
-async def test_workspace_write_refuses_existing_environment_project_copy(tmp_path):
+async def test_workspace_write_allows_existing_environment_project_copy_with_fact(tmp_path):
     from app.llm.tools import registry
 
     target = tmp_path / "_env" / "app" / "llm" / "tools" / "environment.py"
     target.parent.mkdir(parents=True)
     target.write_text("def existing():\n    return True\n", encoding="utf-8")
 
-    blocked = json.loads(await registry._handle_workspace(
+    staged = json.loads(await registry._handle_workspace(
         str(tmp_path),
         {
             "action": "write",
@@ -1976,9 +2465,11 @@ async def test_workspace_write_refuses_existing_environment_project_copy(tmp_pat
             "content": "short",
         },
     ))
-    assert blocked["ok"] is False
-    assert blocked["blocked_reason"] == "env_project_copy_write_overwrite_forbidden"
-    assert target.read_text(encoding="utf-8") == "def existing():\n    return True\n"
+    assert staged["ok"] is True
+    assert staged["staged_project_copy"] is True
+    assert staged["staged_project_path"] == "_env/app/llm/tools/environment.py"
+    assert "env_apply_replace" in staged["suggested_next_tools"]
+    assert target.read_text(encoding="utf-8") == "short"
 
     created = json.loads(await registry._handle_workspace(
         str(tmp_path),
@@ -1989,6 +2480,61 @@ async def test_workspace_write_refuses_existing_environment_project_copy(tmp_pat
         },
     ))
     assert created["ok"] is True
+
+
+async def test_main_thread_blocks_editing_existing_environment_project_copy(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools.workspace import handle_edit_file, handle_insert_in_file, handle_multi_edit
+
+    target = tmp_path / "_env" / "app.js"
+    target.parent.mkdir(parents=True)
+    target.write_text('const form = document.getElementById("contact-formm");\n', encoding="utf-8")
+    env = EnvironmentContext(
+        root_dir="F:/project",
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+        project_key="proj",
+    )
+
+    with runtime_context("environment", env):
+        edit = await handle_edit_file(
+            str(tmp_path),
+            "_env/app.js",
+            'document.getElementById("contact-formm")',
+            'document.getElementById("contact-form")',
+        )
+        multi = await handle_multi_edit(
+            str(tmp_path),
+            "_env/app.js",
+            [{
+                "old_str": 'document.getElementById("contact-formm")',
+                "new_str": 'document.getElementById("contact-form")',
+            }],
+        )
+        insert = await handle_insert_in_file(str(tmp_path), "_env/app.js", -1, "// done\n")
+
+    assert edit["ok"] is True
+    assert edit["staged_project_copy"] is True
+    assert "real project file" in edit["pending_project_apply_fact"]
+    assert multi["ok"] is False
+    assert "old_str not found" in json.dumps(multi["failures"], ensure_ascii=False)
+    assert insert["ok"] is True
+    assert insert["staged_project_copy"] is True
+    assert target.read_text(encoding="utf-8") == 'const form = document.getElementById("contact-form");\n\n// done\n'
+
+
+async def test_chat_mode_allows_editing_env_named_workspace_file(tmp_path):
+    from app.llm.tools.workspace import handle_edit_file
+
+    target = tmp_path / "_env" / "notes.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("alpha beta\n", encoding="utf-8")
+
+    result = await handle_edit_file(str(tmp_path), "_env/notes.txt", "alpha", "bravo")
+
+    assert result["ok"] is True
+    assert target.read_text(encoding="utf-8") == "bravo beta\n"
 
 
 async def test_main_thread_allows_compact_utility_python_script(tmp_path):
@@ -2014,7 +2560,7 @@ async def test_main_thread_allows_compact_utility_python_script(tmp_path):
     assert (tmp_path / "_append_screenshots.py").exists()
 
 
-async def test_main_thread_still_blocks_project_source_python(tmp_path):
+async def test_main_thread_project_source_python_requests_delegate(tmp_path):
     from app.llm.tools import registry
 
     result = json.loads(await registry._handle_workspace(
@@ -2028,25 +2574,54 @@ async def test_main_thread_still_blocks_project_source_python(tmp_path):
 
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_project_artifact_should_delegate"
+    assert result["recovery_facts"]["matching_helper_kind"] in {"code", "edit"}
+    assert not (tmp_path / "db_index_project" / "rbtree.py").exists()
 
 
-def test_env_apply_create_blocks_large_main_authored_project_text(tmp_path):
+async def test_main_thread_allows_small_temp_verification_script(tmp_path):
+    from app.llm.tools import registry
+
+    result = json.loads(await registry._handle_workspace(
+        str(tmp_path),
+        {
+            "action": "write",
+            "path": ".temp/_verify_docx.py",
+            "content": "from docx import Document\nprint(len(Document('db_index_paper.docx').paragraphs))\n",
+        },
+    ))
+
+    assert result["ok"] is True
+    assert (tmp_path / ".temp" / "_verify_docx.py").is_file()
+
+
+def test_env_apply_create_rejects_large_main_authored_project_text(tmp_path):
     from app.core.runtime_mode import EnvironmentContext, runtime_context
     from app.llm.tools import environment
 
     project = tmp_path / "project"
+    workspace = tmp_path / "workspace"
     project.mkdir()
+    workspace.mkdir()
     env = EnvironmentContext(root_dir=str(project), archive_id="arch", group_id="group", user_id="user", project_key="proj")
 
     content = "\n".join(f"- contract line {i}: module boundary and acceptance rule" for i in range(60))
     with runtime_context("environment", env):
         result = environment._handle_apply_create(
-            str(tmp_path / "workspace"),
+            str(workspace),
             {"path": "db_index_project/CONTRACT.md", "content": content},
         )
 
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_project_artifact_create_should_delegate"
+    assert result["recovery_facts"]["matching_helper_kind"] == "edit"
+    assert result["candidate_preserved"] is True
+    candidate_path = workspace / result["candidate_workspace_path"]
+    assert candidate_path.read_text(encoding="utf-8") == content
+    assert result["recovery_facts"]["input_files"] == [result["candidate_workspace_path"]]
+    assert "candidate_apply_arguments" not in result["recovery_facts"]
+    assert "candidate_apply_fact" not in result
+    assert "not a clean producer-owned output by itself" in result["candidate_handoff_fact"]
+    assert "Avoid pasting" in result["candidate_preservation_fact"]
     assert not (project / "db_index_project" / "CONTRACT.md").exists()
 
 
@@ -2064,6 +2639,34 @@ def test_env_apply_create_rejects_directory_targets(tmp_path):
     assert result["ok"] is False
     assert result["error_kind"] == "env_apply_create_requires_file_target"
     assert not (project / "contracts").exists()
+
+
+def test_env_apply_create_existing_file_suggests_replace_not_delete(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import environment
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "result.csv").write_text("old\n", encoding="utf-8")
+    env = EnvironmentContext(
+        root_dir=str(project),
+        archive_id="arch_existing_create",
+        group_id="env_user_test",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        result = environment._handle_apply_create(
+            str(tmp_path / "workspace"),
+            {"path": "result.csv", "content": "new\n"},
+        )
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "env_apply_create_target_exists"
+    assert "env_apply_replace" in result["existing_file_fact"]
+    assert "Deleting the file first is not required" in result["existing_file_fact"]
+    assert result["suggested_tools"] == ["env_diff", "env_apply_replace", "env_run"]
 
 
 def test_env_apply_create_refuses_failed_helper_staged_file(tmp_path):
@@ -2162,6 +2765,88 @@ def test_env_apply_create_allows_ready_helper_staged_file(tmp_path):
 
     assert result["ok"] is True
     assert (project / "db_index_project" / "src" / "base.py").read_text(encoding="utf-8") == "class Index:\n    pass\n"
+    assert result["acceptance_fact"]["helper_owned"] is True
+    assert "producer boundary" in result["acceptance_fact"]["fact"]
+    assert "final intended project state" in result["acceptance_fact"]["fact"]
+
+
+def test_env_apply_replace_reports_helper_owned_final_state_fact(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import environment
+
+    project = tmp_path / "project"
+    workspace = tmp_path / "workspace"
+    staged = workspace / "_env" / "src" / "settings.py"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("VALUE = 2\n", encoding="utf-8")
+    project_file = project / "src" / "settings.py"
+    project_file.parent.mkdir(parents=True)
+    project_file.write_text("VALUE = 1\n", encoding="utf-8")
+    project.mkdir(exist_ok=True)
+    env = EnvironmentContext(root_dir=str(project), archive_id="arch", group_id="group", user_id="user", project_key="proj")
+    environment.record_env_helper_outputs(
+        str(workspace),
+        task_id="settings_fix",
+        files=["_env/src/settings.py"],
+        ok=True,
+        terminal_reason="completed",
+        outputs_complete=True,
+        kind="code",
+        mode="easy",
+    )
+
+    with runtime_context("environment", env):
+        result = environment._handle_apply_replace(
+            str(workspace),
+            {
+                "path": "src/settings.py",
+                "workspace_path": "_env/src/settings.py",
+                "expected_hash": environment._sha256(project_file),
+            },
+        )
+
+    assert result["ok"] is True
+    assert project_file.read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert result["acceptance_fact"]["helper_owned"] is True
+    assert "content quality remains at the producer boundary" in result["acceptance_fact"]["fact"]
+    assert "A check that ran before a later project apply covers the earlier state" in result["acceptance_fact"]["fact"]
+
+
+def test_env_diff_missing_project_target_reports_create_path_facts(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import environment
+
+    project = tmp_path / "project"
+    workspace = tmp_path / "workspace"
+    staged = workspace / "_env" / "eu_active_2026.csv"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("email,region\nx@example.com,EU\n", encoding="utf-8")
+    project.mkdir()
+    env = EnvironmentContext(root_dir=str(project), archive_id="arch", group_id="group", user_id="user", project_key="proj")
+
+    with runtime_context("environment", env):
+        result = environment._handle_diff(
+            str(workspace),
+            {
+                "path": "eu_active_2026.csv",
+                "workspace_path": "_env/eu_active_2026.csv",
+            },
+        )
+
+    assert result["ok"] is True
+    assert result["diff_available"] is False
+    assert result["fact_kind"] == "env_diff_project_target_missing"
+    assert result["project_file_exists"] is False
+    assert result["workspace_path_exists"] is True
+    assert result["recovery_facts"] == {
+        "matching_tool_shape": "env_apply_create",
+        "tool": "env_apply_create",
+        "arguments": {
+            "path": "eu_active_2026.csv",
+            "workspace_path": "_env/eu_active_2026.csv",
+        },
+    }
+    assert not (project / "eu_active_2026.csv").exists()
 
 
 async def test_main_thread_blocks_large_new_env_project_artifact_write(tmp_path):
@@ -2184,11 +2869,8 @@ async def test_main_thread_blocks_large_new_env_project_artifact_write(tmp_path)
         ))
 
     assert result["ok"] is False
-    assert result["blocked_reason"] in {
-        "main_thread_env_project_artifact_should_delegate",
-        "main_thread_project_artifact_should_delegate",
-    }
-    assert result.get("delegate_required") or result.get("suggested_next_action", {}).get("tool") == "delegate"
+    assert result["error_kind"] == "main_thread_project_artifact_should_delegate"
+    assert result["recovery_facts"]["matching_helper_kind"] == "code"
     assert not (tmp_path / "workspace" / "_env" / "db_index_project" / "src" / "rbtree.py").exists()
 
 
@@ -2225,6 +2907,8 @@ async def test_request_resource_is_helper_only_and_structured(tmp_path):
     assert data["ok"] is False
     assert data["action"] == "request_resource"
     assert data["requires_main_resource"] is True
+    assert data["matching_helper_kind"] == "draw"
+    assert "resource" in data["resource_resolution_facts"]
     assert data["suggested_helper_kind"] == "draw"
     assert data["needed_outputs"] == ["chart.png"]
 
@@ -2394,16 +3078,25 @@ async def test_gpu_resource_allows_different_kinds_when_total_allows():
     limiter = GpuResourceLimiter(total=2, ocr=1, tts=1, mineru=1, umiocr=1, budget_mb=8000)
     active = 0
     peak = 0
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
 
     async def worker(kind: str):
         nonlocal active, peak
         async with limiter.async_scope(kind):
             active += 1
             peak = max(peak, active)
-            await asyncio.sleep(0.02)
+            if active == 2:
+                both_entered.set()
+            await release.wait()
             active -= 1
 
-    await asyncio.gather(worker("ocr"), worker("tts"))
+    tasks = [asyncio.create_task(worker("ocr")), asyncio.create_task(worker("tts"))]
+    try:
+        await asyncio.wait_for(both_entered.wait(), timeout=1.0)
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
 
     assert peak == 2
 
@@ -2711,6 +3404,37 @@ def test_helper_tool_call_bloat_allows_larger_write_like_payloads():
     assert kind == "write_like"
 
 
+def test_helper_tool_call_bloat_closes_source_writes_earlier():
+    from app.llm.client import _helper_tool_arg_bloat_thresholds
+
+    warn, close, kind = _helper_tool_arg_bloat_thresholds(
+        "workspace",
+        '{"action":"write","path":"_env/src/rb_tree.c","content":"' + ("x" * 100),
+    )
+
+    assert warn == 10_000
+    assert close == 18_000
+    assert kind == "source_write"
+
+
+def test_helper_tool_call_bloat_treats_docx_builder_script_as_write_like():
+    from app.llm.client import _helper_tool_arg_bloat_thresholds
+
+    args = (
+        '{"action":"write","path":"build_paper.py","content":"'
+        'from docx import Document\\n'
+        'doc = Document()\\n'
+        'doc.add_paragraph(\\"body\\")\\n'
+        'doc.save(\\"db_index_paper.docx\\")'
+    )
+
+    warn, close, kind = _helper_tool_arg_bloat_thresholds("workspace", args)
+
+    assert warn == 14_000
+    assert close == 48_000
+    assert kind == "write_like"
+
+
 def test_helper_tool_call_bloat_keeps_general_payloads_bounded():
     from app.llm.client import _helper_tool_arg_bloat_thresholds
 
@@ -2730,6 +3454,7 @@ def test_preflight_guard_preserves_full_helper_envelope_fields():
     src = Path("app/llm/tools/delegate_actions.py").read_text(encoding="utf-8")
     assert '"input_files": s.get("input_files", [])' in src
     assert '"acceptance_checks": s.get("acceptance_checks", [])' in src
+    assert "input_files=spec.get(\"input_files\") or []" in src
 
 
 async def test_preflight_kind_retry_preserves_input_files_and_acceptance(monkeypatch):
@@ -2765,6 +3490,40 @@ async def test_preflight_kind_retry_preserves_input_files_and_acceptance(monkeyp
     # passes preflight cleanly. Pin: physical hard constraints still apply
     # (covered separately in office/exec output tests).
     assert payload is None
+
+
+def test_guard_attention_reports_existing_workspace_candidate_input(tmp_path):
+    from app.llm.tools import delegate_actions
+
+    candidate = tmp_path / "_env" / ".blocked_creates" / "triage_report.txt"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("draft report\n", encoding="utf-8")
+
+    helper_specs = [{
+        "task_id": "triage-report",
+        "kind": "edit",
+        "mode": "easy",
+        "prompt": "Revise the preserved candidate report if needed.",
+        "input_files": ["_env/.blocked_creates/triage_report.txt"],
+        "expected_outputs": ["_env/triage_report.txt"],
+    }]
+
+    attached = delegate_actions._attach_guard_attention_facts(
+        helper_specs,
+        main_workspace=str(tmp_path),
+    )
+    facts = attached[0].get("guard_observations") or []
+    availability = [
+        fact for fact in facts
+        if fact.get("source") == "workspace_input_file_availability"
+    ]
+
+    assert availability
+    fact = availability[0]
+    assert fact["issue"] == "explicit_input_files_exist_in_main_workspace"
+    assert fact["workspace_input_count"] == 1
+    assert fact["workspace_input_files"][0]["path"] == "_env/.blocked_creates/triage_report.txt"
+    assert fact["workspace_input_files"][0]["size_bytes"] == candidate.stat().st_size
 
 
 async def test_tts_handler_fails_without_system_voice_profile(monkeypatch, tmp_path):
@@ -2805,6 +3564,28 @@ def test_windows_python_c_translation_writes_temp_script(tmp_path):
     assert (tmp_path / script_name).read_text(encoding="utf-8") == "import docx; print(docx.__version__)"
 
 
+def test_windows_python_cmd_shim_c_translation_writes_temp_script(tmp_path):
+    from app.llm.tools.workspace import _translate_windows_command
+
+    translated = _translate_windows_command('python3.cmd -c "\\nprint(123)\\n"', str(tmp_path))
+
+    assert translated.startswith("python3.cmd _py_cmd_")
+    assert translated.endswith(".py")
+    script_name = translated.split(" ", 1)[1]
+    assert (tmp_path / script_name).read_text(encoding="utf-8") == "\nprint(123)\n"
+
+
+def test_windows_python_runner_forwarding_c_translation_writes_temp_script(tmp_path):
+    from app.llm.tools.workspace import _translate_windows_command
+
+    translated = _translate_windows_command('python3 .\\python3.cmd -c "\\nprint(123)\\n"', str(tmp_path))
+
+    assert translated.startswith("python3.cmd _py_cmd_")
+    assert translated.endswith(".py")
+    script_name = translated.split(" ", 1)[1]
+    assert (tmp_path / script_name).read_text(encoding="utf-8") == "\nprint(123)\n"
+
+
 def test_edit_file_old_str_not_found_points_to_local_fragment_instead_of_full_reread(tmp_path):
     from app.llm.tools.workspace import handle_edit_file
 
@@ -2816,8 +3597,8 @@ def test_edit_file_old_str_not_found_points_to_local_fragment_instead_of_full_re
     assert result["ok"] is False
     assert "old_str not found in sample.py" in result["error"]
     assert "read_file(start_line=..., end_line=...)" in result["error"]
-    assert "Avoid rereading the whole file" in result["next_action_instruction"]
-    assert "read_local_fragment" in result["suggested_next_actions"]
+    assert "whole-file reread is usually only useful" in result["next_action_instruction"]
+    assert "read a relevant local fragment" in result["recovery_facts"]["available_recovery_shapes"]
 
 
 def test_multi_edit_old_str_not_found_points_to_local_fragment(tmp_path):
@@ -2854,6 +3635,24 @@ def test_windows_python_c_translation_decodes_escaped_newlines(tmp_path):
 
     script_name = translated.split(" ", 1)[1]
     assert (tmp_path / script_name).read_text(encoding="utf-8") == "\nprint(123)\nprint(456)\n"
+
+
+def test_windows_python_c_translation_preserves_string_literal_newline_escapes(tmp_path):
+    from app.llm.tools.workspace import _translate_windows_command
+
+    command = (
+        'python -c "\\n'
+        "name = 'users'\\n"
+        'print(f\\\'\\n--- {name} columns ---\\\')\\n'
+        '"'
+    )
+    translated = _translate_windows_command(command, str(tmp_path))
+
+    script_name = translated.split(" ", 1)[1]
+    script = (tmp_path / script_name).read_text(encoding="utf-8")
+    assert script.startswith("\nname = 'users'\n")
+    assert "print(f'\\n--- {name} columns ---')" in script
+    assert "print(f'\n---" not in script
 
 
 def test_windows_python_c_translation_unescapes_shell_quoted_fstring(tmp_path):
@@ -2937,6 +3736,18 @@ def test_windows_unix_env_prefix_python_c_translation_writes_temp_script(tmp_pat
     script_name = translated.split("python ", 1)[1]
     script = (tmp_path / script_name).read_text(encoding="utf-8")
     assert 'print("ok")' in script
+
+
+def test_windows_simple_cp_translation_writes_workspace_copy_script(tmp_path):
+    from app.llm.tools.workspace import _translate_windows_command
+
+    (tmp_path / "source.txt").write_text("hello", encoding="utf-8")
+    translated = _translate_windows_command("cp source.txt copied.txt", str(tmp_path))
+
+    assert translated.startswith("python _py_cmd_")
+    script_name = translated.split("python ", 1)[1]
+    script = tmp_path / script_name
+    assert "shutil.copy2" in script.read_text(encoding="utf-8")
 
 
 def test_env_run_normalization_reuses_workspace_python_c_translation(tmp_path):
@@ -3168,6 +3979,7 @@ def test_delegate_copyback_merges_modified_environment_files_only(tmp_path):
     }]
     assert stats["env_copied_count"] == 1
     assert stats["env_skipped_unchanged"] == 1
+    assert stats["env_skipped_unchanged_files"] == ["_env/index.html"]
     assert (main_ws / "_env" / "snake.js").read_text(encoding="utf-8") == "const speed = 2;\n"
     assert (main_ws / "_env" / "index.html").read_text(encoding="utf-8") == "<canvas></canvas>\n"
 
@@ -3235,6 +4047,56 @@ async def test_helper_fetch_to_temp_copies_into_helper_workspace(tmp_path):
     assert result["copied"] == ["bench_runner_assemble_bench_out.csv"]
     assert (helper_ws / "bench_runner_assemble_bench_out.csv").exists()
     assert not (temp_ws / "bench_runner_assemble_bench_out.csv").exists()
+
+
+async def test_recall_thread_returns_persisted_helper_task_contract(tmp_path):
+    from app.core.core_processes import (
+        ThreadContext,
+        reset_current_thread_context,
+        set_current_thread_context,
+    )
+    from app.llm.tools.workspace_transfer_tools import handle_recall_thread
+
+    helper_ws = tmp_path / "main" / ".temp" / "_delegate_user_writer"
+    helper_ws.mkdir(parents=True)
+    (helper_ws / ".helper_task_contract.json").write_text(
+        json.dumps(
+            {
+                "task_id": "writer",
+                "helper_kind": "edit",
+                "helper_mode": "normal",
+                "resume": False,
+                "goal_excerpt": "Write the final report from verified evidence.",
+                "expected_outputs": ["final.docx"],
+                "write_scopes": ["final.docx"],
+                "acceptance_checks": ["docx opens", "claims match evidence"],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    token = set_current_thread_context(
+        ThreadContext(
+            user_message="完成最终报告",
+            plan_intent="helper task: writer (edit/normal)",
+            plan_key_points=["helper task contract snapshot is available in .helper_task_contract.json"],
+            plan_deliverables=["final.docx"],
+            role_label="helper:writer",
+        )
+    )
+    try:
+        result = json.loads(await handle_recall_thread(str(helper_ws), {}))
+    finally:
+        reset_current_thread_context(token)
+
+    contract = result["helper_task_contract"]
+    assert contract["task_id"] == "writer"
+    assert contract["helper_kind"] == "edit"
+    assert contract["expected_outputs"] == ["final.docx"]
+    assert contract["acceptance_checks"] == ["docx opens", "claims match evidence"]
+    assert "automatic success/failure decision" in contract["truth_scope"]
+    assert result["plan"]["deliverables"] == ["final.docx"]
 
 
 async def test_helper_fetch_to_temp_stages_underscore_project_path_in_environment(tmp_path):
@@ -3447,6 +4309,8 @@ def test_helper_system_prompt_describes_environment_workspace_copies():
     assert "缺依赖" in prompt
     assert "same-batch producer outputs" in prompt
     assert "guessed paths marked as unavailable" in prompt
+    assert "`old_str` is the literal file text" in prompt
+    assert "JSON logs escape quotes and backslashes" in prompt
 
 
 def test_read_helper_prompt_requests_staged_project_files():
@@ -3498,6 +4362,7 @@ def test_main_visible_prompts_do_not_recommend_final_kind():
     from app.llm import client as llm_client
     from app.llm.tools import registry
     from app.llm.tools.delegate import BUNDLED_SKILLS, SPAWN_HELPER_TOOL_SCHEMA
+    obsolete_pairing_flag = "auto" + "_" + "final"
 
     visible_text = "\n".join([
         context.ROUND2_SYSTEM_TEMPLATE,
@@ -3505,7 +4370,6 @@ def test_main_visible_prompts_do_not_recommend_final_kind():
         SPAWN_HELPER_TOOL_SCHEMA["function"]["parameters"]["properties"]["kind"]["description"],
         registry.DELEGATE_TOOL_SCHEMA["function"]["description"],
         registry.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]["kind"]["description"],
-        registry.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["auto_final"]["description"],
     ])
 
     forbidden_recommendations = [
@@ -3516,18 +4380,18 @@ def test_main_visible_prompts_do_not_recommend_final_kind():
         r"用\s*`?kind=['\"]?final",
         r"直接\s*kind=['\"]?final",
         r"kind=['\"]?final[^\n]{0,40}重试",
-        r"auto_final=true\s*兜底",
         r"final twin",
         r"final helper",
-        r"显式传 auto_final",
     ]
     for pattern in forbidden_recommendations:
         assert not re.search(pattern, visible_text)
+    assert obsolete_pairing_flag not in visible_text
 
     spawn_kind_enum = SPAWN_HELPER_TOOL_SCHEMA["function"]["parameters"]["properties"]["kind"]["enum"]
     delegate_kind_enum = registry.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]["kind"]["enum"]
     assert "final" not in spawn_kind_enum
     assert "final" not in delegate_kind_enum
+    assert obsolete_pairing_flag not in registry.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]
 
     source_text = "\n".join([
         orchestrator.__file__ and Path(orchestrator.__file__).read_text(encoding="utf-8"),
@@ -3552,8 +4416,8 @@ def test_document_round2_prompt_requires_edit_and_accepts_verified_existing_docx
     assert "add it to deliverables instead of regenerating it" in visible_text
     assert "delegate `kind='edit'` for Office document production" in visible_text
     assert "let edit freeze with `request_resource`" in visible_text
-    assert "outputs_complete=true" in visible_text
-    assert "Binary artifacts such as docx/pptx/xlsx/pdf/png should be inspected" in visible_text
+    assert "producer self-verification report" in visible_text
+    assert "consume the helper's structural facts" in visible_text
     assert "立即 delegate(kind:'edit' 纯文档 / 'general' 文档+图表)" not in visible_text
     assert "交给 edit/general helper" not in visible_text
 
@@ -3593,6 +4457,50 @@ async def test_delegate_guard_does_not_split_single_edit_office_output(monkeypat
     assert reason == "五道题可拆"
     assert split_recs == []
     assert kind_recs == []
+
+
+async def test_delegate_guard_brief_keeps_long_prompt_head_and_tail(monkeypatch):
+    from app.llm import client as llm_client
+    from app.llm.tools import delegate
+
+    captured = {}
+
+    async def fake_chat_json(msgs, *args, **kwargs):
+        captured["msgs"] = msgs
+        return {"should_act": True, "reason": "allow"}
+
+    monkeypatch.setattr(llm_client, "chat_json", fake_chat_json)
+
+    prompt = (
+        "HEAD_FACT: already read bounded source facts.\n"
+        + "\n".join(f"middle detail {i}: supporting fact" for i in range(120))
+        + "\nTAIL_OUTPUTS: create final_report.txt and reply_draft.txt.\n"
+        + "TAIL_CHECKS: preserve all listed acceptance facts."
+    )
+
+    should_act, reason, split_recs, kind_recs = await delegate._persona_consent_guard(
+        persona="",
+        user_message="Create the final materials from the verified facts.",
+        tasks=[{
+            "task_id": "final_materials",
+            "kind": "edit",
+            "mode": "easy",
+            "prompt": prompt,
+            "expected_outputs": ["final_report.txt", "reply_draft.txt"],
+        }],
+    )
+
+    assert should_act is True
+    assert reason == "allow"
+    assert split_recs == []
+    assert kind_recs == []
+
+    visible = "\n".join(str(m.get("content", "")) for m in captured["msgs"])
+    assert "HEAD_FACT" in visible
+    assert "TAIL_OUTPUTS" in visible
+    assert "TAIL_CHECKS" in visible
+    assert "middle omitted for guard brief" in visible
+    assert "prompt total" in visible
 
 
 async def test_spawn_async_entity_detection_prefers_section_headings_over_constraint_bullets(tmp_path):
@@ -3644,6 +4552,53 @@ async def test_spawn_async_entity_detection_prefers_section_headings_over_constr
         "图3: 5.18题 — 双相码和CMI码波形图",
     ]
     assert "所有文字用中文" not in broad[0]["entity_items"]
+
+
+async def test_spawn_async_granularity_warnings_are_model_visible_facts(monkeypatch, tmp_path):
+    from app.llm.tools import delegate
+
+    async def fake_guard(*args, **kwargs):
+        return True, "", [], []
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", fake_guard)
+
+    prompt = """Implement five independent modules and produce one result per module.
+
+1. alpha module
+2. beta module
+3. gamma module
+4. delta module
+5. epsilon module
+"""
+
+    result = json.loads(await delegate.handle_delegate(
+        str(tmp_path),
+        {
+            "action": "spawn_async",
+            "tasks": [{
+                "task_id": "wide_impl",
+                "kind": "code",
+                "mode": "easy",
+                "prompt": prompt,
+                "expected_outputs": ["results_alpha.csv", "results_beta.csv", "results_gamma.csv", "results_delta.csv"],
+            }],
+        },
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    ))
+
+    warnings = result.get("granularity_warnings") or []
+    assert warnings
+    joined = json.dumps(warnings, ensure_ascii=False)
+    assert "suggested_action" not in joined
+    assert "suggestion" not in joined
+    assert "suggested_kind" not in joined
+    assert "suggested_mode" not in joined
+    assert "observed_parallel_boundary_fact" in joined
+    assert "details" in joined
+    assert "structured granularity_warnings field" in result["hint"]
+    assert "按结构化建议" not in result["hint"]
 
 
 def test_tool_out_summary_uses_lowercase_error_for_expected_tool_failure():
@@ -3719,6 +4674,96 @@ async def test_agent_state_stage_update_reuses_existing_contract_goal():
     assert updated["ok"] is True
     assert updated["contract"]["goal"] == "Implement Dijkstra and verify tests."
     assert updated["contract"]["current_stage"] == "verify"
+
+
+async def test_agent_state_resource_update_missing_fields_returns_request_facts():
+    from app.core import agent_state, debug
+    from app.llm.tools import registry
+
+    trace_id = "trace-resource-facts"
+    debug.set_trace_id(trace_id)
+    agent_state.reset_trace(trace_id)
+    record = agent_state.register_resource_request(
+        trace_id=trace_id,
+        blocked_task_id="assemble_docx",
+        blocked_kind="edit",
+        request={
+            "resource_kind": "draw",
+            "needed_outputs": ["_helpers_shared/chart.png"],
+            "reason": "chart missing",
+        },
+    )
+
+    missing = json.loads(await registry._handle_agent_state({
+        "action": "update_resource_request",
+    }))
+
+    assert missing["ok"] is False
+    assert missing["resource_requests"][0]["request_id"] == record["request_id"]
+    assert missing["resource_requests"][0]["needed_outputs"] == ["_helpers_shared/chart.png"]
+
+
+async def test_agent_state_resource_update_accepts_model_visible_ready_alias():
+    from app.core import agent_state, debug
+    from app.llm.tools import registry
+
+    trace_id = "test_resource_ready_alias"
+    debug.set_trace_id(trace_id)
+    agent_state.reset_trace(trace_id)
+    try:
+        record = agent_state.register_resource_request(
+            trace_id=trace_id,
+            blocked_task_id="doc",
+            blocked_kind="edit",
+            request={"resource_kind": "code", "needed_outputs": ["verification_report.txt"]},
+        )
+        updated = json.loads(await registry._handle_agent_state({
+            "action": "update_resource_request",
+            "request_id": record["request_id"],
+            "status": "ready",
+            "satisfied_by": ["verification_report.txt"],
+        }))
+    finally:
+        debug.set_trace_id("")
+
+    assert updated["ok"] is True
+    assert updated["resource_request"]["state"] == agent_state.RESOURCE_READY
+    assert updated["status"]["blocked_helpers"] == []
+    assert updated["status"]["ready_to_resume_helpers"][0]["satisfied_by"] == ["verification_report.txt"]
+
+
+async def test_edit_helper_python_docx_script_rejection_points_to_office_blocks(tmp_path):
+    from app.core.core_processes import reset_current_helper_kind, set_current_helper_kind
+    from app.llm.tools import registry
+
+    token = set_current_helper_kind("edit")
+    helper_ws = tmp_path / "_delegate_user_doc"
+    helper_ws.mkdir()
+    content = """
+from docx import Document
+doc = Document()
+doc.add_heading('Report', 1)
+doc.add_paragraph('Body')
+doc.save('report.docx')
+""" + "\n# filler\n" * 3000
+    try:
+        raw = await registry._handle_workspace(
+            str(helper_ws),
+            {"action": "write", "path": "build_docx.py", "content": content},
+        )
+    finally:
+        reset_current_helper_kind(token)
+
+    result = json.loads(raw)
+    assert result["ok"] is False
+    assert result["blocked_kind"] == "edit"
+    assert result["matching_helper_kind"] == "edit"
+    assert result["observed_recovery_tool"] == "request_resource"
+    assert result["observed_recovery_shape"]["resource_kind"] == "edit"
+    assert "office(action='write'" in result["observed_recovery_shape"]["shape"]
+    assert result["suggested_helper_kind"] == "edit"
+    assert "office(action='write'" in result["suggested_request"]
+    assert "office blocks" in result["error"]
 
 
 async def test_spawn_async_dependency_detection_accepts_helpers_shared_expected_outputs(tmp_path):
@@ -3874,6 +4919,76 @@ async def test_handle_delegate_spawn_empty_args_reports_json_hint(tmp_path):
     assert "An empty task list does not resume existing helpers" in result["hint"]
 
 
+async def test_handle_delegate_wraps_top_level_single_task_args(tmp_path, monkeypatch):
+    from app.llm.tools import delegate
+    from app.llm.tools import delegate_actions
+
+    async def fake_spawn_async(main_workspace, args, **kwargs):
+        return json.dumps({
+            "ok": True,
+            "action": kwargs.get("cleaned_tasks", [{}])[0].get("task_id"),
+            "tasks": args.get("tasks"),
+            "schema_repair": args.get("_schema_repair_fact"),
+        })
+
+    monkeypatch.setattr(delegate_actions, "_handle_delegate_spawn_async", fake_spawn_async)
+
+    result = json.loads(await delegate.handle_delegate(
+        str(tmp_path),
+        {
+            "action": "spawn_async",
+            "task_id": "browser-evidence",
+            "kind": "code",
+            "mode": "easy",
+            "prompt": "Collect browser evidence.",
+            "input_files": ["docs/index.html"],
+            "expected_outputs": ["browser_evidence.txt"],
+            "acceptance_checks": ["browser evidence exists"],
+            "dispatch_reason": "Top-level fields should be schema-shape repaired.",
+        },
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    ))
+
+    assert result["ok"] is True
+    assert result["action"] == "browser-evidence"
+    assert result["tasks"][0]["task_id"] == "browser-evidence"
+    assert result["tasks"][0]["expected_outputs"] == ["browser_evidence.txt"]
+    assert "wrapped them as tasks=[...]" in result["schema_repair"]
+
+
+def test_delegate_top_level_single_task_normalizer_preserves_fields():
+    from app.llm.tools.delegate_actions import _normalize_top_level_delegate_task_args
+
+    args = {
+        "action": "spawn",
+        "task_id": "patch-client",
+        "kind": "code",
+        "mode": "easy",
+        "prompt": "Patch the client.",
+        "input_files": ["report_client.py"],
+        "expected_outputs": ["_env/report_client.py", "_env/api_notes.md"],
+        "acceptance_checks": ["tests pass"],
+        "dispatch_reason": "Single task was supplied at top level.",
+        "wait_window_sec": 120,
+    }
+
+    assert _normalize_top_level_delegate_task_args(args) is True
+    assert args["_normalized_top_level_task"] is True
+    assert args["wait_window_sec"] == 120
+    assert args["tasks"] == [{
+        "task_id": "patch-client",
+        "prompt": "Patch the client.",
+        "kind": "code",
+        "mode": "easy",
+        "dispatch_reason": "Single task was supplied at top level.",
+        "input_files": ["report_client.py"],
+        "expected_outputs": ["_env/report_client.py", "_env/api_notes.md"],
+        "acceptance_checks": ["tests pass"],
+    }]
+
+
 async def test_delegate_allows_16_tasks_but_rejects_17(tmp_path):
     from app.llm.tools import delegate
 
@@ -3926,6 +5041,130 @@ async def test_handle_delegate_sanitize_empty_dict_reports_json_hint(tmp_path):
     assert data["raw_args_excerpt"] == "{}"
 
 
+async def test_delegate_sanitize_recovers_prom_prompt_alias(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "action": "spawn",
+            "tasks": [{
+                "task_id": "assemble_docx",
+                "kind": "edit",
+                "prom": "Assemble db_index_paper.docx from staged evidence.",
+                "expected_outputs": ["db_index_paper.docx"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert isinstance(result, list)
+    assert result[0]["prompt"] == "Assemble db_index_paper.docx from staged evidence."
+    assert result[0]["expected_outputs"] == ["db_index_paper.docx"]
+
+
+async def test_delegate_marks_main_generated_command_recipes_as_unverified(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "action": "spawn",
+            "tasks": [{
+                "task_id": "query_data",
+                "kind": "code",
+                "mode": "easy",
+                "prompt": (
+                    "Goal: query users.db and write result.csv.\n\n"
+                    "Steps:\n"
+                    "1. Run `python3 -c \"import sqlite3; print('probe')\"`.\n"
+                    "2. Write result.csv.\n\n"
+                    "Use `python3` command (which maps to the shim python3.cmd).\n"
+                ),
+                "input_files": ["users.db", "verify_results.py"],
+                "expected_outputs": ["result.csv"],
+                "acceptance_checks": ["python3 verify_results.py prints PASS"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    prompt = result[0]["prompt"]
+    assert "## Command Recipe Provenance" in prompt
+    assert "non-authoritative examples" in prompt
+    assert "freshly verified in this helper workspace" in prompt
+    assert "Launcher fact: the main-thread prompt mentioned a `python3`/shim launcher assumption" in prompt
+    assert "which maps to the shim python3.cmd" not in prompt
+    assert result[0]["acceptance_checks"] == ["python3 verify_results.py prints PASS"]
+
+
+async def test_delegate_does_not_add_command_recipe_block_without_command_recipe(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "action": "spawn",
+            "tasks": [{
+                "task_id": "small_patch",
+                "kind": "code",
+                "mode": "easy",
+                "prompt": "Fix the parser edge case and report the verification evidence.",
+                "input_files": ["parser.py"],
+                "expected_outputs": ["parser.py"],
+                "acceptance_checks": ["parser handles empty input"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    assert "## Command Recipe Provenance" not in result[0]["prompt"]
+
+
+async def test_delegate_marks_exhaustive_scope_expansion_as_provenance(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "action": "spawn",
+            "tasks": [{
+                "task_id": "schema_audit",
+                "kind": "code",
+                "mode": "easy",
+                "prompt": (
+                    "Audit the database. The user now says: \"If anything in the schema is weird, double-check before assuming.\"\n\n"
+                    "Do the following:\n"
+                    "1. Dump all data from every table.\n"
+                    "2. Report EVERYTHING in a complete evidence report.\n"
+                ),
+                "input_files": ["users.db", "result.csv"],
+                "expected_outputs": ["_helpers_shared/schema_audit.txt"],
+                "acceptance_checks": ["All row counts shown", "CSV cross-checked against DB data"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    prompt = result[0]["prompt"]
+    assert "## Scope Provenance" in prompt
+    assert "exhaustive audit or reporting expansion written by the main process" in prompt
+    assert "smallest sufficient structured probe/report" in prompt
+    assert "Dump all data from every table" in prompt
+    assert result[0]["acceptance_checks"] == ["All row counts shown", "CSV cross-checked against DB data"]
+
+
 async def test_handle_delegate_spawn_empty_tasks_keeps_resume_all_hint(tmp_path):
     from app.llm.tools import delegate
 
@@ -3974,7 +5213,7 @@ async def test_delegate_missing_kind_returns_preserved_retry_envelope(tmp_path):
     assert task["acceptance_checks"] == ["table covers all algorithms"]
 
 
-async def test_guard_kind_retry_shape_preserves_original_envelope():
+async def test_guard_ignores_legacy_kind_recommendation_when_allowed():
     from app.llm.tools.delegate_wait import _build_guard_intervention
 
     helper_specs = [{
@@ -3983,6 +5222,7 @@ async def test_guard_kind_retry_shape_preserves_original_envelope():
         "mode": "hard",
         "prompt": "Write the theoretical comparison table section.",
         "framework": "Paper contract with output matrix and acceptance checks.",
+        "dispatch_reason": "Keep this as one helper because it is a single table section from verified evidence.",
         "input_files": ["algo_evidence.md"],
         "expected_outputs": ["paper_tables.md"],
         "acceptance_checks": ["no benchmark fabrication"],
@@ -4006,19 +5246,53 @@ async def test_guard_kind_retry_shape_preserves_original_envelope():
         helper_specs=helper_specs,
     )
 
-    task = payload["next_delegate_shape"]["tasks"][0]
-    assert payload["error"] == "task_kind_mismatch"
-    assert task["task_id"] == "paper_tables"
-    assert task["kind"] == "edit"
-    assert task["mode"] == "easy"
-    assert task["framework"] == helper_specs[0]["framework"]
-    assert task["input_files"] == ["algo_evidence.md"]
-    assert task["expected_outputs"] == ["paper_tables.md"]
-    assert task["acceptance_checks"] == ["no benchmark fabrication"]
-    assert "Write the theoretical comparison table section" in task["prompt"]
+    assert payload is None
 
 
-async def test_guard_framework_retry_shape_preserves_blocked_envelopes():
+async def test_delegate_dispatch_reason_reaches_guard_and_helper_envelope(monkeypatch, tmp_path):
+    from app.llm.tools import delegate
+    from app.llm.tools.delegate_framework import format_helper_request_envelope
+
+    seen_guard_tasks: list[list[dict]] = []
+
+    async def fake_guard(*args, **kwargs):
+        seen_guard_tasks.append(args[2])
+        return True, "allow", [], [], {}
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", fake_guard)
+    monkeypatch.setattr(delegate, "_detect_missing_unified_framework", lambda cleaned: None)
+
+    cleaned = await delegate._sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "single_report",
+                "kind": "edit",
+                "mode": "easy",
+                "prompt": "Write the single report from the provided evidence.",
+                "dispatch_reason": "One output file, bounded evidence, and a single acceptance path.",
+                "input_files": ["evidence.txt"],
+                "expected_outputs": ["report.md"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(cleaned, str)
+    assert cleaned[0]["dispatch_reason"] == "One output file, bounded evidence, and a single acceptance path."
+
+    guard_result = await delegate._persona_consent_guard("", "", cleaned)
+    assert guard_result[0] is True
+    assert seen_guard_tasks[0][0]["dispatch_reason"] == cleaned[0]["dispatch_reason"]
+
+    envelope = format_helper_request_envelope(cleaned[0])
+    assert "### Main Dispatch Reason" in envelope
+    assert "One output file, bounded evidence" in envelope
+
+
+async def test_guard_ignores_legacy_framework_block_when_allowed():
     from app.llm.tools import delegate
     from app.llm.tools.delegate_wait import _build_guard_intervention
 
@@ -4050,15 +5324,7 @@ async def test_guard_framework_retry_shape_preserves_blocked_envelopes():
         helper_specs=helper_specs,
     )
 
-    task = payload["next_delegate_shape"]["tasks"][0]
-    assert payload["error"] == "framework_first_required"
-    assert task["task_id"] == "algo_rbt"
-    assert task["kind"] == "code"
-    assert task["mode"] == "easy"
-    assert task["framework"].startswith("<paste the verified compact shared framework contract")
-    assert task["input_files"] == ["_helpers_shared/paper_framework.md"]
-    assert task["expected_outputs"] == ["rbtree.py", "results_rbt.csv"]
-    assert task["acceptance_checks"] == ["uses shared csv schema"]
+    assert payload is None
 
 
 def test_tool_call_args_normalize_completes_truncated_multiline_delegate_args():
@@ -4190,7 +5456,8 @@ def test_main_thread_source_write_abort_has_dedicated_non_error_path():
     assert "SOURCE_WRITE_DELEGATION_HINT" in loop_src
     from app.llm.tools.runtime_hints import SOURCE_WRITE_DELEGATION_HINT
     assert "[SYSTEM_HINT/source_write_delegation]" in SOURCE_WRITE_DELEGATION_HINT
-    assert "Recover by changing the work shape rather than repeating the same write call" in SOURCE_WRITE_DELEGATION_HINT
+    assert "The recoverable facts are the target path, content size" in SOURCE_WRITE_DELEGATION_HINT
+    assert "does not add evidence" in SOURCE_WRITE_DELEGATION_HINT
     assert "thinking_disabled retry" in loop_src
 
 
@@ -4362,6 +5629,113 @@ async def test_office_docx_table_cells_accept_serialized_text_style_objects(tmp_
     assert doc.tables[0].cell(0, 0).paragraphs[0].runs[0].bold is True
 
 
+async def test_office_docx_accepts_subtitle_as_paragraph_alias(tmp_path):
+    from app.llm.tools.office import handle_office
+    from docx import Document
+
+    result = json.loads(await handle_office(str(tmp_path), {
+        "action": "write",
+        "path": "report.docx",
+        "title": "Report",
+        "blocks": [
+            {"type": "subtitle", "text": "Author, Affiliation"},
+            {"type": "paragraph", "text": "Body"},
+        ],
+    }))
+
+    assert result["ok"] is True
+    assert result["input_normalizations"]["subtitle_blocks_as_paragraph"] == 1
+    doc = Document(tmp_path / "report.docx")
+    assert "Author, Affiliation" in [p.text for p in doc.paragraphs]
+
+
+async def test_office_docx_table_rows_accept_cells_object_alias(tmp_path):
+    from app.llm.tools.office import handle_office
+    from docx import Document
+
+    Document().save(tmp_path / "report.docx")
+    result = json.loads(await handle_office(str(tmp_path), {
+        "action": "append",
+        "path": "report.docx",
+        "blocks": [{
+            "type": "table",
+            "rows": [
+                {"cells": ["Operation", "Worst Case"]},
+                {"cells": ["Search", "O(log n)"]},
+            ],
+        }],
+    }))
+
+    assert result["ok"] is True
+    assert result["input_normalizations"]["table_rows_cells_objects_as_arrays"] == 2
+    doc = Document(tmp_path / "report.docx")
+    assert doc.tables[0].cell(0, 0).text == "Operation"
+    assert doc.tables[0].cell(1, 1).text == "O(log n)"
+
+
+async def test_office_docx_table_empty_row_error_reports_row_index(tmp_path):
+    from docx import Document
+    from app.llm.tools.office import handle_office
+
+    Document().save(tmp_path / "report.docx")
+    result = json.loads(await handle_office(str(tmp_path), {
+        "action": "append",
+        "path": "report.docx",
+        "blocks": [{
+            "type": "table",
+            "rows": [
+                ["算法", "插入"],
+                ["", {"text": ""}],
+            ],
+        }],
+    }))
+
+    assert result["ok"] is False
+    assert "row_index" in result["error"]
+    assert "row_has_no_non_empty_cells" in result["error"]
+    assert "paragraph/list" in result["error"]
+
+
+async def test_office_docx_accepts_numbered_list_alias(tmp_path):
+    from docx import Document
+    from app.llm.tools.office import handle_office
+
+    Document().save(tmp_path / "report.docx")
+    result = json.loads(await handle_office(str(tmp_path), {
+        "action": "append",
+        "path": "report.docx",
+        "blocks": [{
+            "type": "numbered_list",
+            "items": ["first", "second"],
+        }],
+    }))
+
+    assert result["ok"] is True
+    doc = Document(tmp_path / "report.docx")
+    assert [p.text for p in doc.paragraphs if p.text] == ["first", "second"]
+    assert all(p.style.name == "List Number" for p in doc.paragraphs if p.text)
+
+
+async def test_office_docx_accepts_heading_level_alias(tmp_path):
+    from docx import Document
+    from app.llm.tools.office import handle_office
+
+    Document().save(tmp_path / "report.docx")
+    result = json.loads(await handle_office(str(tmp_path), {
+        "action": "append",
+        "path": "report.docx",
+        "blocks": [{
+            "type": "heading1",
+            "text": "Introduction",
+        }],
+    }))
+
+    assert result["ok"] is True
+    doc = Document(tmp_path / "report.docx")
+    para = next(p for p in doc.paragraphs if p.text == "Introduction")
+    assert para.style.name == "Heading 1"
+
+
 async def test_p35_existing_workspace_basename_is_not_missing_dependency(tmp_path):
     from app.llm.tools.delegate import _workspace_has_basename
 
@@ -4490,12 +5864,12 @@ async def test_removed_general_helper_returns_explicit_replan_error(monkeypatch,
     assert "homework_report.docx" in result["original_prompt"]
 
 
-async def test_sanitize_auto_final_legacy_pair_preserves_expected_outputs(tmp_path):
+async def test_sanitize_unknown_legacy_pairing_flag_does_not_generate_hard_twin(tmp_path):
     from app.llm.tools.delegate import _sanitize_and_validate_tasks
 
     cleaned = await _sanitize_and_validate_tasks(
         {
-            "auto_final": True,
+            "legacy_pairing_flag": True,
             "tasks": [{
                 "task_id": "impl",
                 "kind": "code",
@@ -4512,13 +5886,11 @@ async def test_sanitize_auto_final_legacy_pair_preserves_expected_outputs(tmp_pa
 
     assert not isinstance(cleaned, str)
     by_id = {task["task_id"]: task for task in cleaned}
-    assert set(by_id) == {"impl", "impl_hard"}
-    assert by_id["impl_hard"]["kind"] == "code"
-    assert by_id["impl_hard"]["mode"] == "hard"
-    assert by_id["impl_hard"]["expected_outputs"] == ["impl.c"]
+    assert set(by_id) == {"impl"}
+    assert "paired_with" not in by_id["impl"]
 
 
-async def test_sanitize_auto_final_log_names_primary_not_generated_twin(tmp_path):
+async def test_sanitize_unknown_legacy_pairing_flag_does_not_log_generated_pair(tmp_path):
     from app.llm.tools.delegate import _sanitize_and_validate_tasks
 
     logged: list[tuple[str, str]] = []
@@ -4526,7 +5898,7 @@ async def test_sanitize_auto_final_log_names_primary_not_generated_twin(tmp_path
     with patch("app.llm.tools.delegate.debug.log", lambda category, msg='', payload=None: logged.append((category, msg))):
         cleaned = await _sanitize_and_validate_tasks(
             {
-                "auto_final": True,
+                "legacy_pairing_flag": True,
                 "tasks": [{
                     "task_id": "impl",
                     "kind": "code",
@@ -4542,16 +5914,16 @@ async def test_sanitize_auto_final_log_names_primary_not_generated_twin(tmp_path
         )
 
     assert not isinstance(cleaned, str)
-    assert ("delegate.auto_final_paired", "paired 1 hard helper(s) with primaries: ['impl']") in logged
-    assert any(task["task_id"] == "impl_hard" for task in cleaned)
+    assert not any(category == "delegate.explicit_hard_backup_pair" for category, _ in logged)
+    assert not any(task["task_id"] == "impl_hard" for task in cleaned)
 
 
-async def test_sanitize_auto_final_does_not_pair_legacy_hard_suffix_again(tmp_path):
+async def test_sanitize_unknown_legacy_pairing_flag_does_not_pair_hard_suffix_alone(tmp_path):
     from app.llm.tools.delegate import _sanitize_and_validate_tasks
 
     cleaned = await _sanitize_and_validate_tasks(
         {
-            "auto_final": True,
+            "legacy_pairing_flag": True,
             "tasks": [{
                 "task_id": "impl_hard",
                 "kind": "code",
@@ -4804,7 +6176,8 @@ def test_code_hard_pairing_no_longer_rejects_on_overflow_source():
 
     src = Path("app/llm/tools/delegate.py").read_text(encoding="utf-8")
     assert "code_hard_pairing_exceeds_delegate_task_limit" not in src
-    assert "delegate.code_hard_pairing_trimmed" in src
+    assert "delegate.code_hard_explicit_paired" in src
+    assert "_explicit_hard_by_base" in src
 
 
 def test_delegate_hard_mode_suffix_has_single_english_first_definition():
@@ -4864,6 +6237,275 @@ async def test_read_helper_env_analysis_outputs_become_internal_evidence(monkeyp
     assert task["acceptance_checks"] == ["filesystem_analysis.txt exists"]
 
 
+async def test_delegate_reports_read_only_analysis_file_output_fact_to_guard(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "audit_context",
+                "kind": "read",
+                "mode": "easy",
+                "prompt": (
+                    "Read-only analysis. Inspect app/core/context.py and write "
+                    "findings to _evidence_context_assembly.txt."
+                ),
+                "expected_outputs": ["_evidence_context_assembly.txt"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    task = result[0]
+    observations = task.get("guard_observations") or []
+    assert task["task_id"] == "audit_context"
+    assert "_evidence_context_assembly.txt" in task["expected_outputs"]
+    fact = next(
+        item for item in observations
+        if item.get("issue") == "read_only_analysis_output_conflict"
+    )
+    assert fact["task_id"] == "audit_context"
+    assert "_evidence_context_assembly.txt" in fact["expected_outputs"]
+    assert "guard should decide" in fact["details"]
+
+
+async def test_delegate_code_helper_can_own_env_outputs_when_tests_are_read_only(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "migrate_contract",
+                "kind": "code",
+                "mode": "easy",
+                "prompt": (
+                    "Update project source from customer_name to account_name. "
+                    "Do not modify tests. 不要改动测试文件。"
+                ),
+                "input_files": [
+                    "_env/contracts/customer_event.py",
+                    "_env/service/render.py",
+                ],
+                "expected_outputs": [
+                    "_env/contracts/customer_event.py",
+                    "_env/service/render.py",
+                ],
+                "acceptance_checks": ["pytest contracts/tests service/tests"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    assert result[0]["kind"] == "code"
+    assert result[0]["expected_outputs"] == [
+        "_env/contracts/customer_event.py",
+        "_env/service/render.py",
+    ]
+
+
+async def test_delegate_reports_each_read_only_analysis_file_output_fact(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [
+                {
+                    "task_id": "read_context",
+                    "kind": "read",
+                    "mode": "easy",
+                    "prompt": "Read-only analysis. Inspect context files and write _evidence_context.txt.",
+                    "expected_outputs": ["_evidence_context.txt"],
+                },
+                {
+                    "task_id": "read_tools",
+                    "kind": "read",
+                    "mode": "easy",
+                    "prompt": "Analysis only; inspect tool files and save _evidence_tools.txt.",
+                    "expected_outputs": ["_evidence_tools.txt"],
+                },
+            ],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    by_id = {task["task_id"]: task for task in result}
+    assert set(by_id) == {"read_context", "read_tools"}
+    for task_id, output in (
+        ("read_context", "_evidence_context.txt"),
+        ("read_tools", "_evidence_tools.txt"),
+    ):
+        observations = by_id[task_id].get("guard_observations") or []
+        fact = next(
+            item for item in observations
+            if item.get("issue") == "read_only_analysis_output_conflict"
+        )
+        assert fact["task_id"] == task_id
+        assert fact["expected_outputs"] == [output]
+
+
+async def test_delegate_prompt_output_candidates_do_not_become_expected_outputs(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "write_report",
+                "kind": "edit",
+                "mode": "easy",
+                "prompt": "Summarize the evidence and generate final_report.md for the user.",
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    task = result[0]
+    assert task["expected_outputs"] == []
+    assert "Candidate Output Facts" in task["prompt"]
+    assert "final_report.md" in task["prompt"]
+    assert task["guard_observations"][0]["issue"] == "undeclared_output_candidates"
+    assert task["guard_observations"][0]["candidate_outputs"] == ["final_report.md"]
+
+
+async def test_delegate_reports_helper_produced_read_input_fact_to_guard(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "read_prior_report",
+                "kind": "read",
+                "mode": "easy",
+                "prompt": "Read helper_summary.md and extract missing evidence.",
+                "input_files": ["helper_summary.md"],
+                "expected_outputs": ["prior_report_evidence.txt"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    task = result[0]
+    observations = task.get("guard_observations") or []
+    fact = next(
+        item for item in observations
+        if item.get("issue") == "read_helper_targets_helper_produced_artifacts"
+    )
+    assert fact["task_id"] == "read_prior_report"
+    assert fact["inputs"] == ["helper_summary.md"]
+    assert "guard should decide" in fact["details"]
+
+
+async def test_delegate_unknown_helper_kind_returns_fact_not_code_fallback(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "browser_check",
+                "kind": "browser",
+                "mode": "easy",
+                "prompt": "Open the app and verify the form behavior.",
+                "expected_outputs": ["browser_report.md"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["ok"] is False
+    assert data["error"] == "unsupported_helper_kind"
+    assert data["requested_kind"] == "browser"
+    assert "code" in data["allowed_kinds"]
+    assert "browser" not in data["allowed_kinds"]
+    assert data["next_delegate_shape"]["tasks"][0]["expected_outputs"] == ["browser_report.md"]
+
+
+async def test_delegate_ocr_kind_returns_tool_capability_fact(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "ocr_scan",
+                "kind": "ocr",
+                "mode": "easy",
+                "prompt": "OCR the scanned PDF and save evidence.",
+                "expected_outputs": ["ocr_evidence.txt"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert isinstance(result, str)
+    data = json.loads(result)
+    assert data["ok"] is False
+    assert data["error"] == "unsupported_helper_kind"
+    assert data["requested_kind"] == "ocr"
+    assert "read" in data["allowed_kinds"]
+    assert "ocr" not in data["allowed_kinds"]
+    assert "helper tools/capabilities" in data["fact"]
+
+
+async def test_readonly_project_analysis_kind_with_outputs_returns_fact(tmp_path):
+    from app.llm.tools.delegate import _sanitize_and_validate_tasks
+
+    result = await _sanitize_and_validate_tasks(
+        {
+            "tasks": [{
+                "task_id": "project_map",
+                "kind": "project_map",
+                "mode": "easy",
+                "prompt": "Map the project architecture and write _helpers_shared/project_map.txt.",
+                "expected_outputs": ["_helpers_shared/project_map.txt"],
+            }],
+        },
+        main_workspace=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+    )
+
+    assert not isinstance(result, str)
+    task = result[0]
+    assert task["task_id"] == "project_map"
+    assert task["kind"] == "project_map"
+    assert task["expected_outputs"] == ["_helpers_shared/project_map.txt"]
+    observations = task.get("guard_observations") or []
+    fact = next(
+        item for item in observations
+        if item.get("issue") == "read_only_project_analysis_output_conflict"
+    )
+    assert fact["current_kind"] == "project_map"
+    assert fact["expected_outputs"] == ["_helpers_shared/project_map.txt"]
+    assert "guard should decide" in fact["details"]
+
+
 async def test_broad_code_task_is_blocked_before_hard_pairing(tmp_path):
     from app.llm.tools.delegate import _sanitize_and_validate_tasks
 
@@ -4906,14 +6548,16 @@ def test_delegate_wait_guard_feedback_is_english_first_and_recoverable():
     from pathlib import Path
 
     src = Path("app/llm/tools/delegate_wait.py").read_text(encoding="utf-8")
-    assert "Rebuild the helper plan before spawning again." in src
-    assert "Re-spawn the same logical work with the correct base kind." in src
-    assert "task_too_broad_should_split" in src
-    assert "task_kind_mismatch" in src
-    assert "recovery_plan" in src
-    assert "next_delegate_shape" in src
-    assert "same_base_kind_as_original_boundary" in src
-    assert "preserve_original_mode" in src
+    assert "The task-quality guard blocked this delegation." in src
+    assert "free-form guard feedback, not a structured program decision" in src
+    assert "dispatch_reason" in src
+    assert '"error": "guard_blocked"' in src
+    assert '"error_kind": "guard_blocked"' in src
+    assert "task_too_broad_should_split" not in src
+    assert "task_kind_mismatch" not in src
+    assert "recovery_plan" not in src
+    assert "next_delegate_shape" not in src
+    assert "same_base_kind_as_original_boundary" not in src
     assert "**立即拆分并重派**" not in src
     assert "**立即用正确 base kind 重派**" not in src
     assert "铁律" not in src
@@ -4943,15 +6587,59 @@ def test_task_quality_guard_allows_benchmark_code_helpers():
 
     prompt = Path("app/llm/aux_prompts.py").read_text(encoding="utf-8")
     assert "Code helpers may run benchmarks, compile, debug, compute data" in prompt
-    assert "A persona veto is only for a clear role or safety refusal" in prompt
+    assert "browser-automation evidence that needs Playwright/Puppeteer/Selenium/Chromium-style runtime commands" in prompt
+    assert "If the delegation should not run as-is, return should_act=false" in prompt
+    assert "runtime will only read `should_act` and `reason`" in prompt
 
 
-async def test_auto_final_uses_explicit_hard_sibling_without_extra_twin(tmp_path):
+def test_browser_automation_guard_fact_marks_runtime_capability_without_hard_decision():
+    from app.llm.tools.delegate_actions import _attach_guard_attention_facts
+
+    tasks = [{
+        "task_id": "browser_probe",
+        "kind": "code",
+        "prompt": (
+            "Use Playwright Chromium to visit http://127.0.0.1:5555/, observe the page, "
+            "save a screenshot, and report the visible API facts."
+        ),
+        "acceptance_checks": ["Browser automation evidence is reported before any project edit."],
+    }]
+
+    attached = _attach_guard_attention_facts(tasks)
+    observations = attached[0].get("guard_observations") or []
+    fact = next(
+        item for item in observations
+        if item.get("issue") == "browser_automation_evidence_capability"
+    )
+    assert fact["needs_attention"] is False
+    assert fact["current_kind"] == "code"
+    assert "kind='code' can be appropriate" in fact["details"]
+
+
+def test_plain_http_fetch_does_not_add_browser_automation_guard_fact():
+    from app.llm.tools.delegate_actions import _attach_guard_attention_facts
+
+    tasks = [{
+        "task_id": "http_fetch",
+        "kind": "read",
+        "prompt": "Fetch http://127.0.0.1:5555/ with requests and extract endpoint text.",
+        "acceptance_checks": ["Save extracted text."],
+    }]
+
+    attached = _attach_guard_attention_facts(tasks)
+    observations = attached[0].get("guard_observations") or []
+    assert not any(
+        item.get("issue") == "browser_automation_evidence_capability"
+        for item in observations
+    )
+
+
+async def test_explicit_hard_sibling_pairs_without_extra_twin(tmp_path):
     from app.llm.tools.delegate import _sanitize_and_validate_tasks
 
     cleaned = await _sanitize_and_validate_tasks(
         {
-            "auto_final": True,
+            "legacy_pairing_flag": True,
             "tasks": [
                 {
                     "task_id": "impl",
@@ -5042,7 +6730,7 @@ async def test_hard_pair_preflight_guard_blocks_before_helper_start(monkeypatch,
     from app.llm.tools import delegate
 
     async def fake_guard(*args, **kwargs):
-        return True, "split project first", [{
+        return False, "split project first", [{
             "task_id": "project_refactor",
             "reason": "Too many independent project areas for one helper.",
             "split_into": ["project_inventory", "project_api", "project_tests"],
@@ -5098,10 +6786,10 @@ async def test_hard_pair_preflight_guard_blocks_before_helper_start(monkeypatch,
         ))
 
     assert result["ok"] is False
-    assert result["error"] == "task_too_broad_should_split"
+    assert result["error"] == "guard_blocked"
+    assert "split project first" in result["reason"]
     assert result["preflight_guard"] is True
     assert result["helpers_initially_spawned"] == 0
-    assert result["next_delegate_shape"]["tasks"]
     assert started == []
     assert workflow_events
     assert workflow_events[-1]["kind"] == "helper_blocked"
@@ -5112,7 +6800,7 @@ async def test_hard_pair_preflight_guard_blocks_before_helper_start(monkeypatch,
     )
 
 
-async def test_preflight_guard_hard_blocks_single_framework_contract_when_guard_splits(monkeypatch, tmp_path):
+async def test_preflight_guard_allows_when_guard_returns_allow_even_with_legacy_split_fields(monkeypatch, tmp_path):
     from app.core.runtime_mode import EnvironmentContext, runtime_context
     from app.llm.tools import delegate
 
@@ -5171,18 +6859,326 @@ async def test_preflight_guard_hard_blocks_single_framework_contract_when_guard_
             user_id="user",
         ))
 
-    assert result["ok"] is False
-    assert result["error"] == "task_too_broad_should_split"
-    assert result["preflight_guard"] is True
-    assert result["helpers_initially_spawned"] == 0
-    assert started == []
+    assert result["ok"] is True
+    assert result["helpers_initially_spawned"] == 1
+    assert started == ["framework_contract"]
+
+
+async def test_preflight_guard_allows_single_text_synthesis_when_source_split_is_advice(monkeypatch, tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import delegate
+
+    async def fake_guard(*args, **kwargs):
+        return True, "source reading can be separated", [{
+            "task_id": "summary_assembly",
+            "reason": "Separate source-material reading from final text synthesis.",
+            "split_into": ["read_profile", "read_data", "summary_synthesis"],
+        }], [], {}
+
+    started: list[str] = []
+
+    async def fake_run_one_helper(*args, **kwargs):
+        started.append(kwargs.get("task_id", "?"))
+        helper_workspace = Path(str(kwargs.get("helper_workspace") or tmp_path))
+        helper_workspace.mkdir(parents=True, exist_ok=True)
+        (helper_workspace / "summary.md").write_text("# Summary\n", encoding="utf-8")
+        return {
+            "task_id": kwargs.get("task_id", "?"),
+            "ok": True,
+            "report": "VERDICT: PASS\nDeclared files: summary.md",
+            "files": ["summary.md"],
+            "terminal_reason": "completed",
+            "outputs_check": {"outputs_complete": True, "quality_warnings": []},
+            "_post_helper_action": "output_json_directly",
+        }
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", fake_guard)
+    monkeypatch.setattr(delegate, "_run_one_helper", fake_run_one_helper)
+    monkeypatch.setattr(delegate, "_detect_missing_unified_framework", lambda cleaned: None)
+
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+    with runtime_context("environment", env):
+        result = json.loads(await delegate.handle_delegate(
+            str(tmp_path),
+            {
+                "action": "spawn",
+                "wait_window_sec": 1,
+                "tasks": [{
+                    "task_id": "summary_assembly",
+                    "kind": "code",
+                    "mode": "easy",
+                    "prompt": (
+                        "Write summary.md from already confirmed profile.yaml and data.json facts. "
+                        "The relevant budget, constraint, and source facts are listed inline here."
+                    ),
+                    "expected_outputs": ["summary.md"],
+                }],
+            },
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+        ))
+
+    assert result.get("error") != "task_too_broad_should_split"
+    assert started == ["summary_assembly"]
+
+
+async def test_preflight_guard_allows_single_text_synthesis_with_bounded_input_files(monkeypatch, tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import delegate
+
+    for name, content in {
+        "profile.yaml": "budget: 100\n",
+        "data.json": '{"items":[]}\n',
+        "verify_required.py": "print('PASS')\n",
+    }.items():
+        (tmp_path / name).write_text(content, encoding="utf-8")
+
+    async def fake_guard(*args, **kwargs):
+        return True, "source reading can be separated", [{
+            "task_id": "artifact_assembly",
+            "reason": "Separate source-material reading from final text synthesis.",
+            "split_into": ["read_sources", "artifact_synthesis"],
+        }], [], {}
+
+    started: list[str] = []
+
+    async def fake_run_one_helper(*args, **kwargs):
+        started.append(kwargs.get("task_id", "?"))
+        helper_workspace = Path(str(kwargs.get("helper_workspace") or tmp_path))
+        helper_workspace.mkdir(parents=True, exist_ok=True)
+        (helper_workspace / "artifact.md").write_text("# Artifact\n", encoding="utf-8")
+        return {
+            "task_id": kwargs.get("task_id", "?"),
+            "ok": True,
+            "report": "VERDICT: PASS\nDeclared files: artifact.md",
+            "files": ["artifact.md"],
+            "terminal_reason": "completed",
+            "outputs_check": {"outputs_complete": True, "quality_warnings": []},
+            "_post_helper_action": "output_json_directly",
+        }
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", fake_guard)
+    monkeypatch.setattr(delegate, "_run_one_helper", fake_run_one_helper)
+    monkeypatch.setattr(delegate, "_detect_missing_unified_framework", lambda cleaned: None)
+
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+    with runtime_context("environment", env):
+        result = json.loads(await delegate.handle_delegate(
+            str(tmp_path),
+            {
+                "action": "spawn",
+                "wait_window_sec": 1,
+                "tasks": [{
+                    "task_id": "artifact_assembly",
+                    "kind": "code",
+                    "mode": "easy",
+                    "prompt": (
+                        "Create artifact.md from the listed source files. Preserve raw field names, "
+                        "constraints, and verifier facts from the inputs before computing the final text."
+                    ),
+                    "input_files": ["profile.yaml", "data.json", "verify_required.py"],
+                    "expected_outputs": ["artifact.md"],
+                }],
+            },
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+        ))
+
+    assert result.get("error") != "task_too_broad_should_split"
+    assert started == ["artifact_assembly"]
+
+
+def test_single_text_source_split_softens_light_embedded_source_facts():
+    from app.llm.tools.delegate import _should_soften_source_read_split_for_single_text_output
+
+    task = {
+        "task_id": "artifact_assembly",
+        "kind": "edit",
+        "prompt": (
+            "Create artifact.md from the evidence below.\n"
+            "1. profile.yaml\n2. source.json\n3. verify_required.py\n"
+            "4. constraints\n5. labels\n6. budget facts\n"
+        ),
+        "expected_outputs": ["artifact.md"],
+    }
+    rec = {
+        "task_id": "artifact_assembly",
+        "reason": "6 source material items/groups should be read first",
+        "split_into": ["read_sources_batch_1", "read_sources_batch_2"],
+    }
+
+    assert _should_soften_source_read_split_for_single_text_output(task, rec) is True
+
+
+def test_single_text_source_split_keeps_heavy_source_material_block():
+    from app.llm.tools.delegate import _should_soften_source_read_split_for_single_text_output
+
+    task = {
+        "task_id": "artifact_assembly",
+        "kind": "edit",
+        "prompt": (
+            "Create artifact.md after extracting from source materials:\n"
+            "1. a.docx\n2. b.pdf\n3. c.pdf\n4. d.docx\n5. e.pdf\n6. f.docx\n"
+        ),
+        "expected_outputs": ["artifact.md"],
+    }
+    rec = {
+        "task_id": "artifact_assembly",
+        "reason": "6 source material items/groups should be read first",
+        "split_into": ["read_sources_batch_1", "read_sources_batch_2"],
+    }
+
+    assert _should_soften_source_read_split_for_single_text_output(task, rec) is False
+
+
+def test_verified_evidence_final_assembly_does_not_emit_source_split_fact():
+    from app.llm.tools.delegate import _deterministic_source_read_split_recommendations
+
+    prompt = (
+        "Create 4 text files.\n\n"
+        "## Classification Evidence (already verified - use these facts)\n"
+        "1. **01.txt** - TIER: needs_me.\n"
+        "2. **02.txt** - TIER: noise.\n"
+        "3. **03.txt** - TIER: noise.\n"
+        "4. **04.txt** - TIER: can_wait.\n"
+        "5. **05.txt** - TIER: noise.\n"
+        "6. **06.txt** - TIER: needs_me.\n"
+        "7. **07.txt** - TIER: noise.\n"
+        "8. **08.txt** - TIER: noise.\n\n"
+        "## Files to create\n"
+        "### File 1: `inbox_triage_report.md`\n"
+        "### File 2: `draft_client_outage.txt`\n"
+        "### File 3: `draft_legal_msa.txt`\n"
+        "### File 4: `phishing_flagged.txt`\n"
+    )
+
+    recs = _deterministic_source_read_split_recommendations([{
+        "task_id": "report_and_drafts",
+        "kind": "edit",
+        "mode": "easy",
+        "prompt": prompt,
+        "_source_count_hint": 8,
+    }])
+
+    assert recs == []
+
+
+def test_already_read_material_final_assembly_does_not_emit_source_split_fact():
+    from app.llm.tools.delegate import (
+        _deterministic_compact_text_owner_observations,
+        _deterministic_source_read_split_recommendations,
+        _prompt_has_verified_or_embedded_evidence_for_final_assembly,
+    )
+
+    prompt = (
+        "You have read all 8 source files already. Produce exactly three output files.\n\n"
+        "## Source materials already read\n"
+        "1. **01.txt** - sender and urgency facts.\n"
+        "2. **02.txt** - newsletter facts.\n"
+        "3. **03.txt** - suspicious link facts.\n"
+        "4. **04.txt** - status update facts.\n"
+        "5. **05.txt** - ambiguous request facts.\n"
+        "6. **06.txt** - legal deadline facts.\n"
+        "7. **07.txt** - meetup facts.\n"
+        "8. **08.txt** - recruiter outreach facts.\n\n"
+        "## Output file 1: classified_items.txt\n"
+        "## Output file 2: summary_report.txt\n"
+        "## Output file 3: urgent_reply_draft.txt\n"
+    )
+
+    task = {
+        "task_id": "material_outputs",
+        "kind": "edit",
+        "mode": "easy",
+        "prompt": prompt,
+        "expected_outputs": [
+            "classified_items.txt",
+            "summary_report.txt",
+            "urgent_reply_draft.txt",
+        ],
+        "_source_count_hint": 8,
+    }
+
+    assert _prompt_has_verified_or_embedded_evidence_for_final_assembly(prompt) is True
+    assert _deterministic_source_read_split_recommendations([task]) == []
+    owner_facts = _deterministic_compact_text_owner_observations([task])
+    assert owner_facts and owner_facts[0]["issue"] == "compact_text_owner_shape"
+
+
+def test_compact_text_owner_shape_fact_reaches_guard_attention():
+    from app.llm.tools import delegate_actions
+    from app.llm.tools.delegate import _deterministic_compact_text_owner_observations
+
+    tasks = [{
+        "task_id": "report_and_drafts",
+        "kind": "edit",
+        "mode": "easy",
+        "prompt": (
+            "Use verified evidence below to create final report.md and draft.txt.\n"
+            "## Verified Evidence\n"
+            "File 1: confirmed fact.\n"
+        ),
+        "expected_outputs": ["report.md", "draft.txt"],
+    }]
+
+    direct = _deterministic_compact_text_owner_observations(tasks)
+    assert direct and direct[0]["issue"] == "compact_text_owner_shape"
+
+    attached = delegate_actions._attach_guard_attention_facts([dict(tasks[0])])
+    observations = attached[0].get("guard_observations") or []
+    assert any(
+        item.get("source") == "compact_text_owner_shape_check"
+        and item.get("issue") == "compact_text_owner_shape"
+        for item in observations
+    )
+
+
+def test_source_material_ref_count_ignores_slash_aliases():
+    from app.llm.tools.delegate import _source_material_ref_count
+
+    prompt = "\n".join([
+        "- Service A / public label",
+        "- Service B / alternate name",
+        "- Option C / user-facing alias",
+    ])
+
+    assert _source_material_ref_count(prompt) == 0
+
+
+def test_source_material_ref_count_keeps_explicit_batches():
+    from app.llm.tools.delegate import _source_material_ref_count
+
+    prompt = "\n".join([
+        "- batch 1: first source group",
+        "- folder 2: second source group",
+        "- 第三组: 其他材料",
+    ])
+
+    assert _source_material_ref_count(prompt) == 3
 
 
 async def test_broad_source_material_code_task_is_split_before_helper_start(monkeypatch, tmp_path):
     from app.core.runtime_mode import EnvironmentContext, runtime_context
     from app.llm.tools import delegate
 
+    guard_calls: list[list[dict]] = []
+
     async def permissive_guard(*args, **kwargs):
+        guard_calls.append(args[2])
         return True, "allow", [], [], {}
 
     started: list[str] = []
@@ -5227,14 +7223,16 @@ async def test_broad_source_material_code_task_is_split_before_helper_start(monk
             user_id="user",
         ))
 
-    assert result["ok"] is False
-    assert result["error"] == "task_too_broad_should_split"
-    assert result["preflight_guard"] is True
-    assert started == []
-    followups = result["next_delegate_shape"]["tasks"]
-    assert followups
-    assert all(task["kind"] == "read" for task in followups)
-    assert all(task["expected_outputs"][0].endswith("_evidence.txt") for task in followups)
+    assert result["ok"] is True
+    assert started == ["extract_reports"]
+    assert guard_calls
+    observations = guard_calls[0][0].get("guard_observations") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("source") == "deterministic_split_check"
+        and item.get("observed_split_boundary_names")
+        for item in observations
+    )
 
 
 async def test_wait_window_running_helper_is_not_counted_as_failed(monkeypatch, tmp_path):
@@ -5311,7 +7309,7 @@ def test_source_material_reading_detector_treats_script_as_method():
         {"task_id": "read_all", "kind": "code", "mode": "hard", "prompt": prompt}
     ])
     assert recs and recs[0]["task_id"] == "read_all"
-    assert recs[0]["split_into"][0].startswith("read_sources_batch_")
+    assert recs[0]["observed_split_boundary_names"][0].startswith("read_sources_batch_")
 
 
 def test_source_material_reading_uses_manifest_count_hint():
@@ -5328,7 +7326,7 @@ def test_source_material_reading_uses_manifest_count_hint():
     ])
 
     assert recs and recs[0]["task_id"] == "ielts_synthesis"
-    assert recs[0]["split_into"][:2] == ["read_sources_batch_1", "read_sources_batch_2"]
+    assert recs[0]["observed_split_boundary_names"][:2] == ["read_sources_batch_1", "read_sources_batch_2"]
 
 
 def test_source_material_reading_split_ignores_framework_contract_without_inputs():
@@ -5348,6 +7346,241 @@ def test_source_material_reading_split_ignores_framework_contract_without_inputs
     ])
 
     assert recs == []
+
+
+def test_compact_text_material_read_batches_attach_guard_fact():
+    from app.llm.tools.delegate import _deterministic_compact_text_bundle_split_observations
+
+    recs = _deterministic_compact_text_bundle_split_observations([
+        {
+            "task_id": "read_part_a",
+            "kind": "read",
+            "prompt": "Read these source files and write internal evidence.",
+            "input_files": ["notes/a.txt", "notes/b.md", "data/c.json"],
+            "expected_outputs": ["part_a_evidence.txt"],
+        },
+        {
+            "task_id": "read_part_b",
+            "kind": "read",
+            "prompt": "Read these source files and write internal evidence.",
+            "input_files": ["notes/d.txt", "notes/e.md"],
+            "expected_outputs": ["part_b_evidence.txt"],
+        },
+    ])
+
+    assert recs
+    assert recs[0]["issue"] == "compact_text_material_bundle_split"
+    assert recs[0]["observed_split_boundary_names"] == ["read_part_a", "read_part_b"]
+
+
+def test_compact_text_material_read_batches_ignore_heavy_inputs():
+    from app.llm.tools.delegate import _deterministic_compact_text_bundle_split_observations
+
+    recs = _deterministic_compact_text_bundle_split_observations([
+        {
+            "task_id": "read_part_a",
+            "kind": "read",
+            "prompt": "Extract source materials.",
+            "input_files": ["reports/a.pdf", "reports/b.docx"],
+            "expected_outputs": ["part_a_evidence.txt"],
+        },
+        {
+            "task_id": "read_part_b",
+            "kind": "read",
+            "prompt": "Extract source materials.",
+            "input_files": ["reports/c.pdf", "reports/d.docx"],
+            "expected_outputs": ["part_b_evidence.txt"],
+        },
+    ])
+
+    assert recs == []
+
+
+def test_same_batch_output_overlap_attaches_guard_fact():
+    from app.llm.tools.delegate import _deterministic_same_batch_output_overlap_observations
+
+    recs = _deterministic_same_batch_output_overlap_observations([
+        {
+            "task_id": "easy_impl",
+            "kind": "code",
+            "mode": "easy",
+            "expected_outputs": ["src/result.py"],
+        },
+        {
+            "task_id": "hard_impl",
+            "kind": "code",
+            "mode": "hard",
+            "expected_outputs": ["_env/src/result.py"],
+        },
+    ])
+
+    assert recs
+    assert recs[0]["issue"] == "same_batch_expected_output_overlap"
+    assert recs[0]["expected_outputs"] == ["src/result.py"]
+
+
+async def test_recent_output_overlap_reaches_preflight_guard(monkeypatch, tmp_path):
+    from app.core import debug
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import delegate
+    from app.llm.tools.delegate_state import _add_to_completion_ledger
+
+    trace_id = "trace_recent_overlap_test"
+    previous_trace_id = debug.current_trace_id()
+    debug.set_trace_id(trace_id)
+    guard_calls: list[list[dict]] = []
+    started: list[str] = []
+
+    async def permissive_guard(*args, **kwargs):
+        guard_calls.append(args[2])
+        return True, "allow", [], [], {}
+
+    async def fake_run_one_helper(*args, **kwargs):
+        started.append(kwargs.get("task_id", "?"))
+        return {
+            "task_id": kwargs.get("task_id", "?"),
+            "ok": True,
+            "report": "done",
+            "files": ["summary.md"],
+            "terminal_reason": "completed",
+            "outputs_check": {"outputs_complete": True, "quality_warnings": []},
+        }
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", permissive_guard)
+    monkeypatch.setattr(delegate, "_run_one_helper", fake_run_one_helper)
+    monkeypatch.setattr(delegate, "_detect_missing_unified_framework", lambda cleaned: None)
+    await _add_to_completion_ledger(
+        trace_id,
+        "previous_summary",
+        {
+            "ok": True,
+            "files": ["summary.md"],
+            "terminal_reason": "completed",
+            "outputs_check": {"outputs_complete": True},
+        },
+    )
+
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+    try:
+        with runtime_context("environment", env):
+            result = json.loads(await delegate.handle_delegate(
+                str(tmp_path),
+                {
+                    "action": "spawn",
+                    "wait_window_sec": 0,
+                    "tasks": [{
+                        "task_id": "new_summary",
+                        "kind": "edit",
+                        "mode": "easy",
+                        "prompt": "Create the final summary from current evidence.",
+                        "expected_outputs": ["_env/summary.md"],
+                    }],
+                },
+                archive_id="archive",
+                group_id="group",
+                user_id="user",
+            ))
+    finally:
+        debug.set_trace_id(previous_trace_id)
+
+    assert result["ok"] is True
+    assert started == ["new_summary"]
+    assert guard_calls
+    observations = guard_calls[0][0].get("guard_observations") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("source") == "recent_output_overlap_check"
+        and item.get("issue") == "recent_helper_expected_output_overlap"
+        for item in observations
+    )
+
+
+async def test_ready_artifact_overlap_reaches_preflight_guard(monkeypatch, tmp_path):
+    from app.core import agent_state, debug
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import delegate
+
+    trace_id = "trace_ready_artifact_overlap_test"
+    previous_trace_id = debug.current_trace_id()
+    debug.set_trace_id(trace_id)
+    agent_state.reset_trace(trace_id)
+    guard_calls: list[list[dict]] = []
+    started: list[str] = []
+
+    async def permissive_guard(*args, **kwargs):
+        guard_calls.append(args[2])
+        return True, "allow", [], [], {}
+
+    async def fake_run_one_helper(*args, **kwargs):
+        started.append(kwargs.get("task_id", "?"))
+        return {
+            "task_id": kwargs.get("task_id", "?"),
+            "ok": True,
+            "report": "done",
+            "files": ["summary.md"],
+            "terminal_reason": "completed",
+            "outputs_check": {"outputs_complete": True, "quality_warnings": []},
+        }
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", permissive_guard)
+    monkeypatch.setattr(delegate, "_run_one_helper", fake_run_one_helper)
+    monkeypatch.setattr(delegate, "_detect_missing_unified_framework", lambda cleaned: None)
+
+    agent_state.register_artifact(
+        trace_id=trace_id,
+        path="summary.md",
+        artifact_type="report",
+        created_by="main",
+        status=agent_state.ARTIFACT_READY,
+        verified_by="pytest",
+    )
+
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+    try:
+        with runtime_context("environment", env):
+            result = json.loads(await delegate.handle_delegate(
+                str(tmp_path),
+                {
+                    "action": "spawn",
+                    "wait_window_sec": 0,
+                    "tasks": [{
+                        "task_id": "ready_artifact_summary",
+                        "kind": "edit",
+                        "mode": "easy",
+                        "prompt": "Revise the final summary if needed.",
+                        "expected_outputs": ["_env/summary.md"],
+                    }],
+                },
+                archive_id="archive",
+                group_id="group",
+                user_id="user",
+            ))
+    finally:
+        agent_state.reset_trace(trace_id)
+        debug.set_trace_id(previous_trace_id)
+
+    assert result["ok"] is True
+    assert started == ["ready_artifact_summary"]
+    assert guard_calls
+    observations = guard_calls[0][0].get("guard_observations") or []
+    assert any(
+        isinstance(item, dict)
+        and item.get("source") == "ready_artifact_overlap_check"
+        and item.get("issue") == "ready_artifact_expected_output_overlap"
+        for item in observations
+    )
 
 
 def test_broad_code_guard_allows_single_framework_contract_file():
@@ -5530,7 +7763,7 @@ def test_single_compact_framework_guard_does_not_exempt_hard_or_long_prompt():
     assert _is_single_compact_framework_contract_task_for_guard(long_prompt) is False
 
 
-def test_helper_large_text_write_warning_blocks_oversized_edit_report():
+def test_helper_large_text_write_warning_allows_medium_report_write():
     from app.llm.tools.registry import _helper_large_text_write_warning
 
     content = "# Paper\n\n" + "\n\n".join(
@@ -5540,11 +7773,24 @@ def test_helper_large_text_write_warning_blocks_oversized_edit_report():
 
     result = _helper_large_text_write_warning("edit", "analysis/red_black_tree.md", content)
 
+    assert result is None
+
+
+def test_helper_large_text_write_warning_blocks_near_stream_limit_report():
+    from app.llm.tools.registry import _helper_large_text_write_warning
+
+    content = "# Paper\n\n" + "\n\n".join(
+        f"## Section {i}\n" + ("数据库索引算法比较与实验分析。" * 140)
+        for i in range(24)
+    )
+
+    result = _helper_large_text_write_warning("edit", "analysis/red_black_tree.md", content)
+
     assert result is not None
     assert result["error"] == "helper_large_text_write_should_segment"
     assert result["recovery_action"] == "continue_same_task_segmented"
-    assert result["suggested_next_action"]["same_task"] is True
-    assert "2,000-4,000 characters" in result["hint"]
+    assert result["recovery_facts"]["same_task"] is True
+    assert "stream safety limit" in result["hint"]
     assert "section files" in result["hint"]
     assert "Output files" in result["hint"]
 
@@ -5706,10 +7952,12 @@ def test_framework_prompts_require_exact_output_matrix_and_non_shared_final_arti
     assert "The first framework helper owns only this structural contract" in schema_text
     assert "evidence-backed analysis, research claims, citations" in schema_text
     assert "final numeric values, citations, conclusions" in schema_text
-    assert "exact output matrix" in ENVIRONMENT_PROMPT_ADDON
-    assert "Word assembly" in ENVIRONMENT_PROMPT_ADDON
-    assert "It defines slots, ownership, and acceptance" in ENVIRONMENT_PROMPT_ADDON
-    assert "research claims, citations, conclusions, final numeric tables" in ENVIRONMENT_PROMPT_ADDON
+    # ENVIRONMENT_PROMPT_ADDON was compressed (2026-06): same contract, tighter
+    # wording — output matrix + bounded slots + producer ownership must remain.
+    assert "output matrix" in ENVIRONMENT_PROMPT_ADDON
+    assert "merge order" in ENVIRONMENT_PROMPT_ADDON
+    assert "It defines bounded slots, not final content" in ENVIRONMENT_PROMPT_ADDON
+    assert "belong to producer helpers" in ENVIRONMENT_PROMPT_ADDON
     assert "Define slots, dependencies, ownership, and acceptance rather than filling those slots" in _HELPER_CONSISTENCY_CONTRACT
 
     warnings = broad_framework_guard_warnings([{
@@ -5721,10 +7969,12 @@ def test_framework_prompts_require_exact_output_matrix_and_non_shared_final_arti
     }])
 
     joined = json.dumps(warnings, ensure_ascii=False)
-    assert "exact downstream output matrix" in joined
+    assert "downstream output matrix" in joined
     assert "_helpers_shared/...` is handoff evidence" in joined
-    assert "slots, dependencies, ownership, and acceptance" in joined
-    assert "citations, conclusions, final-value tables" in joined
+    assert "slots, dependencies, acceptance, and downstream output matrix" in joined
+    assert "ownership boundaries" in joined
+    assert "implementation, experiment, evidence, chart" in joined
+    assert "final-document work" in joined
 
 
 def test_broad_code_guard_allows_split_greenfield_framework_fanout():
@@ -5899,7 +8149,7 @@ async def test_read_fanout_framework_block_suggests_delegate_contract_helper(mon
     from app.llm.tools import delegate
 
     async def fake_guard(*args, **kwargs):
-        return True, "needs framework", [], [], {
+        return False, "needs framework", [], [], {
             "block": True,
             "task_ids": ["read_pptx", "read_xlsx", "read_reports"],
             "reason": "Broad multi-part reading needs a shared evidence schema.",
@@ -5913,6 +8163,7 @@ async def test_read_fanout_framework_block_suggests_delegate_contract_helper(mon
 
     monkeypatch.setattr(delegate, "_persona_consent_guard", fake_guard)
     monkeypatch.setattr(delegate, "_run_one_helper", fake_run_one_helper)
+
     monkeypatch.setattr(delegate, "_detect_missing_unified_framework", lambda cleaned: None)
 
     result = json.loads(await delegate.handle_delegate(
@@ -5947,14 +8198,9 @@ async def test_read_fanout_framework_block_suggests_delegate_contract_helper(mon
     ))
 
     assert result["ok"] is False
-    assert result["error_kind"] == "framework_first_required"
+    assert result["error_kind"] == "guard_blocked"
     assert result["helpers_initially_spawned"] == 0
-    assert result["suggested_next_call"]["tool"] == "delegate"
-    assert result["suggested_next_call"]["tasks"][0]["kind"] == "edit"
-    assert result["suggested_next_call"]["tasks"][0]["expected_outputs"] == [
-        "_helpers_shared/shared_framework_contract.md"
-    ]
-    assert "workspace.write" not in json.dumps(result["suggested_next_call"], ensure_ascii=False)
+    assert "needs framework" in result["reason"]
     assert started == []
 
 
@@ -5993,7 +8239,7 @@ async def test_explicit_hard_helper_preflight_guard_blocks_before_helper_start(m
     from app.llm.tools import delegate
 
     async def fake_guard(*args, **kwargs):
-        return True, "split first", [{
+        return False, "split first", [{
             "task_id": "graph_algos",
             "reason": "Implementation, benchmark, tests, README, data, and report are separable work areas.",
             "split_into": ["graph_core", "graph_benchmark", "graph_tests", "graph_docs"],
@@ -6038,11 +8284,12 @@ async def test_explicit_hard_helper_preflight_guard_blocks_before_helper_start(m
     ))
 
     assert result["ok"] is False
-    assert result["error"] == "task_too_broad_should_split"
+    assert result["error"] == "guard_blocked"
+    assert "split first" in result["reason"]
     assert started == []
 
 
-async def test_guard_intervention_ignores_extra_guard_tuple_fields(monkeypatch):
+async def test_guard_intervention_ignores_extra_guard_tuple_fields_when_allowed(monkeypatch):
     from app.llm.tools import delegate_wait
 
     killed: list[str] = []
@@ -6074,10 +8321,8 @@ async def test_guard_intervention_ignores_extra_guard_tuple_fields(monkeypatch):
         helper_specs=[],
     )
 
-    assert payload is not None
-    assert payload["ok"] is False
-    assert payload["error"] == "task_too_broad_should_split"
-    assert killed == ["trace_extra_fields"]
+    assert payload is None
+    assert killed == []
 
 
 async def test_framework_guard_allows_second_attempt_in_same_trace(monkeypatch, tmp_path):
@@ -6306,7 +8551,7 @@ def test_legacy_paired_hard_task_detection_accepts_numbered_suffix():
     assert _is_legacy_paired_hard_task({"task_id": "impl_final_2", "mode": "hard"}) is True
 
 
-async def test_legacy_spawn_auto_final_blocks_completed_primary_and_hard_pair(monkeypatch, tmp_path):
+async def test_legacy_spawn_pairing_flag_blocks_completed_primary_and_hard_pair(monkeypatch, tmp_path):
     from app.core import core_processes
     from app.core.core_processes import ProcessRegistry
     from app.llm.tools import delegate
@@ -6329,7 +8574,7 @@ async def test_legacy_spawn_auto_final_blocks_completed_primary_and_hard_pair(mo
         str(tmp_path),
         {
             "action": "spawn",
-            "auto_final": True,
+            "legacy_pairing_flag": True,
             "tasks": [{
                 "task_id": "impl",
                 "kind": "code",
@@ -6345,12 +8590,13 @@ async def test_legacy_spawn_auto_final_blocks_completed_primary_and_hard_pair(mo
 
     assert result["ok"] is True
     assert result["already_completed"] is True
-    assert set(result["duplicate_task_ids"]) == {"impl", "impl_hard"}
+    assert set(result["duplicate_task_ids"]) == {"impl"}
     assert called is False
 
 
-async def test_legacy_spawn_auto_final_skips_already_paired_hard_task(monkeypatch, tmp_path):
+async def test_legacy_spawn_pairing_flag_runs_explicit_hard_task(monkeypatch, tmp_path):
     from app.llm.tools import delegate
+    from app.llm.tools import delegate_actions
 
     captured = {}
 
@@ -6366,12 +8612,18 @@ async def test_legacy_spawn_auto_final_skips_already_paired_hard_task(monkeypatc
 
     monkeypatch.setattr(delegate, "_run_one_helper", fake_run_one_helper)
 
+    async def fake_guard(*args, **kwargs):
+        return True, "test guard pass", [], []
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", fake_guard)
+    monkeypatch.setattr(delegate_actions, "_persona_consent_guard", fake_guard, raising=False)
+
     result = json.loads(await delegate.handle_delegate(
         str(tmp_path),
         {
             "action": "spawn",
             "wait_window_sec": 0,
-            "auto_final": True,
+            "legacy_pairing_flag": True,
             "tasks": [{
                 "task_id": "impl_hard",
                 "kind": "code",
@@ -6411,6 +8663,81 @@ def test_copy_results_maps_declared_docx_with_helper_prefixed_name(tmp_path):
     assert file_map[0]["helper_name"] == "gen_docx_通信原理作业_第五章.docx"
 
 
+def test_copy_results_treats_declared_env_outputs_as_satisfied_and_skips_test_cache(tmp_path):
+    from app.llm.tools.delegate import _copy_results_to_main
+
+    helper_ws = tmp_path / "helper"
+    main_ws = tmp_path / "main"
+    source_dir = helper_ws / "_env" / "contracts"
+    cache_dir = helper_ws / "_env" / ".pytest_cache" / "v" / "cache"
+    source_dir.mkdir(parents=True)
+    cache_dir.mkdir(parents=True)
+    main_ws.mkdir()
+    (source_dir / "customer_event.py").write_text(
+        "def validate_event(payload):\n    return payload['account_name']\n",
+        encoding="utf-8",
+    )
+    (cache_dir / "nodeids").write_text("contracts/tests/test_schema.py::test_ok\n", encoding="utf-8")
+
+    copied, stats, file_map = _copy_results_to_main(
+        str(helper_ws),
+        str(main_ws),
+        task_id="migrate-field",
+        declared_files={"_env/contracts/customer_event.py"},
+        expected_outputs=["_env/contracts/customer_event.py"],
+        helper_kind="code",
+    )
+
+    assert copied == ["_env/contracts/customer_event.py"]
+    assert stats["declared_satisfied_by_existing_copy"] == ["_env/contracts/customer_event.py"]
+    assert stats["env_skipped_unexpected_new"] == []
+    assert not (main_ws / "_env" / ".pytest_cache").exists()
+    assert file_map == [{
+        "helper_name": "contracts/customer_event.py",
+        "main_name": "_env/contracts/customer_event.py",
+        "shared_name": None,
+    }]
+
+
+def test_delegate_report_uses_main_workspace_name_for_prefixed_copy():
+    visible_copied_back = ["assemble_docx_db_index_paper.docx"]
+    file_map = [{
+        "helper_name": "db_index_paper.docx",
+        "main_name": "assemble_docx_db_index_paper.docx",
+        "shared_name": None,
+    }]
+
+    helper_alias_by_main = {
+        str(m.get("main_name")): str(m.get("helper_name"))
+        for m in file_map
+        if isinstance(m, dict)
+        and m.get("main_name")
+        and m.get("helper_name")
+        and str(m.get("main_name")) != str(m.get("helper_name"))
+    }
+
+    def displayed_file_list(paths):
+        displayed = []
+        seen = set()
+        for path in paths:
+            name = str(path or "").replace("\\", "/").strip()
+            if name in seen:
+                continue
+            seen.add(name)
+            displayed.append(name)
+        return displayed
+
+    display = displayed_file_list(visible_copied_back)
+    aliases = {
+        main_name: helper_name
+        for main_name, helper_name in helper_alias_by_main.items()
+        if main_name in set(visible_copied_back)
+    }
+
+    assert display == ["assemble_docx_db_index_paper.docx"]
+    assert aliases == {"assemble_docx_db_index_paper.docx": "db_index_paper.docx"}
+
+
 def test_copy_results_merges_nested_helpers_shared_outputs(tmp_path):
     from app.llm.tools.delegate import _copy_results_to_main
 
@@ -6434,12 +8761,12 @@ def test_copy_results_merges_nested_helpers_shared_outputs(tmp_path):
     assert file_map == []
 
 
-def test_extract_declared_files_accepts_helpers_shared_paths_as_basenames():
+def test_extract_declared_files_preserves_helpers_shared_paths():
     from app.llm.tools.delegate import _extract_declared_files
 
     report = '```json\n{"files": ["_helpers_shared/hw_redraw_charts/q5_2_block_diagram.png"]}\n```'
 
-    assert _extract_declared_files(report) == {"q5_2_block_diagram.png"}
+    assert _extract_declared_files(report) == {"_helpers_shared/hw_redraw_charts/q5_2_block_diagram.png"}
 
 
 async def test_helper_result_summary_treats_shared_declared_outputs_as_delivered(tmp_path):
@@ -6487,14 +8814,14 @@ async def test_helper_result_summary_treats_shared_declared_outputs_as_delivered
         monkeypatch.undo()
 
     assert result["files"] == ["_helpers_shared/hw_redraw_charts/q5_2_block_diagram.png"]
-    assert result["declared_files"] == ["q5_2_block_diagram.png"]
+    assert result["declared_files"] == ["_helpers_shared/hw_redraw_charts/q5_2_block_diagram.png"]
     assert result["declared_but_missing"] == []
     assert result["delivered_but_not_declared"] == []
     assert result["outputs_check"]["outputs_missing"] == []
     assert result["outputs_check"]["outputs_complete"] is True
 
 
-async def test_helper_repairs_malformed_output_files_report_before_returning(tmp_path):
+async def test_helper_accepts_machine_readable_output_files_report_without_repair(tmp_path):
     from app.llm.tools import delegate
 
     helper_ws = tmp_path / "helper"
@@ -6507,12 +8834,7 @@ async def test_helper_repairs_malformed_output_files_report_before_returning(tmp
         calls.append("\n".join(str(m.get("content") or "") for m in msgs if isinstance(m, dict)))
         (helper_ws / "_env").mkdir(exist_ok=True)
         (helper_ws / "_env" / "analysis.md").write_text("verified analysis", encoding="utf-8")
-        if len(calls) == 1:
-            return 'Output files: {"files": ["analysis.md"]}', msgs
-        assert "Final Report Format Repair" in calls[-1]
-        assert "## Output files" in calls[-1]
-        assert "copy them exactly into the `files` array" in calls[-1]
-        return '## Output files\n```json\n{"files": ["_env/analysis.md"]}\n```', msgs
+        return 'Output files: {"files": ["_env/analysis.md"]}', msgs
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(delegate, "chat_with_tools_loop", fake_loop)
@@ -6539,11 +8861,60 @@ async def test_helper_repairs_malformed_output_files_report_before_returning(tmp
     finally:
         monkeypatch.undo()
 
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert result["ok"] is True
     assert result["terminal_reason"] == "completed"
     assert result["outputs_check"]["outputs_complete"] is True
     assert "_env/analysis.md" in result["main_available_files"]
+    assert "_env/analysis.md" in result["staged_project_files"]
+    assert "Staged project files available" in result["report"]
+    assert "project tests run before apply validate the old project state" in result["report"]
+    assert "project validation commands run before env_apply_* validate the old real project state" in result["pending_project_apply_fact"]
+    assert "env_diff is the compact first inspection" in result["post_helper_usage_hint"]
+    assert "do not use read_file to re-check helper-owned content" in result["post_helper_usage_hint"]
+    assert "post-apply test validates the staged edit" in result["post_helper_usage_hint"]
+
+
+def test_code_repair_expected_outputs_do_not_keep_renamed_source_inputs():
+    from app.llm.tools.delegate import _augment_code_repair_expected_outputs
+
+    augmented = _augment_code_repair_expected_outputs(
+        kind="code",
+        prompt=(
+            "Update the contract implementation. Rename `contracts/customer_event.py` "
+            "to `contracts/account_event.py`, update imports, and edit service/render.py."
+        ),
+        input_files=[
+            "contracts/customer_event.py",
+            "contracts/tests/test_schema.py",
+            "service/render.py",
+        ],
+        expected_outputs=[
+            "contracts/account_event.py",
+            "contracts/tests/test_schema.py",
+            "service/render.py",
+        ],
+    )
+
+    assert "_env/contracts/customer_event.py" not in augmented
+    assert augmented == [
+        "contracts/account_event.py",
+        "contracts/tests/test_schema.py",
+        "service/render.py",
+    ]
+
+
+def test_code_repair_expected_outputs_keep_edited_source_inputs():
+    from app.llm.tools.delegate import _augment_code_repair_expected_outputs
+
+    augmented = _augment_code_repair_expected_outputs(
+        kind="code",
+        prompt="Patch service/render.py so it uses account_name and then run tests.",
+        input_files=["service/render.py", "service/tests/test_client.py"],
+        expected_outputs=[],
+    )
+
+    assert augmented == ["_env/service/render.py"]
 
 
 async def test_helper_report_format_repair_skips_resource_required_state(monkeypatch, tmp_path):
@@ -6591,6 +8962,7 @@ async def test_helper_report_format_repair_skips_resource_required_state(monkeyp
     assert calls == 1
     assert result["ok"] is False
     assert result["terminal_reason"] == "resource_required"
+    assert result["resource_required"]["matching_helper_kind"] == "draw"
     assert result["resource_required"]["suggested_helper_kind"] == "draw"
     assert result["declared_but_missing"] == []
     assert result["pending_declared_outputs"] == ["paper.docx"]
@@ -6833,6 +9205,20 @@ async def test_helper_result_summary_treats_helper_prefixed_docx_as_declared(tmp
     assert result["delivered_but_not_declared"] == []
     assert result["outputs_check"]["outputs_missing"] == []
     assert result["outputs_check"]["outputs_complete"] is True
+    assert result["outputs_check"]["producer_self_verified"] is True
+    assert result["_post_helper_action"] == "output_json_directly"
+
+    from app.core.filesystem import FileRegistry
+
+    registry = FileRegistry.load(
+        scope_id=f"workspace:{main_ws.resolve()}",
+        workspace_root=main_ws,
+    )
+    record = registry.find_by_workspace_path("gen_docx_通信原理作业_第五章.docx")
+    assert record is not None
+    assert record.verified is True
+    assert record.metadata["outputs_complete"] is True
+    assert record.metadata["producer_self_verified"] is True
 
 
 async def test_environment_helper_env_outputs_are_validated_without_user_delivery(tmp_path):
@@ -7008,6 +9394,58 @@ async def test_environment_helper_matches_project_relative_expected_outputs(tmp_
     )
 
 
+async def test_environment_helper_counts_unchanged_expected_env_outputs(tmp_path):
+    from app.llm.tools import delegate
+
+    helper_ws = tmp_path / "helper"
+    main_ws = tmp_path / "main"
+    main_env = main_ws / "_env"
+    main_env.mkdir(parents=True)
+    (main_env / "config_loader.py").write_text("def load():\n    return {'mode': 'old'}\n", encoding="utf-8")
+    (main_env / "app_config.py").write_text("APP_NAME = 'demo'\n", encoding="utf-8")
+
+    async def fake_loop(*args, **kwargs):
+        helper_env = helper_ws / "_env"
+        helper_env.mkdir(parents=True, exist_ok=True)
+        (helper_env / "config_loader.py").write_text("def load():\n    return {'mode': 'new'}\n", encoding="utf-8")
+        return "Edited config_loader.py and verified app_config.py did not require changes.", []
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(delegate, "chat_with_tools_loop", fake_loop)
+    monkeypatch.setattr(delegate, "_copy_helper_debug_artifacts_to_main", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delegate, "_persist_pending_result", lambda *args, **kwargs: asyncio.sleep(0))
+    try:
+        result = await delegate._run_one_helper(
+            task_id="config_loader_fix",
+            prompt="Edit _env/config_loader.py. Check _env/app_config.py and leave it unchanged if no edit is needed.",
+            main_workspace=str(main_ws),
+            helper_workspace=str(helper_ws),
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+            resume=False,
+            local_abort=asyncio.Event(),
+            wait_for_register=None,
+            user_lang="zh",
+            kind="code",
+            mode="easy",
+            helper_think=False,
+            expected_outputs=["_env/config_loader.py", "_env/app_config.py"],
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert result["ok"] is True
+    assert result["outputs_check"]["outputs_missing"] == []
+    assert result["outputs_check"]["outputs_complete"] is True
+    assert result["outputs_check"]["unchanged_existing_outputs"] == [
+        {"expected": "_env/app_config.py", "existing_path": "_env/app_config.py"}
+    ]
+    assert "byte-identical" in result["outputs_check"]["unchanged_existing_outputs_fact"]
+    assert (main_env / "config_loader.py").read_text(encoding="utf-8") == "def load():\n    return {'mode': 'new'}\n"
+    assert (main_env / "app_config.py").read_text(encoding="utf-8") == "APP_NAME = 'demo'\n"
+
+
 async def test_read_helper_exposes_internal_evidence_without_user_delivery(tmp_path):
     from app.llm.tools import delegate
 
@@ -7147,6 +9585,33 @@ async def test_read_helper_write_rejects_env_evidence_path(tmp_path):
     assert not (ws / "_env" / "写作_框架范文证据.txt").exists()
 
 
+async def test_workspace_write_over_hard_limit_does_not_truncate_to_disk(tmp_path):
+    from app.llm.tools.workspace_file_ops import handle_write
+
+    content = "x" * 500_001
+    result = await handle_write(str(tmp_path), "too_large.txt", content)
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "workspace_write_content_too_large"
+    assert not (tmp_path / "too_large.txt").exists()
+
+
+async def test_workspace_write_success_returns_concise_write_facts(tmp_path):
+    from app.llm.tools.workspace_file_ops import handle_write
+
+    content = "# Report\n\nAlpha\nBeta\n"
+    result = await handle_write(str(tmp_path), "report.md", content)
+
+    assert result["ok"] is True
+    assert result["path"] == "report.md"
+    assert result["content_chars"] == len(content)
+    assert result["line_count"] == 4
+    assert len(result["sha256"]) == 64
+    assert result["head_excerpt"].startswith("# Report")
+    assert "a full reread is only useful for a named main-owned gap" in result["write_fact"]
+    assert (tmp_path / "report.md").read_text(encoding="utf-8") == content
+
+
 async def test_workspace_run_missing_unix_inventory_command_points_to_file_tools(tmp_path):
     from app.llm.tools import workspace_run as ws_run
 
@@ -7175,7 +9640,7 @@ async def test_workspace_run_failed_unix_inventory_pipeline_gets_fix_hint(tmp_pa
     assert "_scratch/*.py" in result["FIX_HINT"]
 
 
-async def test_workspace_run_blocked_unix_inventory_redirect_gets_fix_hint(tmp_path):
+async def test_workspace_run_failed_unix_inventory_with_null_redirect_gets_fix_hint(tmp_path):
     from app.llm.tools import workspace_run as ws_run
 
     if sys.platform != "win32":
@@ -7187,7 +9652,7 @@ async def test_workspace_run_blocked_unix_inventory_redirect_gets_fix_hint(tmp_p
     )
 
     assert result["ok"] is False
-    assert result.get("blocked_reason") == "outside_redirect"
+    assert result.get("blocked_reason") is None
     assert "FIX_HINT" in result
     assert "Unix-style file inventory syntax" in result["FIX_HINT"]
     assert "workspace locate" in result["FIX_HINT"]
@@ -7207,6 +9672,48 @@ async def test_workspace_run_python_c_syntax_error_suggests_scratch_script(tmp_p
     assert "FIX_HINT" in result
     assert "Python `-c` failed with a SyntaxError" in result["FIX_HINT"]
     assert "_scratch/" in result["FIX_HINT"]
+
+
+def test_workspace_run_dependency_install_failure_points_to_local_routes():
+    from app.llm.tools.workspace_run import _dependency_install_failure_hint
+
+    hint = _dependency_install_failure_hint(
+        "python -m pip install pytest",
+        "ERROR: Could not install packages due to an OSError: [WinError 5] Access is denied",
+        "",
+    )
+
+    assert hint
+    assert "dependency-install command failed" in hint
+    assert "local/project/bundled routes" in hint
+    assert "direct script/import checks" in hint
+    assert "missing dependency" in hint
+
+
+async def test_environment_workspace_run_python_c_syntax_error_suggests_env_python_code(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools import workspace_run as ws_run
+
+    env = EnvironmentContext(
+        root_dir=str(tmp_path / "project"),
+        archive_id="arch_test",
+        group_id="env_user_test",
+        user_id="user",
+        project_key="project",
+    )
+    (tmp_path / "project").mkdir()
+
+    with runtime_context("environment", env):
+        result = await ws_run.handle_run(
+            str(tmp_path),
+            "python -c \"if True print('bad')\"",
+            timeout_sec=5,
+        )
+
+    assert result["ok"] is False
+    assert "FIX_HINT" in result
+    assert "env_run" in result["FIX_HINT"]
+    assert "python_code" in result["FIX_HINT"]
 
 
 async def test_main_thread_long_framework_contract_write_delegates(tmp_path):
@@ -7231,11 +9738,11 @@ async def test_main_thread_long_framework_contract_write_delegates(tmp_path):
 
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_project_artifact_should_delegate"
-    assert result["blocked_path"] == "framework_contract.txt"
-    assert result["suggested_next_action"]["tool"] == "delegate"
+    assert result["recommended_tools"] == ["delegate"]
+    assert not (tmp_path / "framework_contract.txt").exists()
 
 
-async def test_main_thread_shared_framework_write_suggests_helper_shared_path(tmp_path):
+async def test_main_thread_shared_framework_write_requests_delegate(tmp_path):
     from app.llm.tools.registry import _handle_workspace
 
     content = (
@@ -7253,10 +9760,363 @@ async def test_main_thread_shared_framework_write_suggests_helper_shared_path(tm
     })
     result = json.loads(raw)
 
-    task = result["suggested_next_action"]["task_template"]
     assert result["ok"] is False
-    assert task["expected_outputs"] == ["_helpers_shared/framework_contract.json"]
-    assert "_helpers_shared/framework_contract.json" in task["prompt"]
+    assert result["error_kind"] == "main_thread_project_artifact_should_delegate"
+    assert result["recommended_tools"] == ["delegate"]
+    assert not (tmp_path / "_shared" / "framework_contract.json").exists()
+
+
+async def test_main_thread_large_workspace_write_requires_delegate_or_segment(tmp_path):
+    from app.llm.tools.registry import _handle_workspace
+
+    content = ("section line\n" * 1300)
+    raw = await _handle_workspace(str(tmp_path), {
+        "action": "write",
+        "path": "large_report.md",
+        "content": content,
+    })
+    result = json.loads(raw)
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "main_thread_large_write_should_delegate_or_segment"
+    assert result["content_chars"] == len(content)
+    assert not (tmp_path / "large_report.md").exists()
+
+
+async def test_main_thread_workspace_append_short_allowed_and_large_blocked(tmp_path):
+    from app.llm.tools.registry import _handle_workspace
+
+    target = tmp_path / "notes.md"
+    target.write_text("head\n", encoding="utf-8")
+
+    short = await _handle_workspace(str(tmp_path), {
+        "action": "append",
+        "path": "notes.md",
+        "content": "short section\n",
+    })
+    short_result = json.loads(short)
+
+    assert short_result["ok"] is True
+    assert target.read_text(encoding="utf-8").endswith("short section\n")
+
+    before = target.read_text(encoding="utf-8")
+    large_content = "large section\n" * 700
+    blocked = await _handle_workspace(str(tmp_path), {
+        "action": "append",
+        "path": "notes.md",
+        "content": large_content,
+    })
+    blocked_result = json.loads(blocked)
+
+    assert blocked_result["ok"] is False
+    assert blocked_result["error_kind"] == "main_thread_large_write_should_delegate_or_segment"
+    assert "available_recovery_shapes" in blocked_result
+    assert target.read_text(encoding="utf-8") == before
+
+
+async def test_main_thread_large_unbounded_read_requires_targeting(tmp_path):
+    from app.llm.tools.registry import _handle_read_file
+
+    target = tmp_path / "large.txt"
+    target.write_text("x" * 130_000, encoding="utf-8")
+
+    raw = await _handle_read_file(str(tmp_path), {"path": "large.txt"})
+    result = json.loads(raw)
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "main_thread_large_read_should_delegate_or_target"
+    assert result["bytes"] >= 130_000
+
+    targeted = json.loads(await _handle_read_file(
+        str(tmp_path),
+        {"path": "large.txt", "start_line": 1, "end_line": 1},
+    ))
+    assert targeted["ok"] is True
+
+
+async def test_main_thread_targeted_read_uses_small_budget_but_helper_read_does_not(tmp_path):
+    from app.llm.tools.registry import _handle_read_file
+
+    target = tmp_path / "large.txt"
+    target.write_text("\n".join("x" * 1000 for _ in range(80)), encoding="utf-8")
+
+    main_result = json.loads(await _handle_read_file(
+        str(tmp_path),
+        {"path": "large.txt", "start_line": 1, "end_line": 80, "max_chars": 50_000},
+    ))
+    helper_result = json.loads(await _handle_read_file(
+        str(tmp_path),
+        {"path": "large.txt", "start_line": 1, "end_line": 80, "max_chars": 50_000},
+        caller_kind="helper",
+    ))
+
+    assert main_result["ok"] is True
+    assert main_result["truncated"] is True
+    assert "main_thread_read_fact" in main_result
+    assert helper_result["ok"] is True
+    assert helper_result.get("error_kind") != "main_thread_large_read_should_delegate_or_target"
+    assert "main_thread_read_fact" not in helper_result
+    assert len(helper_result["content"]) > len(main_result["content"])
+    assert main_result["content_truncated"] is True
+    assert main_result["tool_result_truncated"] is True
+    assert main_result["output_truncated"] is True
+    assert "only the head excerpt" in main_result["visible_excerpt_policy"]
+    saved = tmp_path / main_result["content_full_saved_path"]
+    assert saved.is_file()
+    assert "x" * 1000 in saved.read_text(encoding="utf-8")
+
+
+async def test_main_thread_trusts_ready_helper_output_without_rereading_content(tmp_path):
+    from app.core.filesystem import FileKind, FileRegistry, FileStatus, Visibility, intake_workspace_file
+    from app.llm.tools.registry import _handle_read_file
+
+    target = tmp_path / "classified_report.md"
+    target.write_text("helper-owned final content\n", encoding="utf-8")
+    registry = FileRegistry.load(
+        scope_id=f"workspace:{tmp_path.resolve()}",
+        workspace_root=tmp_path,
+    )
+    intake_workspace_file(
+        registry,
+        "classified_report.md",
+        kind=FileKind.HELPER_OUTPUT,
+        status=FileStatus.READY,
+        visibility=Visibility.PROJECT,
+        owner_task_id="email_triage",
+        helper_kind="read",
+        metadata={
+            "source": "delegate_copyback",
+            "outputs_complete": True,
+            "producer_self_verified": True,
+        },
+    )
+
+    main_result = json.loads(await _handle_read_file(str(tmp_path), {"path": "classified_report.md"}))
+    forced_result = json.loads(await _handle_read_file(
+        str(tmp_path),
+        {"path": "classified_report.md", "force": True},
+    ))
+    helper_result = json.loads(await _handle_read_file(
+        str(tmp_path),
+        {"path": "classified_report.md"},
+        caller_kind="helper",
+    ))
+
+    assert main_result["ok"] is True
+    assert main_result["content_omitted"] is True
+    assert main_result["content_omitted_reason"] == "helper_owned_verified_artifact"
+    assert main_result["owner_task_id"] == "email_triage"
+    assert "helper-owned final content" not in main_result["content"]
+    assert "trust the successful helper" in main_result["helper_owned_artifact_fact"]
+    assert forced_result["ok"] is True
+    assert "helper-owned final content" in forced_result["content"]
+    assert helper_result["ok"] is True
+    assert "helper-owned final content" in helper_result["content"]
+
+
+async def test_main_thread_large_ready_helper_output_returns_provenance_fact(tmp_path):
+    from app.core.filesystem import FileKind, FileRegistry, FileStatus, Visibility, intake_workspace_file
+    from app.llm.tools.registry import _handle_read_file
+
+    target = tmp_path / "long_report.md"
+    target.write_text("helper line\n" * 8000, encoding="utf-8")
+    registry = FileRegistry.load(
+        scope_id=f"workspace:{tmp_path.resolve()}",
+        workspace_root=tmp_path,
+    )
+    intake_workspace_file(
+        registry,
+        "long_report.md",
+        kind=FileKind.HELPER_OUTPUT,
+        status=FileStatus.READY,
+        visibility=Visibility.PROJECT,
+        owner_task_id="writer",
+        helper_kind="markdown",
+        metadata={
+            "source": "delegate_copyback",
+            "outputs_complete": True,
+            "producer_self_verified": True,
+        },
+    )
+
+    result = json.loads(await _handle_read_file(str(tmp_path), {"path": "long_report.md"}))
+
+    assert result["ok"] is True
+    assert result["content_omitted_reason"] == "helper_owned_verified_artifact"
+    assert result["size_bytes"] > 48_000
+    assert result.get("error_kind") != "main_thread_large_read_should_delegate_or_target"
+
+
+async def test_outputs_complete_without_producer_self_verified_keeps_main_read_compact(tmp_path):
+    from app.core.filesystem import FileKind, FileRegistry, FileStatus, Visibility, intake_workspace_file
+    from app.llm.tools.registry import _handle_read_file
+
+    target = tmp_path / "warning_report.md"
+    target.write_text("warning-bearing helper content\n", encoding="utf-8")
+    registry = FileRegistry.load(
+        scope_id=f"workspace:{tmp_path.resolve()}",
+        workspace_root=tmp_path,
+    )
+    intake_workspace_file(
+        registry,
+        "warning_report.md",
+        kind=FileKind.HELPER_OUTPUT,
+        status=FileStatus.READY,
+        visibility=Visibility.PROJECT,
+        owner_task_id="writer",
+        helper_kind="edit",
+        metadata={
+            "source": "delegate_copyback",
+            "outputs_complete": True,
+            "producer_self_verified": False,
+            "quality_warning_count": 1,
+        },
+    )
+
+    result = json.loads(await _handle_read_file(str(tmp_path), {"path": "warning_report.md"}))
+
+    assert result["ok"] is True
+    assert result["content_omitted"] is True
+    assert result["content_omitted_reason"] == "helper_owned_unverified_artifact"
+    assert "warning-bearing helper content" not in result["content"]
+    assert "producer helper" in result["_next_action_instruction"]
+
+    forced = json.loads(await _handle_read_file(
+        str(tmp_path),
+        {"path": "warning_report.md", "force": True},
+    ))
+    assert "warning-bearing helper content" in forced["content"]
+
+
+async def test_main_thread_reads_normal_workspace_file_without_helper_output_guard(tmp_path):
+    from app.llm.tools.registry import _handle_read_file
+
+    target = tmp_path / "notes.md"
+    target.write_text("ordinary workspace content\n", encoding="utf-8")
+
+    result = json.loads(await _handle_read_file(str(tmp_path), {"path": "notes.md"}))
+
+    assert result["ok"] is True
+    assert result.get("content_omitted_reason") != "helper_owned_verified_artifact"
+    assert "ordinary workspace content" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_workspace_run_long_stdout_saves_full_output(tmp_path):
+    from app.llm.tools.workspace_run import handle_run
+
+    script = tmp_path / "emit_long.py"
+    script.write_text("print('A' * 70000)\n", encoding="utf-8")
+
+    result = await handle_run(str(tmp_path), "python emit_long.py", timeout_sec=10)
+
+    assert result["ok"] is True
+    assert result["stdout_truncated"] is True
+    assert result["tool_result_truncated"] is True
+    assert result["output_truncated"] is True
+    assert len(result["stdout"]) <= 64 * 1024
+    saved = tmp_path / result["stdout_full_saved_path"]
+    assert saved.is_file()
+    full = saved.read_text(encoding="utf-8")
+    assert len(full) >= 70000
+    assert full.rstrip("\n").endswith("A")
+
+
+def test_file_preview_long_content_saves_full_text(tmp_path):
+    from app.core.file_preview import preview_file
+
+    target = tmp_path / "preview.txt"
+    target.write_text("C" * 5000, encoding="utf-8")
+
+    result = preview_file(target, max_chars=1000)
+
+    assert result["truncated"] is True
+    assert result["content_truncated"] is True
+    assert result["tool_result_truncated"] is True
+    assert len(result["content"]) == 1000
+    saved = tmp_path / result["content_full_saved_path"]
+    assert saved.is_file()
+    assert saved.read_text(encoding="utf-8") == "C" * 5000
+
+
+def test_main_and_helper_read_file_schemas_are_distinct():
+    from app.llm.tools import registry
+    from app.llm.tools.delegate import _HELPER_TOOLS
+
+    main_read = next(tool for tool in registry.ROUND2_TOOLS if tool["function"]["name"] == "read_file")
+    helper_read = next(tool for tool in _HELPER_TOOLS if tool["function"]["name"] == "read_file")
+
+    assert main_read is registry.MAIN_READ_FILE_SCHEMA
+    assert helper_read is registry.READ_FILE_SCHEMA
+    assert main_read is not helper_read
+    assert "Main-process text spot-check reader" in main_read["function"]["description"]
+    assert "helper-owned in the normal workflow" in main_read["function"]["description"]
+    assert "full-file analysis" in main_read["function"]["description"]
+    assert "segment" not in main_read["function"]["description"].lower()
+    assert "full-file analysis to helpers" not in helper_read["function"]["description"]
+
+
+def test_delegate_prompt_describes_ultra_large_file_helper_fanout():
+    from app.llm.tools import registry
+    from app.llm import aux_prompts
+
+    description = registry.DELEGATE_TOOL_SCHEMA["function"]["description"]
+    input_files_desc = registry.DELEGATE_TOOL_SCHEMA["function"]["parameters"]["properties"]["tasks"]["items"]["properties"]["input_files"]["description"]
+
+    assert "one ultra-large file, long log, or long source material" in description
+    assert "fan out focused `read` or `file_summary` helpers" in description
+    assert "coverage summaries" in description
+    assert "line ranges, page ranges, section labels" in input_files_desc
+    assert "helper can reread the path from input_files" in input_files_desc
+    assert "compact facts rather than complete source text" in input_files_desc
+    assert "single ultra-large concrete file" in aux_prompts.TASK_QUALITY_GUARD_SYSTEM
+    assert "bounded range" in aux_prompts.TASK_QUALITY_GUARD_SYSTEM
+
+
+def test_edit_tools_describe_literal_old_str_not_json_escaped():
+    from app.llm.tools import tool_schemas
+
+    edit_desc = tool_schemas.EDIT_FILE_SCHEMA["function"]["description"]
+    multi_desc = tool_schemas.MULTI_EDIT_SCHEMA["function"]["description"]
+    multi_old_desc = (
+        tool_schemas.MULTI_EDIT_SCHEMA["function"]["parameters"]["properties"]["edits"]["items"]["properties"]["old_str"]["description"]
+    )
+    edit_path_desc = tool_schemas.EDIT_FILE_SCHEMA["function"]["parameters"]["properties"]["path"]["description"]
+    multi_path_desc = tool_schemas.MULTI_EDIT_SCHEMA["function"]["parameters"]["properties"]["path"]["description"]
+
+    assert "`old_str` is literal file text" in edit_desc
+    assert "not the JSON-escaped representation" in edit_desc
+    assert "old_str 是文件原文" in multi_desc
+    assert "do not copy JSON escape backslashes" in multi_old_desc
+    assert "staged `_env/...` copy" in edit_path_desc
+    assert "bare project-relative path" in multi_path_desc
+
+
+async def test_main_thread_workspace_run_blocks_scripts_and_tests(tmp_path):
+    from app.llm.tools.registry import _handle_workspace
+
+    raw = await _handle_workspace(str(tmp_path), {
+        "action": "run",
+        "command": "python -m pytest",
+        "timeout_sec": 30,
+    })
+    result = json.loads(raw)
+
+    assert result["ok"] is False
+    assert result["error_kind"] == "main_thread_workspace_run_should_delegate"
+
+
+async def test_main_thread_workspace_run_allows_file_management(tmp_path):
+    from app.llm.tools.registry import _handle_workspace
+
+    raw = await _handle_workspace(str(tmp_path), {
+        "action": "run",
+        "command": "cmd /c dir",
+        "timeout_sec": 5,
+    })
+    result = json.loads(raw)
+
+    assert result["ok"] is True
 
 
 async def test_completion_ledger_preserves_read_evidence_summary():
@@ -7350,7 +10210,11 @@ async def test_edit_helper_resource_request_freezes_instead_of_clean_completion(
     assert result["ok"] is False
     assert result["terminal_reason"] == "resource_required"
     assert result["frozen"] is True
+    assert result["resource_required"]["matching_helper_kind"] == "draw"
+    assert "resource" in result["resource_required"]["resource_resolution_facts"]
     assert result["resource_required"]["suggested_helper_kind"] == "draw"
+    assert "Suggested action" not in result["report"]
+    assert "Resource kind fact" not in result["report"]
     assert result["outputs_check"]["outputs_complete"] is False
     assert result.get("_post_helper_action") != "output_json_directly"
 
@@ -7412,6 +10276,7 @@ async def test_delegate_reports_resource_required_without_auto_spawning(tmp_path
     assert "auto_resource_recovery" not in result
     assert result["error_kind"] == "helper_resource_required"
     assert result["resource_required"][0]["task_id"] == "paper_edit"
+    assert result["resource_required"][0]["matching_helper_kind"] == "draw"
     assert result["resource_required"][0]["suggested_helper_kind"] == "draw"
     by_tid = {r.get("task_id"): r for r in result["results"]}
     assert by_tid["paper_edit"]["ok"] is False
@@ -7489,6 +10354,7 @@ async def test_delegate_batch_success_resource_pair_still_requires_consumer_resu
     assert result["incomplete_count"] == 1
     assert result["error_kind"] == "helper_resource_required"
     assert result["resource_required"][0]["task_id"] == "paper_edit"
+    assert result["resource_required"][0]["matching_helper_kind"] == "draw"
     assert "describe failure or blocker state" in result["_evidence_policy"]
     assert "verified artifacts" in result["_evidence_policy"]
     by_tid = {r.get("task_id"): r for r in result["results"]}
@@ -7540,6 +10406,63 @@ async def test_delegate_treats_helper_partial_verdict_as_failed_status(tmp_path)
     assert item["ok"] is False
     assert item["report_verdict"] == "PARTIAL"
     assert item["terminal_reason"] == "failed"
+
+
+async def test_interrupted_edit_helper_reports_partial_artifact_facts(tmp_path):
+    from app.llm.tools import delegate
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_docx_partial"
+    main_ws = tmp_path / "main"
+    helper_ws.mkdir(parents=True)
+    main_ws.mkdir()
+    abort_event = asyncio.Event()
+
+    async def fake_loop(*args, **kwargs):
+        from docx import Document
+
+        doc = Document()
+        doc.add_heading("Partial Report", level=1)
+        for idx in range(6):
+            doc.add_paragraph(
+                f"This file exists before helper final summary. Paragraph {idx + 1} contains enough "
+                "content for the basic DOCX sanity checks to treat the artifact as a real document."
+            )
+        doc.save(helper_ws / "partial.docx")
+        abort_event.set()
+        return '```json\n{"files": ["partial.docx"]}\n```', []
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(delegate, "chat_with_tools_loop", fake_loop)
+    monkeypatch.setattr(delegate, "_copy_helper_debug_artifacts_to_main", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delegate, "_persist_pending_result", lambda *args, **kwargs: asyncio.sleep(0))
+    try:
+        result = await delegate._run_one_helper(
+            task_id="docx_partial",
+            prompt="Create partial.docx.",
+            main_workspace=str(main_ws),
+            helper_workspace=str(helper_ws),
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+            resume=False,
+            local_abort=abort_event,
+            wait_for_register=asyncio.Event(),
+            user_lang="en",
+            kind="edit",
+            mode="easy",
+            helper_think=False,
+            expected_outputs=["partial.docx"],
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert result["ok"] is True
+    assert result["terminal_reason"] == "completed"
+    assert result["_terminal_converged_from"] == "interrupted"
+    assert (main_ws / "partial.docx").is_file()
+    assert result["partial_artifacts"]["files"] == ["partial.docx"]
+    assert result["partial_artifacts"]["status"] == "artifact_copied_before_helper_final_summary"
+    assert "targeted inspection or verification only when needed" in result["partial_artifacts"]["fact"]
 
 
 async def test_edit_helper_warns_when_pptx_missing_requested_text(tmp_path):
@@ -7650,6 +10573,65 @@ async def test_edit_helper_does_not_require_forbidden_placeholder_words(tmp_path
     assert "占位" not in forbidden_missing
     assert "稍后补图" not in forbidden_missing
     assert "预留图表" not in forbidden_missing
+
+
+async def test_edit_helper_does_not_require_forbidden_internal_path_words(tmp_path):
+    from app.llm.tools import delegate
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_docx_forbidden_internal_paths"
+    main_ws = tmp_path / "main"
+    helper_ws.mkdir(parents=True)
+    main_ws.mkdir()
+
+    async def fake_loop(*args, **kwargs):
+        from docx import Document
+
+        doc = Document()
+        doc.add_heading("Database Index Report", level=1)
+        doc.add_paragraph("The document compares B+ trees, red-black trees, and skip lists.")
+        doc.add_paragraph("Source handling is summarized without exposing implementation paths.")
+        doc.save(helper_ws / "clean_paths.docx")
+        return '```json\n{"files": ["clean_paths.docx"]}\n```', []
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(delegate, "chat_with_tools_loop", fake_loop)
+    monkeypatch.setattr(delegate, "_copy_helper_debug_artifacts_to_main", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delegate, "_persist_pending_result", lambda *args, **kwargs: asyncio.sleep(0))
+    try:
+        result = await delegate._run_one_helper(
+            task_id="docx_forbidden_internal_paths",
+            prompt=(
+                "Generate clean_paths.docx with title \"Database Index Report\". "
+                "Do not reference internal helper paths such as \"_env/\", \"_helpers_shared\", "
+                "\"_helpers_shared/\", or code fragments like \"from docx import Document; d=Document(\"."
+            ),
+            main_workspace=str(main_ws),
+            helper_workspace=str(helper_ws),
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+            resume=False,
+            local_abort=asyncio.Event(),
+            wait_for_register=asyncio.Event(),
+            user_lang="zh",
+            kind="edit",
+            mode="easy",
+            helper_think=False,
+            expected_outputs=["clean_paths.docx"],
+        )
+    finally:
+        monkeypatch.undo()
+
+    missing = {
+        item
+        for warning in result["outputs_check"]["quality_warnings"]
+        if warning["issue"] == "document_expected_text_missing"
+        for item in (warning.get("missing") or [])
+    }
+    assert "_env/" not in missing
+    assert "_helpers_shared" not in missing
+    assert "_helpers_shared/" not in missing
+    assert "from docx import Document; d=Document(" not in missing
 
 
 async def test_edit_helper_blocks_unverified_academic_references(tmp_path):
@@ -7764,6 +10746,70 @@ async def test_edit_helper_blocks_malformed_docx_tables(tmp_path):
     assert "docx_table_too_wide" in issues
     assert result["ok"] is False
     assert result["terminal_reason"] == "quality_blocked"
+
+
+async def test_edit_helper_warns_when_docx_required_table_and_figure_counts_short(tmp_path):
+    from app.llm.tools import delegate
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_docx_quantity"
+    main_ws = tmp_path / "main"
+    helper_ws.mkdir(parents=True)
+    main_ws.mkdir()
+
+    async def fake_loop(*args, **kwargs):
+        from docx import Document
+
+        doc = Document()
+        doc.add_heading("Database Index Comparison", level=1)
+        for i in range(6):
+            doc.add_paragraph(
+                f"Section paragraph {i}: this document has enough real prose for a short generated report."
+            )
+        for i in range(2):
+            table = doc.add_table(rows=2, cols=2)
+            table.cell(0, 0).text = "Metric"
+            table.cell(0, 1).text = f"Table {i + 1}"
+            table.cell(1, 0).text = "Lookup"
+            table.cell(1, 1).text = "Measured"
+        doc.save(helper_ws / "paper.docx")
+        return '```json\n{"files": ["paper.docx"]}\n```', []
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(delegate, "chat_with_tools_loop", fake_loop)
+    monkeypatch.setattr(delegate, "_copy_helper_debug_artifacts_to_main", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delegate, "_persist_pending_result", lambda *args, **kwargs: asyncio.sleep(0))
+    try:
+        result = await delegate._run_one_helper(
+            task_id="paper_quantity",
+            prompt=(
+                "Assemble paper.docx. At least 4 comparative tables are required. "
+                "At minimum: 3 figures or charts must be present."
+            ),
+            main_workspace=str(main_ws),
+            helper_workspace=str(helper_ws),
+            archive_id="archive",
+            group_id="group",
+            user_id="user",
+            resume=False,
+            local_abort=asyncio.Event(),
+            wait_for_register=asyncio.Event(),
+            user_lang="zh",
+            kind="edit",
+            mode="easy",
+            helper_think=False,
+            expected_outputs=["paper.docx"],
+        )
+    finally:
+        monkeypatch.undo()
+
+    warnings = result["outputs_check"]["quality_warnings"]
+    issues = {w["issue"] for w in warnings}
+    assert "document_required_table_count_shortfall" in issues
+    assert "document_required_figure_count_shortfall" in issues
+    assert result["outputs_check"]["outputs_complete"] is True
+    assert result["outputs_check"].get("quality_blocked") is not True
+    assert result.get("quality_blocked") is not True
+    assert result["ok"] is True
 
 
 async def test_edit_helper_warns_when_pptx_slide_order_wrong(tmp_path):
@@ -8063,6 +11109,27 @@ def test_file_map_prevents_declared_missing_for_helper_prefixed_copy():
 
     assert declared_but_missing == []
     assert delivered_but_not_declared == []
+
+
+def test_file_map_matches_env_declared_output_aliases():
+    from app.llm.tools.delegate import _matches_declared_output_via_mapping
+
+    file_map = [{
+        "helper_name": "reports/compression_report.docx",
+        "main_name": "_env/reports/compression_report.docx",
+        "shared_name": None,
+    }]
+
+    assert _matches_declared_output_via_mapping(
+        "_env/reports/compression_report.docx",
+        {"_env/reports/compression_report.docx"},
+        file_map,
+    )
+    assert _matches_declared_output_via_mapping(
+        "reports/compression_report.docx",
+        {"_env/reports/compression_report.docx"},
+        file_map,
+    )
 
 
 def test_delegate_result_files_hide_internal_helpers_shared_artifacts():
@@ -8935,7 +12002,7 @@ def test_benchmark_outputs_still_require_code_helper():
 
     assert recs
     assert recs[0]["task_id"] == "slice_benchmark"
-    assert recs[0]["suggested_kind"] == "code"
+    assert recs[0]["observed_helper_kind_name"] == "code"
 
 
 def test_strict_reported_output_files_preserve_env_paths():
@@ -8946,4 +12013,660 @@ def test_strict_reported_output_files_preserve_env_paths():
     assert _extract_reported_output_files(report) == ["_env/framework.md", "_env/criteria.md"]
 
 
+def test_reported_output_files_accept_output_section_bare_json():
+    from app.llm.tools.workspace_utils import _extract_reported_output_files
 
+    report = '## Output files\n{"files": ["_env/framework.md", "_env/criteria.md"]}'
+
+    assert _extract_reported_output_files(report) == ["_env/framework.md", "_env/criteria.md"]
+
+
+
+
+# ── 2026-06-10 edit-helper restructure round: guard evidence, provenance, one-pass verify ──
+
+
+def test_helper_source_field_provenance_skips_prose_only_time_words():
+    """Bare schedule words without digits must not trigger the raw-field directive."""
+    from app.llm.tools.delegate import _mark_unverified_helper_source_interpretations
+
+    original = (
+        "Create triage_report.md. The draft reply should promise a response within the hour "
+        "and ask which endpoints are affected. Count every covered email in the report body."
+    )
+    prompt, observations = _mark_unverified_helper_source_interpretations(
+        original,
+        input_files=["classification_report.txt"],
+    )
+
+    assert prompt == original
+    assert observations == []
+
+
+def test_helper_source_field_provenance_still_marks_numeric_field_summaries():
+    from app.llm.tools.delegate import _mark_unverified_helper_source_interpretations
+
+    prompt, observations = _mark_unverified_helper_source_interpretations(
+        "Write plan.md. The hotel summary says total cost is 450 USD for 3 nights.",
+        input_files=["hotel.json"],
+    )
+
+    assert "## Source Field Provenance" in prompt
+    assert observations == [{"kind": "source_field_provenance_added", "input_files": 1}]
+
+
+def test_task_quality_guard_system_recognizes_completed_extraction_and_candidate_reuse():
+    from app.llm.aux_prompts import TASK_QUALITY_GUARD_SYSTEM
+
+    assert "Completed extraction does not need to be repeated" in TASK_QUALITY_GUARD_SYSTEM
+    assert "do not demand a fresh read helper for materials the main workflow has already read" in TASK_QUALITY_GUARD_SYSTEM
+    assert "preserved blocked-create candidate" in TASK_QUALITY_GUARD_SYSTEM
+    assert "provenance and explicit input facts" in TASK_QUALITY_GUARD_SYSTEM
+    assert "visibly adapts to the earlier guidance" in TASK_QUALITY_GUARD_SYSTEM
+
+
+def test_edit_helper_prompt_trusts_envelope_and_verifies_in_one_pass():
+    from app.llm.tools.delegate import _HELPER_SYSTEM_EDIT
+
+    assert "Trust the task envelope" in _HELPER_SYSTEM_EDIT
+    assert "read each at most once" in _HELPER_SYSTEM_EDIT
+    assert "Verify your own writes in one pass" in _HELPER_SYSTEM_EDIT
+    assert "per-keyword search calls against a file you authored this turn" in _HELPER_SYSTEM_EDIT
+    assert "一次回读或一条检查命令完成验收" in _HELPER_SYSTEM_EDIT
+
+
+def test_blocked_create_candidate_reuse_guard_fact_attached():
+    from app.llm.tools.delegate_actions import (
+        _attach_guard_attention_facts,
+        _blocked_create_candidate_reuse_facts,
+    )
+
+    specs = [{
+        "task_id": "report-assembly",
+        "kind": "edit",
+        "prompt": "Assemble the final report from the preserved candidate.",
+        "input_files": ["_env/.blocked_creates/triage_report.md"],
+        "expected_outputs": ["_env/triage_report.md"],
+    }]
+
+    facts = _blocked_create_candidate_reuse_facts(specs)
+    assert len(facts) == 1
+    assert facts[0]["issue"] == "blocked_create_candidate_reuse"
+    assert facts[0]["needs_attention"] is False
+    assert facts[0]["workspace_input_files"] == ["_env/.blocked_creates/triage_report.md"]
+
+    attached = _attach_guard_attention_facts(specs)
+    observations = attached[0].get("guard_observations") or []
+    reuse = [o for o in observations if o.get("issue") == "blocked_create_candidate_reuse"]
+    assert len(reuse) == 1
+    assert reuse[0]["needs_attention"] is False
+    assert "availability and provenance fact" in reuse[0]["details"]
+
+
+def test_blocked_create_candidate_reuse_fact_absent_for_plain_inputs():
+    from app.llm.tools.delegate_actions import _blocked_create_candidate_reuse_facts
+
+    assert _blocked_create_candidate_reuse_facts([{
+        "task_id": "t",
+        "input_files": ["_env/inbox/01.txt"],
+    }]) == []
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_result_spill_returns_provenance_fact(tmp_path):
+    from app.llm.tools.registry import _handle_read_file
+
+    spill_dir = tmp_path / "_tool_results"
+    spill_dir.mkdir()
+    (spill_dir / "1781062124_read_file_content_abc.txt").write_text(
+        "recovered oversized tool output\n", encoding="utf-8"
+    )
+
+    result = json.loads(await _handle_read_file(
+        str(tmp_path), {"path": "_tool_results/1781062124_read_file_content_abc.txt"}
+    ))
+
+    assert result["ok"] is True
+    assert result["provenance"] == "tool_result_spill"
+    assert "recovery storage" in result["provenance_fact"]
+    assert "recovered oversized tool output" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_blocked_create_candidate_returns_provenance_fact(tmp_path):
+    from app.llm.tools.registry import _handle_read_file
+
+    candidate_dir = tmp_path / "_env" / ".blocked_creates"
+    candidate_dir.mkdir(parents=True)
+    (candidate_dir / "triage_report.md").write_text("# preserved candidate\n", encoding="utf-8")
+
+    result = json.loads(await _handle_read_file(
+        str(tmp_path), {"path": "_env/.blocked_creates/triage_report.md"}
+    ))
+
+    assert result["ok"] is True
+    assert result["provenance"] == "blocked_create_candidate"
+    assert "preserved candidate" in result["provenance_fact"]
+    assert "# preserved candidate" in result["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_normal_paths_have_no_recovery_provenance(tmp_path):
+    from app.llm.tools.registry import _handle_read_file
+
+    (tmp_path / "notes.md").write_text("plain note\n", encoding="utf-8")
+    result = json.loads(await _handle_read_file(str(tmp_path), {"path": "notes.md"}))
+
+    assert result["ok"] is True
+    assert "provenance" not in result
+
+# ── 2026-06-10 speed-ratio round: apply auto-registration, compact agent_state, finalize/batching prompts ──
+
+
+async def test_agent_state_register_artifact_dedupes_already_ready_path():
+    from app.core import agent_state, debug
+    from app.llm.tools import registry
+
+    trace_id = "trace-register-dedupe"
+    debug.set_trace_id(trace_id)
+    agent_state.reset_trace(trace_id)
+    try:
+        agent_state.register_artifact(
+            trace_id=trace_id,
+            path="contracts/customer_event.py",
+            artifact_type="code",
+            created_by="env_apply_replace",
+            status=agent_state.ARTIFACT_READY,
+            verified_by="env_apply_replace",
+        )
+
+        result = json.loads(await registry._handle_agent_state({
+            "action": "register_artifact",
+            "path": "contracts/customer_event.py",
+            "status": "ready",
+            "task_id": "main",
+        }))
+    finally:
+        debug.set_trace_id("")
+
+    assert result["ok"] is True
+    assert result["already_registered"] is True
+    assert result["artifact"]["path"] == "contracts/customer_event.py"
+    assert "status" not in result
+    # No duplicate record was appended.
+    ready = agent_state.structured_status(trace_id).get("artifacts_ready") or []
+    assert len([r for r in ready if r.get("path") == "contracts/customer_event.py"]) == 1
+
+
+async def test_agent_state_register_artifact_new_path_returns_compact_summary():
+    from app.core import agent_state, debug
+    from app.llm.tools import registry
+
+    trace_id = "trace-register-compact"
+    debug.set_trace_id(trace_id)
+    agent_state.reset_trace(trace_id)
+    try:
+        result = json.loads(await registry._handle_agent_state({
+            "action": "register_artifact",
+            "path": "report/summary.md",
+            "status": "ready",
+        }))
+    finally:
+        debug.set_trace_id("")
+
+    assert result["ok"] is True
+    assert result["artifact"]["path"] == "report/summary.md"
+    assert "status" not in result
+    assert result["status_summary"]["artifacts_ready_paths"] == ["report/summary.md"]
+
+
+def test_round2_prompt_requires_direct_final_json_and_batched_bookkeeping():
+    from app.core.round_prompts import ROUND2_SYSTEM_TEMPLATE
+
+    assert "the very next assistant message is this JSON object itself" in ROUND2_SYSTEM_TEMPLATE
+    assert "contract self-assessment" in ROUND2_SYSTEM_TEMPLATE
+    assert "should share a turn with the next action's tool calls" in ROUND2_SYSTEM_TEMPLATE
+    assert "不先写自评" in ROUND2_SYSTEM_TEMPLATE
+
+
+def test_round2_prompt_prefers_helpers_for_small_edits():
+    from app.core.round_prompts import ROUND2_SYSTEM_TEMPLATE
+
+    assert "Even for small edits, prefer a helper" in ROUND2_SYSTEM_TEMPLATE
+    assert "source/project content, or requires quality judgment" in ROUND2_SYSTEM_TEMPLATE
+    assert "narrow mechanical transfer/apply/accounting" in ROUND2_SYSTEM_TEMPLATE
+
+
+def test_round2_prompt_uses_producer_boundary_for_final_checks():
+    """Regression for helper-owned artifacts: main should trust clean helper
+    completion instead of duplicating producer validation after transfer/apply."""
+    from app.core.round_prompts import ROUND2_SYSTEM_TEMPLATE
+
+    assert "clean helper completion with declared outputs present and producer self-verification" in ROUND2_SYSTEM_TEMPLATE
+    assert "main thread should trust it and avoid re-reading or re-running checks" in ROUND2_SYSTEM_TEMPLATE
+    assert "helper self-verification evidence" in ROUND2_SYSTEM_TEMPLATE
+    assert "final intended applied state" in ROUND2_SYSTEM_TEMPLATE
+    assert "a check before later applies validates an earlier state" in ROUND2_SYSTEM_TEMPLATE
+    assert "主进程机械应用/转移不接管内容质量" in ROUND2_SYSTEM_TEMPLATE
+
+
+def test_round1_prompt_keeps_routing_output_minimal():
+    """round1 gates the whole turn serially; at congested decode speeds its
+    ~190-token output cost ~14s of user-visible latency per run."""
+    from app.core.round_prompts import ROUND1_SYSTEM
+
+    assert "one short sentence naming the decisive routing facts" in ROUND1_SYSTEM
+    assert "every extra output token adds user-visible latency" in ROUND1_SYSTEM
+    assert '"rationale"' not in ROUND1_SYSTEM
+    assert "_thinking 一句话即可" in ROUND1_SYSTEM
+
+
+def test_round2_prompt_skips_known_red_baseline_in_main_thread():
+    """20260610_140711: main ran the known-failing pytest baseline before
+    delegating; the failed env_run had no same-family success within the
+    recovery window and recovery_score dropped to 0.3."""
+    from app.core.round_prompts import ROUND2_SYSTEM_TEMPLATE
+
+    assert "a known-red baseline adds a failed call without new facts" in ROUND2_SYSTEM_TEMPLATE
+    assert "let the helper own baseline, diagnosis, all requested outputs, and the passing rerun" in ROUND2_SYSTEM_TEMPLATE
+    assert "主线程不先跑红基线" in ROUND2_SYSTEM_TEMPLATE
+
+
+def test_environment_helper_prompt_maps_bare_input_files_to_staged_paths():
+    src = Path("app/llm/tools/delegate.py").read_text(encoding="utf-8")
+
+    assert "first try the staged local path `_env/app.py`" in src
+    assert "same-named bare path may be absent" in src
+    assert "裸项目路径先查 `_env/<路径>`" in src
+
+
+@pytest.mark.asyncio
+async def test_wait_any_recovers_already_collected_task_from_ledger():
+    """Interlock regression: _consume_pending_result clears the completion
+    event, so a second wait_any on an already-collected task_id used to block
+    on a cleared event for the full window. With no active helper, wait_any
+    must recover from the completion ledger immediately."""
+    import time as _t
+    from app.llm.tools import delegate_state as ds
+    from app.llm.tools.delegate_actions import _handle_delegate_wait_any, _sync_delegate_globals
+    from app.core import debug
+
+    _sync_delegate_globals()
+    trace_id = "trace-waitany-ledger"
+    tid = "already-collected"
+    debug.set_trace_id(trace_id)
+    try:
+        await ds._store_pending_result(
+            trace_id, tid,
+            {"task_id": tid, "ok": True, "terminal_reason": "completed",
+             "report": "done", "files": ["out.txt"]},
+            None,
+        )
+        first = await ds._consume_pending_result(trace_id, tid)
+        assert first is not None
+
+        start = _t.monotonic()
+        raw = await _handle_delegate_wait_any(
+            {"task_ids": [tid], "wait_window_sec": 30},
+            main_owner="owner-x", trace_id=trace_id,
+        )
+        elapsed = _t.monotonic() - start
+        result = json.loads(raw)
+    finally:
+        debug.set_trace_id("")
+
+    assert elapsed < 5, f"wait_any blocked {elapsed:.1f}s on a cleared event"
+    assert result["ok"] is True
+    assert result["winner_task_id"] == tid
+    assert result.get("recovered_from_ledger") is True
+    assert result["result"]["recovered_from"] == "completion_ledger"
+
+
+def test_final_contract_snapshot_skipped_for_complete_response_plan():
+    """Round 7: injecting the contract snapshot AFTER a finished ResponsePlan
+    forces a rewrite that reliably degrades into self-assessment prose plus a
+    cleanup LLM call (cross-repo 20260610_154444 iters 13-15)."""
+    from app.llm.client_tools_loop import _content_is_complete_response_plan
+
+    plan = json.dumps({
+        "intent": "Migration complete",
+        "key_points": ["a", "b"],
+        "tone": "rigorous-controlled",
+        "length_hint": "short",
+        "deliverables": ["x.py"],
+    })
+    assert _content_is_complete_response_plan(plan) is True
+    assert _content_is_complete_response_plan("All criteria satisfied.") is False
+    assert _content_is_complete_response_plan(json.dumps({
+        "final_json_status": "complete", "contract_complete": True,
+    })) is False
+    assert _content_is_complete_response_plan("") is False
+
+
+def test_document_routing_keeps_text_deliverables_on_edit_kind():
+    """inbox-triage runs keep trying kind=code first for classification/draft
+    work because verify_*.py scripts exist; each attempt costs a guard block
+    round-trip (~20s with main-LLM latency)."""
+    from app.core.orchestrator_prompts import _build_round2_system_prompts
+
+    msgs = _build_round2_system_prompts(
+        is_coding=False, is_document=True, parallelizable=False, needs_recall=False
+    )
+    text = "\n".join(m["content"] for m in msgs)
+    assert "Classification, triage, drafting, summarizing, and report writing" in text
+    assert "running an existing verifier needs no code helper" in text
+    assert "not by the presence of `.py` checkers" in text
+    assert "predictably costs a guard block round-trip" in text
+
+
+def test_edit_helper_run_guard_redirects_file_read_shells_to_read_file():
+    """20260610_161417: an edit helper ran `cat "_env/.blocked_creates/x.txt"`
+    and got a generic delegate-to-code block; the failed call dinged the
+    trajectory recovery score. Plain read shells now redirect to read_file."""
+    from app.llm.tools.registry import _edit_helper_workspace_run_guard
+
+    blocked = _edit_helper_workspace_run_guard("edit", 'cat "_env/.blocked_creates/report.txt"')
+    assert blocked is not None
+    assert blocked["error"] == "use_read_file_for_file_reads"
+    assert blocked["suggested_tool"] == "read_file"
+    assert blocked["suggested_args"]["path"] == "_env/.blocked_creates/report.txt"
+
+    # verifier commands still pass
+    assert _edit_helper_workspace_run_guard("edit", "python verify_all.py") is None
+    # builds still blocked with the original error
+    build = _edit_helper_workspace_run_guard("edit", "npm run build")
+    assert build is not None
+    assert build["error"] == "edit_helper_workspace_run_limited_to_existing_checks"
+    # non-edit helpers unaffected
+    assert _edit_helper_workspace_run_guard("code", "cat x.txt") is None
+
+
+def test_helper_tech_prompt_warns_python_tool_has_no_file_io():
+    """20260610_161418: a code helper used the isolated python tool with open()
+    to count occurrences across files and burned a failed call; the sandbox is
+    by design, so the prompt must say it up front."""
+    from app.llm.tools.delegate import _HELPER_SYSTEM_CODE
+
+    assert "isolated in-memory calculator with no file access" in _HELPER_SYSTEM_CODE
+    assert "search_in_file/search_across_files" in _HELPER_SYSTEM_CODE
+
+
+def test_language_directive_covers_english_users():
+    """20260610_163156: an English request got a Chinese final reply because
+    lang='en' produced an empty directive while the persona defaults Chinese.
+    Behavior score dropped (blocker wording invisible to English scorer)."""
+    from app.core.language import language_directive
+
+    en = language_directive("en")
+    assert "should be in English" in en
+    assert "## Output Language" in en
+    assert language_directive("zh")  # zh stays non-empty
+
+
+async def test_read_file_traversal_block_suggests_env_read_in_environment_mode(tmp_path):
+    r"""20260610_165331: 11 read_file calls used backslash traversal chains
+    (multiple parent hops) for project files; each got a bare traversal error
+    with no recovery route. In environment mode the tail is a valid path."""
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools.workspace_file_ops import handle_read_file
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+
+    env = EnvironmentContext(
+        root_dir=str(project),
+        archive_id="arch_test",
+        group_id="env_user_u",
+        user_id="u",
+        project_key="p",
+    )
+    with runtime_context("environment", env):
+        result = await handle_read_file(str(ws), '..\\..\\..\\inbox\\01_urgent.txt')
+
+    assert result["ok"] is False
+    assert result["suggested_tool"] == "env_read"
+    assert result["suggested_args"]["path"] == "inbox/01_urgent.txt"
+    assert "env_read" in result["fact"]
+
+    # Outside environment mode the original bare error is preserved.
+    plain = await handle_read_file(str(ws), r"..\..\secret.txt")
+    assert plain["ok"] is False
+    assert "suggested_tool" not in plain
+
+
+def test_round3_plan_text_states_reply_language_from_user_message():
+    """Round 7 follow-up: the language directive lives in round2's user tail
+    and never reaches round3, so a Chinese-default persona replied to English
+    users in Chinese (behavior 0.75 in 20260610_171622). round3 plan text now
+    carries a reply-language fact."""
+    from app.core import context as ctx_build
+    from app.schemas.api import ResponsePlan
+
+    plan = ResponsePlan(
+        intent="report triage done",
+        key_points=["8 emails classified", "phishing flagged"],
+        tone="warm",
+        length_hint="short",
+    )
+    en_msgs = ctx_build.round3_messages(
+        "你是一个中文助手", plan, "user",
+        "Can you go through my inbox and flag anything fishy?",
+    )
+    en_text = "\n".join(str(m.get("content") or "") for m in en_msgs)
+    assert "the user wrote in English; reply in English" in en_text
+
+    zh_msgs = ctx_build.round3_messages(
+        "你是一个中文助手", plan, "user", "帮我整理一下收件箱里的邮件",
+    )
+    zh_text = "\n".join(str(m.get("content") or "") for m in zh_msgs)
+    assert "用中文回复" in zh_text
+
+
+async def test_main_write_of_helper_owned_path_attaches_ownership_fact(tmp_path):
+    """Round 8: 20260610_163156 showed the main thread authoring
+    triage_report.md while a live helper owned the same deliverable through
+    expected_outputs. The write succeeds but now carries a soft ownership fact."""
+    from app.core import debug
+    from app.core.core_processes import registry as proc_registry
+    from app.llm.tools.delegate_state import _record_task_contracts
+    from app.llm.tools.workspace_file_ops import handle_write
+
+    trace_id = "trace-coauthor-fact"
+    debug.set_trace_id(trace_id)
+    try:
+        await _record_task_contracts(trace_id, [{
+            "task_id": "email-triage",
+            "kind": "edit",
+            "expected_outputs": ["triage_report.md", "draft_replies.md"],
+        }])
+
+        async def _idle():
+            import asyncio
+            await asyncio.sleep(30)
+
+        import asyncio
+        task = asyncio.ensure_future(_idle())
+        proc_id = await proc_registry().register_helper(
+            owner=trace_id,
+            helper_task_id="email-triage",
+            task=task,
+            helper_workspace="",
+            abort_event=asyncio.Event(),
+            description="test helper",
+        )
+        try:
+            result = await handle_write(str(tmp_path), "triage_report.md", "# report\n")
+            assert result["ok"] is True
+            assert "helper_ownership_fact" in result
+            assert "email-triage" in result["helper_ownership_fact"]
+
+            other = await handle_write(str(tmp_path), "unrelated_notes.md", "notes\n")
+            assert other["ok"] is True
+            assert "helper_ownership_fact" not in other
+        finally:
+            task.cancel()
+            try:
+                await proc_registry().unregister(proc_id)
+            except Exception:
+                pass
+    finally:
+        debug.set_trace_id("")
+
+
+async def test_edit_file_count_mismatch_reports_match_line_numbers(tmp_path):
+    """Round 8: a count-mismatch retry costs a full turn; line numbers let the
+    model choose expand-context vs replace-all without rereading the file."""
+    from app.llm.tools.workspace_file_ops import handle_edit_file
+
+    target = tmp_path / "f.py"
+    target.write_text("value = 100\nother = 100\nthird = 100\n", encoding="utf-8")
+    result = await handle_edit_file(str(tmp_path), "f.py", "= 100", "= 200", expected_count=1)
+    assert result["ok"] is False
+    assert result["actual_count"] == 3
+    assert result["match_line_numbers"] == [1, 2, 3]
+    assert "expected_count=3" in result["fact"]
+
+
+async def test_guard_anchor_includes_completed_helper_evidence():
+    """Round 15: the quality guard blocked a patch helper for 'missing browser
+    tools' AFTER a browser helper had already completed Playwright evidence
+    (20260611_162518_p16784, 2x guard_blocked, recovery 0.2). The guard anchor
+    must show completed-helper evidence so follow-up delegations are judged
+    against what prior helpers produced."""
+    from app.core import agent_state, debug
+    from app.llm.tools.delegate import _current_task_anchor_for_guard
+
+    trace_id = "trace-guard-helper-evidence"
+    debug.set_trace_id(trace_id)
+    agent_state.reset_trace(trace_id)
+    try:
+        agent_state.add_evidence(
+            trace_id=trace_id,
+            source="helper",
+            status=agent_state.EVIDENCE_VERIFIED,
+            summary="Used Playwright/Chromium to navigate to http://127.0.0.1:53319/ and extracted the docs page text.",
+            task_id="browser_docs_evidence",
+            kind="code",
+            data={"terminal_reason": "completed", "ok": True},
+        )
+        anchor = _current_task_anchor_for_guard(
+            "patch report_client.py using the confirmed docs",
+            [{"task_id": "patch_report_client", "kind": "code", "prompt": "patch the client"}],
+        )
+    finally:
+        debug.set_trace_id("")
+
+    assert "completed_helper[code]" in anchor
+    assert "Playwright/Chromium" in anchor
+    assert "does not need the same tools again" in anchor
+
+
+def test_environment_mode_prunes_chat_memory_tools():
+    """Round 17 (#2): environment/benchmark mode has no chat memory, group
+    files, or avoid-mention semantics; those schemas were ~1k tokens of dead
+    weight per main-loop turn. Static pruning keeps the env-mode tool hash
+    stable so prefix caching within the mode is unaffected."""
+    from app.llm.tools.registry import tools_for_runtime_mode
+
+    env_names = {t["function"]["name"] for t in tools_for_runtime_mode("environment")}
+    chat_names = {t["function"]["name"] for t in tools_for_runtime_mode("chat")}
+
+    pruned = {"expand_warm", "expand_cold", "expand_kb", "mark_avoid_mention",
+              "recall_thread", "search_files", "fetch_group_file"}
+    assert not (pruned & env_names), pruned & env_names
+    # Chat mode keeps its memory tools.
+    assert "expand_warm" in chat_names
+    # Core environment tools survive.
+    for required in ("delegate", "task_plan", "env_run", "env_read", "env_apply_replace", "read_file"):
+        assert required in env_names, required
+    # Stable identity across calls (cache works).
+    assert tools_for_runtime_mode("environment") is tools_for_runtime_mode("environment")
+
+
+def test_framework_split_exemption_unified_entry():
+    """Round 17 (#3): three framework-exemption predicates merged into one
+    entry with a reason enum. Verify each variant still triggers."""
+    from app.llm.tools.delegate import _framework_split_exemption
+
+    # Variant 2: scoped fanout — component task inside a split batch.
+    fanout_task = {
+        "task_id": "ui-component",
+        "kind": "code",
+        "framework": "shared UI contract",
+        "prompt": "Build the UI slice per the shared contract.",
+        "expected_outputs": ["_env/ui/app.tsx", "_env/ui/styles.css"],
+        "acceptance_checks": ["render check"],
+    }
+    assert _framework_split_exemption(
+        fanout_task, total_task_count=3,
+        outputs=["_env/ui/app.tsx", "_env/ui/styles.css"],
+        prompt_l="build the ui slice per the shared contract.",
+        enum_signals=[], comparison_pipeline=False,
+    ) == "scoped_fanout"
+
+    # Variant 3: bounded scaffold.
+    scaffold_task = {
+        "task_id": "project-scaffold",
+        "kind": "code",
+        "framework": "interfaces",
+        "prompt": "Create the project scaffold with shared interfaces and harness.",
+        "expected_outputs": ["_env/core/api.py"],
+        "acceptance_checks": ["import check"],
+    }
+    assert _framework_split_exemption(
+        scaffold_task, total_task_count=1,
+        outputs=["_env/core/api.py"],
+        prompt_l="create the project scaffold with shared interfaces and harness.",
+        enum_signals=[], comparison_pipeline=False,
+    ) == "bounded_scaffold"
+
+    # Negative: enum signals present -> no exemption.
+    assert _framework_split_exemption(
+        scaffold_task, total_task_count=1,
+        outputs=["_env/core/api.py"],
+        prompt_l="create the project scaffold",
+        enum_signals=["5 comparable algorithms"], comparison_pipeline=False,
+    ) is None
+
+    # Negative: outputs outside _env -> no exemption.
+    assert _framework_split_exemption(
+        scaffold_task, total_task_count=1,
+        outputs=["src/api.py"],
+        prompt_l="create the project scaffold with shared interfaces",
+        enum_signals=[], comparison_pipeline=False,
+    ) is None
+
+
+def test_guidance_tracker_dedup_semantics():
+    """Round 17 (#1): unified guidance dedup replaces ad-hoc boolean flags in
+    chat_with_tools_loop. Verify once-per-loop, keyed re-arm, max_count, and
+    reset semantics."""
+    from app.llm.guidance_tracker import GuidanceTracker
+
+    g = GuidanceTracker()
+    # Default: once per hint.
+    assert g.should_emit("snapshot") is True
+    assert g.should_emit("snapshot") is False
+    assert g.has_fired("snapshot") is True
+
+    # Keyed: new key re-arms.
+    assert g.should_emit("write_block", key="a.py") is True
+    assert g.should_emit("write_block", key="a.py") is False
+    assert g.should_emit("write_block", key="b.py") is True
+
+    # max_count.
+    assert g.should_emit("verifier", max_count=2) is True
+    assert g.should_emit("verifier", max_count=2) is True
+    assert g.should_emit("verifier", max_count=2) is False
+    assert g.fired_count("verifier") == 2
+
+    # reset re-arms.
+    g.reset("snapshot")
+    assert g.has_fired("snapshot") is False
+    assert g.should_emit("snapshot") is True
+
+    # snapshot view aggregates.
+    snap = g.snapshot()
+    assert snap["verifier"] == 2

@@ -13,7 +13,7 @@ def _write_session_manifest(temp_ws: str, main_ws: str | None = None) -> None:
     """记录 session 开始时已存在的文件(用于后续检测新产物)。
 
     扫描 .temp/ 和主工作区根目录全部文件,统一汇入 files_before
-    供 auto-final 过滤跨会话污染和 _clean_main_workspace_before_spawn 区分新旧。
+    供 helper 产物过滤跨会话污染和 _clean_main_workspace_before_spawn 区分新旧。
     2026-05-08 Fix 5: 扫描 main_ws 全部根目录文件(不仅 .helper_*),
     使旧 task 残留能被识别并清理。
     """

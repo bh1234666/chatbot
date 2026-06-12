@@ -23,6 +23,7 @@ from app.core.environment_projects import (
 from app.core.file_preview import preview_file
 from app.llm.tools.environment import _augment_pytest_command
 from app.llm.tools.command_risk import analyze_command
+from app.llm.tools.output_spill import spill_text_field, write_tool_output_spill
 from app.memory import archive as archive_dao
 from app.memory import bot_config
 from app.memory import persona_files
@@ -267,7 +268,33 @@ async def project_diff(
     new = other.read_text(encoding="utf-8", errors="replace").splitlines()
     diff = "\n".join(difflib.unified_diff(old, new, fromfile=f"a/{_rel(root, source)}", tofile=f"b/{_rel(root, other)}", lineterm=""))
     max_chars = max(1000, min(int(max_chars or 60000), 200000))
-    return {"ok": True, "path": _rel(root, source), "compare_path": _rel(root, other), "changed": old != new, "diff": diff[:max_chars], "truncated": len(diff) > max_chars}
+    result = {
+        "ok": True,
+        "path": _rel(root, source),
+        "compare_path": _rel(root, other),
+        "changed": old != new,
+        "diff": diff[:max_chars],
+        "truncated": len(diff) > max_chars,
+    }
+    if len(diff) > max_chars:
+        saved_path = write_tool_output_spill(
+            root_dir=str(root),
+            tool_name="project_diff",
+            label="diff",
+            text=diff,
+        )
+        result.update({
+            "diff_truncated": True,
+            "diff_original_chars": len(diff),
+            "diff_full_saved_path": saved_path,
+            "output_truncated": True,
+            "tool_result_truncated": True,
+            "visible_excerpt_policy": (
+                f"Full diff was saved at `{saved_path}` (`diff_full_saved_path`); "
+                "only the head excerpt is returned."
+            ),
+        })
+    return result
 
 
 @router.post("/projects/{project_id}/run")
@@ -312,14 +339,32 @@ async def project_run(project_id: str, body: dict, user_id: str) -> dict:
         stdout_b, stderr_b = await proc.communicate()
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
-    return {
+    result = {
         "ok": proc.returncode == 0 and not timed_out,
         "command": command,
         "cwd": _rel(Path(entry["root_dir"]).resolve(), cwd),
         "returncode": proc.returncode,
         "timed_out": timed_out,
         "elapsed_sec": round(time.monotonic() - start, 3),
-        "stdout": stdout[:50000],
-        "stderr": stderr[:30000],
-        "truncated": len(stdout) > 50000 or len(stderr) > 30000,
+        "stdout": stdout,
+        "stderr": stderr,
+        "truncated": False,
     }
+    spill_text_field(
+        result,
+        root_dir=entry["root_dir"],
+        tool_name="project_run",
+        field="stdout",
+        text=stdout,
+        visible_chars=50000,
+    )
+    spill_text_field(
+        result,
+        root_dir=entry["root_dir"],
+        tool_name="project_run",
+        field="stderr",
+        text=stderr,
+        visible_chars=30000,
+    )
+    result["truncated"] = bool(result.get("output_truncated"))
+    return result

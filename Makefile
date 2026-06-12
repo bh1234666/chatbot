@@ -1,9 +1,12 @@
-.PHONY: help install dev-install test lint fmt typecheck run clean
+.PHONY: help install dev-install test prompt-audit prompt-audit-full prompt-audit-watch lint fmt typecheck run clean
 
 help:
 	@echo "install      安装运行时依赖"
 	@echo "dev-install  安装开发依赖(含 pytest/ruff/mypy)"
 	@echo "test         运行测试(离线,纯逻辑模块)"
+	@echo "prompt-audit       提示词漂移审计(快速)"
+	@echo "prompt-audit-full  提示词漂移审计(完整)"
+	@echo "prompt-audit-watch 定期重复提示词漂移审计"
 	@echo "lint         ruff 检查"
 	@echo "fmt          ruff 自动格式化"
 	@echo "typecheck    mypy 静态类型检查"
@@ -17,6 +20,15 @@ dev-install:
 
 test:
 	pytest
+
+prompt-audit:
+	python stress_tools/audit_prompt_hygiene.py --show-plan -q
+
+prompt-audit-full:
+	python stress_tools/audit_prompt_hygiene.py --full --show-plan -q --write-report logs/prompt_audit_latest.md
+
+prompt-audit-watch:
+	python stress_tools/audit_prompt_hygiene.py --full --repeat-minutes 30 -q --report-dir logs/prompt_audits
 
 lint:
 	ruff check app tests

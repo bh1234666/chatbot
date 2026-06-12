@@ -63,6 +63,46 @@ def test_environment_delegate_auto_fetches_project_paths(tmp_path):
     assert (tmp_path / "_env/llm/tools/delegate.py").is_file()
 
 
+def test_environment_delegate_auto_fetches_explicit_input_files_that_look_generated(tmp_path):
+    project = tmp_path / "project"
+    workspace = tmp_path / "workspace"
+    analysis = project / "analysis" / "bplus_analysis.md"
+    summary = project / "analysis" / "hybrid_summary.md"
+    analysis.parent.mkdir(parents=True)
+    analysis.write_text("# B+ Tree\nsource analysis\n", encoding="utf-8")
+    summary.write_text("# Hybrid\nsource summary\n", encoding="utf-8")
+    env = EnvironmentContext(
+        root_dir=str(project),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+    tasks = [{
+        "kind": "edit",
+        "task_id": "assemble",
+        "prompt": "Assemble the paper from explicitly listed staged analysis inputs.",
+        "input_files": [
+            "_env/analysis/bplus_analysis.md",
+            "_env/analysis/hybrid_summary.md",
+        ],
+        "expected_outputs": ["paper.docx"],
+    }]
+
+    with runtime_context("environment", env):
+        result = _auto_fetch_environment_workspace_refs(str(workspace), tasks)
+
+    assert "analysis/bplus_analysis.md" in result["fetched"]
+    assert "analysis/hybrid_summary.md" in result["fetched"]
+    assert not [
+        item for item in result["skipped"]
+        if item.get("path") in {"analysis/bplus_analysis.md", "analysis/hybrid_summary.md"}
+        and item.get("reason") == "looks_like_generated_output"
+    ]
+    assert (workspace / "_env" / "analysis" / "bplus_analysis.md").is_file()
+    assert (workspace / "_env" / "analysis" / "hybrid_summary.md").is_file()
+
+
 def test_environment_summarize_helper_receives_project_inventory(tmp_path):
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
@@ -178,9 +218,8 @@ def test_environment_manifest_source_hint_drives_parallel_read_split():
 
     assert recommendations
     assert recommendations[0]["task_id"] == "ielts_synthesis"
-    assert recommendations[0]["should_split"] is True
-    assert len(recommendations[0]["split_into"]) >= 3
-    assert "parallel read helpers" in recommendations[0]["reason"]
+    assert len(recommendations[0]["observed_split_boundary_names"]) >= 3
+    assert "Candidate source-reading boundaries" in recommendations[0]["reason"]
 
 
 def test_environment_output_basename_normalizes_to_unique_manifest_path(tmp_path):
@@ -287,7 +326,7 @@ async def test_inventory_helper_cannot_read_source_material_body(tmp_path):
 
     assert '"ok": true' in allowed
     assert "inventory_helper_source_material_read_forbidden" in blocked
-    assert '"suggested_helper_kind": "read"' in blocked
+    assert '"matching_helper_kind": "read"' in blocked
 
 
 def test_environment_output_basename_keeps_ambiguous_manifest_path(tmp_path):

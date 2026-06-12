@@ -2,7 +2,7 @@
 
 重构前: handle_delegate 的 spawn 路径先调 _sanitize_and_validate_tasks 做校验(丢弃返回值),
 然后自己 mirror 一整套相同的清洗+配对+日志逻辑。两套并存导致:
-  - code_hard_paired / delegate.start / kind.auto_corrected 日志双打印
+  - code_hard_explicit_paired / delegate.start / kind.auto_corrected 日志双打印
   - 维护负担(上轮 resume kind 继承只进了 mirror,sanitize 漏了 → 两套不等价)
   - mirror 路径 early-return 校验不全(只 2 个 vs sanitize 7 个)
 
@@ -32,7 +32,7 @@ def _src():
 def test_spawn_log_events_single_source():
     """关键 spawn 日志事件各只剩 1 处调用(不再双打印)。"""
     src = _src()
-    for event in ('"delegate.start"', '"delegate.code_hard_paired"',
+    for event in ('"delegate.start"', '"delegate.code_hard_explicit_paired"',
                   '"delegate.resume.kind_inherited"'):
         # debug.log("event", ...) 形式;统计该字面量作为日志事件名的出现次数
         n = len(re.findall(re.escape(event), src))
@@ -105,7 +105,7 @@ def test_kind_guard_ignores_code_to_edit_for_source_outputs():
 
 
 def test_helper_large_text_write_uses_char_count_only():
-    """helper_large_text_write 阈值仅按字符总量 (6000), 不再额外按行数 (140) 误伤
+    """helper_large_text_write 阈值仅按字符总量, 不再额外按行数误伤
     短 bullet 大纲。
 
     病因(2026-06-05 trace 394304 14:44:31): paper_outline.md 2786 字符 / 167 行
@@ -117,10 +117,10 @@ def test_helper_large_text_write_uses_char_count_only():
     )
     with open(_registry_path, encoding="utf-8") as f:
         src = f.read()
-    # 函数体内必须保留字符上限 6000 的早返回
-    assert "if char_count <= 6000:\n        return None" in src
-    # 不再有"and line_count <= 140"形式的 AND 双条件早返回
-    assert "char_count <= 6000 and line_count <= 140" not in src
+    # 函数体内必须保留字符上限早返回；当前阈值为效率优化后的 36000。
+    assert "if char_count <= 36000:\n        return None" in src
+    # 不再有按行数参与早返回的 AND 双条件。
+    assert "char_count <= 36000 and line_count <=" not in src
 
 
 def test_cygwin_fork_failure_recovery_hint_present():

@@ -1,6 +1,8 @@
 """workspace.run command execution handler."""
 from __future__ import annotations
 
+import os
+import shutil
 import shlex
 import re
 import sys
@@ -13,12 +15,61 @@ from app.llm.tools.memory_guard import (
     preflight_memory_check,
     workspace_memory_limits,
 )
+from app.llm.tools.output_spill import spill_text_field
 
 
 _UNIX_INVENTORY_COMMANDS = {
     "ls", "find", "grep", "egrep", "fgrep", "head", "tail", "wc", "sed", "awk",
     "xargs", "cat",
 }
+
+
+def _node_tool_paths(project_root: str) -> tuple[str | None, str | None]:
+    home = os.path.expanduser("~")
+    exe_name = "node.exe" if sys.platform == "win32" else "node"
+    node_candidates: list[str] = []
+    for env_name in ("CODEX_NODE_EXE", "CLAWBENCH_NODE_EXE"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            node_candidates.append(env_value)
+    node_candidates.extend(
+        [
+            os.path.join(
+                home,
+                ".cache",
+                "codex-runtimes",
+                "codex-primary-runtime",
+                "dependencies",
+                "node",
+                "bin",
+                exe_name,
+            ),
+            os.path.join(os.path.dirname(os.path.abspath(sys.executable)), exe_name),
+            os.path.join(project_root, "node", "bin", exe_name),
+        ]
+    )
+    node_exe = next((path for path in node_candidates if os.path.isfile(path)), None)
+
+    module_candidates: list[str] = []
+    env_node_path = os.environ.get("NODE_PATH") or os.environ.get("CLAWBENCH_NODE_PATH")
+    if env_node_path:
+        module_candidates.extend(part for part in env_node_path.split(os.pathsep) if part)
+    module_candidates.extend(
+        [
+            os.path.join(
+                home,
+                ".cache",
+                "codex-runtimes",
+                "codex-primary-runtime",
+                "dependencies",
+                "node",
+                "node_modules",
+            ),
+            os.path.join(project_root, "node_modules"),
+        ]
+    )
+    node_modules = next((path for path in module_candidates if os.path.isdir(path)), None)
+    return node_exe, node_modules
 
 
 def _bin_not_found_guidance(bin_name: str) -> tuple[str, str]:
@@ -46,10 +97,53 @@ def _bin_not_found_guidance(bin_name: str) -> tuple[str, str]:
             "It may be missing, misspelled, or intended to run through `python -m <module>` instead of a bare executable."
         ),
         (
-            "Prefer `python -m <package>` when the tool is a Python module, or install the missing package first. "
-            "For visual text extraction, use the OCR tool rather than trying to install tesseract in the workspace.\n"
-            "Python module tools should use python -m; visual text extraction should use the OCR tool."
+            "Prefer local facts before installation: try `python -m <package>` for Python modules, project virtualenv "
+            "scripts when present, configured check scripts, or a narrow direct script/import verification. Install "
+            "packages only when the task or environment policy makes that route appropriate. For visual text extraction, "
+            "use the OCR tool rather than trying to install tesseract in the workspace.\n"
+            "缺少可执行文件时先查本地模块、项目虚拟环境、既有检查脚本或窄验证；安装只作为合适时的路线。"
         ),
+    )
+
+
+def _dependency_install_failure_hint(command: str, stderr: str, stdout: str) -> str | None:
+    """Return a factual hint when dependency installation failed."""
+    cmd = (command or "").strip()
+    lower_cmd = cmd.lower()
+    if not re.search(r"\b(?:python\s+-m\s+pip|pip|uv\s+pip|pip3|npm|pnpm|yarn)\s+(?:install|add)\b", lower_cmd):
+        return None
+    combined = f"{stderr or ''}\n{stdout or ''}".lower()
+    if not combined:
+        return None
+    failure_markers = (
+        "permission denied",
+        "access is denied",
+        "could not install packages",
+        "externally-managed-environment",
+        "read timed out",
+        "connection",
+        "network is unreachable",
+        "temporary failure",
+        "proxy",
+        "ssl",
+        "certificate",
+        "no matching distribution",
+        "not found",
+        "denied",
+        "拒绝访问",
+        "权限",
+        "网络",
+        "超时",
+    )
+    if not any(marker in combined for marker in failure_markers):
+        return None
+    return (
+        "A dependency-install command failed. Treat this as an environment fact, not verification progress. "
+        "Before another install attempt, check local/project/bundled routes already available to the workspace: "
+        "`python -m <module>`, project virtualenv scripts, configured test/check scripts, direct script/import checks, "
+        "or an existing verifier. If those do not cover the acceptance contract, report the missing dependency with "
+        "the exact install failure and the fallback checks already performed.\n"
+        "依赖安装失败是环境事实；再次安装前先用本地/项目/内置路径或等价窄验证，不满足验收时报告依赖阻塞和已完成自检。"
     )
 
 
@@ -60,6 +154,20 @@ def _python_c_syntax_fix_hint(command: str, stderr: str) -> str | None:
         return None
     if "SyntaxError" not in (stderr or ""):
         return None
+    try:
+        from app.core.runtime_mode import is_environment_mode
+        env_mode = is_environment_mode()
+    except Exception:
+        env_mode = False
+    if env_mode:
+        return (
+            "Python `-c` failed with a SyntaxError. In environment/project mode, use `env_run` with "
+            "`python_code` for nontrivial Python inspection instead of writing a project/workspace script. "
+            "`env_run python_code` executes from a system temporary file with cwd set to the real project "
+            "directory, then removes the probe; the inspection script is not a project deliverable. Use "
+            "workspace `_scratch/*.py` only for ordinary chat-workspace or helper-sandbox probes.\n"
+            "项目环境里的多行 Python 检查优先用 env_run python_code；它不生成项目产物，避免 shell 引号和临时脚本误导。"
+        )
     return (
         "Python `-c` failed with a SyntaxError. For anything beyond a trivial one-liner, write a temporary "
         "script under `_scratch/` with workspace.write, run `python _scratch/<script>.py` with an explicit timeout, "
@@ -113,11 +221,31 @@ def _unix_inventory_syntax_fix_hint(command: str, stderr: str, stdout: str) -> s
 
 def _windows_unix_inventory_command_hint(command: str) -> str | None:
     """Return a recovery hint when Windows blocks Unix inventory syntax early."""
-    return _unix_inventory_syntax_fix_hint(
-        command,
-        "security blocked: refusing redirect outside workspace",
-        "",
+    if sys.platform != "win32":
+        return None
+    return (
+        "This command uses Unix-style file inventory syntax on Windows/cmd and failed before execution. "
+        "Switch to platform-neutral file tools: workspace locate for file lists, search_files/search_in_file "
+        "for matching, read_file/inspect_file for content and metadata, or write a small `_scratch/*.py` "
+        "inventory script with an explicit timeout. In environment helpers, inspect `_env/project_inventory.md` "
+        "and `_env/.resource_manifest.json` first when they exist.\n"
+        "Windows/cmd 下 Unix 盘点语法不可用；改用 locate/search/read/inspect，或写 _scratch Python 脚本。"
     )
+
+
+def _windows_unix_inventory_redirect_block(command: str, *, using_unix_bash: bool = False) -> bool:
+    """Detect Windows/cmd commands whose Unix inventory syntax will mis-handle /dev/null.
+
+    `2>/dev/null` is valid under Unix shells, but without Git Bash Windows cmd
+    treats `/dev/null` as a literal filesystem path. Return a recoverable
+    command fact before running the doomed inventory command.
+    """
+    if sys.platform != "win32" or using_unix_bash:
+        return False
+    lower = (command or "").lower()
+    if "/dev/null" not in lower:
+        return False
+    return bool(re.search(r"(^|[&|]\s*)(find|ls|grep|egrep|fgrep|head|tail|wc|sed|awk)\b", lower))
 
 
 _CYGWIN_FORK_SIGNALS = (
@@ -352,6 +480,15 @@ async def handle_run(
             ),
         }
 
+    raw_decision = analyze_command(command.strip(), ws_dir, is_main_thread=_is_main_thread())
+    if not raw_decision.allowed:
+        debug.log("workspace.security", raw_decision.reason, {"category": raw_decision.category})
+        return {
+            "ok": False,
+            "error": raw_decision.reason,
+            "blocked_reason": raw_decision.category,
+        }
+
     cmd_line = _augment_pytest_command(command.strip(), ws_dir)
 
     # ── 早决:Windows + git-bash + bash 工具入口 → 直接走 git-bash exec 路径 ──
@@ -408,6 +545,17 @@ async def handle_run(
     exe = parts[0].lower() if parts else ""
 
     # ── 安全检查 ──
+    if _windows_unix_inventory_redirect_block(cmd_line, using_unix_bash=_windows_git_bash):
+        fix_hint = _windows_unix_inventory_command_hint(cmd_line)
+        result = {
+            "ok": False,
+            "error": "security blocked: Unix-style inventory command uses `/dev/null` under Windows/cmd.",
+            "blocked_reason": "outside_redirect",
+        }
+        if fix_hint:
+            result["FIX_HINT"] = fix_hint
+        return result
+
     legacy_security_error = _security_check(cmd_line, ws_dir)
     if legacy_security_error:
         debug.log("workspace.security", legacy_security_error, {"category": "workspace_run_check"})
@@ -434,6 +582,11 @@ async def handle_run(
     _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     _mingw_bin = os.path.join(_project_root, "MinGW64", "bin")
     _sandbox_path = os.environ.get("PATH", "")
+    _node_exe, _node_modules = _node_tool_paths(_project_root)
+    if _node_exe:
+        _node_dir = os.path.dirname(os.path.abspath(_node_exe))
+        if os.path.isdir(_node_dir):
+            _sandbox_path = _node_dir + os.pathsep + _sandbox_path
     _python_dir = os.path.dirname(os.path.abspath(sys.executable)) if sys.executable else ""
     _python_scripts = os.path.join(_python_dir, "Scripts") if _python_dir else ""
     for _path_part in (_python_scripts, _python_dir):
@@ -445,6 +598,15 @@ async def handle_run(
     # ── 解析可执行文件完整路径（Windows CreateProcess 用自定义 env 时 PATH 查找可能失败）──
     sandbox_env = os.environ.copy()
     sandbox_env["PATH"] = _sandbox_path
+    if _node_modules:
+        _existing_node_path = sandbox_env.get("NODE_PATH", "")
+        _node_path_parts = [_node_modules]
+        _pnpm_public_root = os.path.join(_node_modules, ".pnpm", "node_modules")
+        if os.path.isdir(_pnpm_public_root):
+            _node_path_parts.append(_pnpm_public_root)
+        if _existing_node_path:
+            _node_path_parts.append(_existing_node_path)
+        sandbox_env["NODE_PATH"] = os.pathsep.join(dict.fromkeys(_node_path_parts))
     # Do not inherit the service process' Python import path into helper commands.
     # Parallel environment/helper projects must only see packages from cwd or from
     # an explicit PYTHONPATH in the command (for example `set PYTHONPATH=src && ...`).
@@ -939,7 +1101,7 @@ async def handle_run(
                         if not _chunk:
                             break
                         _err_buf += _chunk
-                        if len(_err_buf) >= 8192:
+                        if len(_err_buf) >= 256 * 1024:
                             break
                     if _err_buf:
                         try:
@@ -956,7 +1118,7 @@ async def handle_run(
                         if not _chunk:
                             break
                         _out_buf += _chunk
-                        if len(_out_buf) >= 8192:
+                        if len(_out_buf) >= 256 * 1024:
                             break
                     if _out_buf:
                         try:
@@ -990,9 +1152,23 @@ async def handle_run(
                 "proc_id": proc_id,  # LLM 看到这个能确认是哪个进程超的(虽然已注销)
             }
             if _partial_stderr:
-                _ret["partial_stderr"] = _partial_stderr[:4000]
+                spill_text_field(
+                    _ret,
+                    root_dir=ws_dir,
+                    tool_name="workspace.run",
+                    field="partial_stderr",
+                    text=_partial_stderr,
+                    visible_chars=4000,
+                )
             if _partial_stdout:
-                _ret["partial_stdout"] = _partial_stdout[:4000]
+                spill_text_field(
+                    _ret,
+                    root_dir=ws_dir,
+                    tool_name="workspace.run",
+                    field="partial_stdout",
+                    text=_partial_stdout,
+                    visible_chars=4000,
+                )
             return _ret
 
         # 智能解码: cmd.exe 内置命令 / 本地化错误信息在中文 Windows 上是 cp936(GBK),
@@ -1012,15 +1188,32 @@ async def handle_run(
         _stdout_decoded = _smart_decode(stdout_bytes)
         _stderr_decoded = _smart_decode(stderr_bytes)
         if memory_guard.triggered:
-            return memory_limit_error(
+            _memory_result = memory_limit_error(
                 memory_guard.triggered,
                 stdout=_stdout_decoded,
                 stderr=_stderr_decoded,
             )
+            spill_text_field(
+                _memory_result,
+                root_dir=ws_dir,
+                tool_name="workspace.run",
+                field="partial_stdout",
+                text=_stdout_decoded,
+                visible_chars=4000,
+            )
+            spill_text_field(
+                _memory_result,
+                root_dir=ws_dir,
+                tool_name="workspace.run",
+                field="partial_stderr",
+                text=_stderr_decoded,
+                visible_chars=4000,
+            )
+            return _memory_result
         stdout_truncated = len(_stdout_decoded) > _MAX_OUTPUT
         stderr_truncated = len(_stderr_decoded) > _MAX_OUTPUT
-        stdout = _truncate_head_tail(_stdout_decoded, _MAX_OUTPUT) if stdout_truncated else _stdout_decoded
-        stderr = _truncate_head_tail(_stderr_decoded, _MAX_OUTPUT) if stderr_truncated else _stderr_decoded
+        stdout = _stdout_decoded
+        stderr = _stderr_decoded
 
         # B9 修复 (2026-05-02): 编译/链接失败时给智能 fix-it 提示。
         # 实测 trace 150eb2f2 — lite 完全忽略 gcc 报错末尾的 "note: use option -std=c99",
@@ -1078,6 +1271,9 @@ async def handle_run(
         _unix_inventory_hint = _unix_inventory_syntax_fix_hint(command, stderr, stdout)
         if _unix_inventory_hint:
             fix_hint = f"{_unix_inventory_hint}\n{fix_hint}" if fix_hint else _unix_inventory_hint
+        _install_failure_hint = _dependency_install_failure_hint(command, stderr, stdout)
+        if _install_failure_hint:
+            fix_hint = f"{_install_failure_hint}\n{fix_hint}" if fix_hint else _install_failure_hint
         # 2026-06-05: Windows git-bash Cygwin fork 资源耗尽提示 — 优先级最高(放最前)
         # 因为系统级 fork 失败时 LLM 重试同一命令几乎一定再次失败,提前提醒切换工具。
         _fork_hint = _cygwin_fork_exhaustion_hint(command, stderr)
@@ -1102,7 +1298,9 @@ async def handle_run(
             or "get-childitem" in _cmd_lower or _cmd_lower.startswith("gci ")
             or _cmd_lower == "gci"
         )
-        if _is_dir_listing:
+        if stdout_truncated:
+            stdout_compacted, n_collapsed = stdout, 0
+        elif _is_dir_listing:
             stdout_compacted, n_collapsed = stdout, 0
         else:
             stdout_compacted, n_collapsed = _compact_repeating_lines(stdout)
@@ -1169,26 +1367,41 @@ async def handle_run(
                 "重复调试输出已折叠；需要完整输出时重定向到文件分段读取。"
             )
         result["stderr"] = stderr
-        # 2026-05-02 Bug H 修后半:截断时**显式告知**模型 + 提示如何拿完整输出。
-        # 否则像 trace e4eeb133 helper 不知道输出被截,后续 read_file 才发现。
         if stdout_truncated or stderr_truncated:
             _orig_stdout = len(_stdout_decoded) if stdout_truncated else len(stdout)
             _orig_stderr = len(_stderr_decoded) if stderr_truncated else len(stderr)
             _parts = []
             if stdout_truncated:
+                spill_text_field(
+                    result,
+                    root_dir=ws_dir,
+                    tool_name="workspace.run",
+                    field="stdout",
+                    text=_stdout_decoded,
+                    visible_chars=_MAX_OUTPUT,
+                    force=True,
+                )
                 _parts.append(
-                    f"stdout truncated: kept about {_MAX_OUTPUT//2} chars from both head and tail; full length {_orig_stdout} chars"
+                    f"stdout truncated: kept the first {_MAX_OUTPUT} chars; full length {_orig_stdout} chars; full text saved at {result.get('stdout_full_saved_path')}"
                 )
             if stderr_truncated:
+                spill_text_field(
+                    result,
+                    root_dir=ws_dir,
+                    tool_name="workspace.run",
+                    field="stderr",
+                    text=_stderr_decoded,
+                    visible_chars=_MAX_OUTPUT,
+                    force=True,
+                )
                 _parts.append(
-                    f"stderr truncated: kept about {_MAX_OUTPUT//2} chars from both head and tail; full length {_orig_stderr} chars"
+                    f"stderr truncated: kept the first {_MAX_OUTPUT} chars; full length {_orig_stderr} chars; full text saved at {result.get('stderr_full_saved_path')}"
                 )
             result["output_truncated"] = True
             result["truncation_note"] = (
-                "; ".join(_parts) + ". Middle content is marked with [...truncated N chars...]. "
-                "For full output, redirect to a file such as `cmd > out.txt 2>&1` and read it in chunks, "
-                "or filter the command output to the relevant lines before returning it.\n"
-                "输出已截断；完整内容请重定向到文件后分段读取。"
+                "; ".join(_parts) + ". Only head excerpts are visible in this tool result. "
+                "Read the saved file or a targeted segment only if the active task needs missing details.\n"
+                "输出已截断并保存完整内容；当前只显示头部摘录。"
             )
         return result
     except asyncio.CancelledError:

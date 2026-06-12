@@ -1,10 +1,10 @@
 """Regression tests for framework-first delegate guard behavior."""
 
 from app.llm.tools.delegate_framework import (
-    blocking_framework_warnings,
     broad_framework_guard_warnings,
     format_helper_request_envelope,
     helper_prompt_with_framework,
+    high_priority_framework_warnings,
     normalize_framework_contract,
     normalize_string_list,
     task_has_framework,
@@ -128,7 +128,7 @@ def test_overconcentrated_single_task_blocks_without_framework():
     warnings = broad_framework_guard_warnings(tasks)
     issues = {w["issue"] for w in warnings}
     assert "overconcentrated_helper_task" in issues
-    assert blocking_framework_warnings(warnings)
+    assert high_priority_framework_warnings(warnings)
 
 
 def test_peer_tasks_with_framework_are_allowed():
@@ -206,7 +206,7 @@ def test_framework_producer_mixed_with_consumers_blocks():
     ]
     warnings = broad_framework_guard_warnings(tasks)
     assert any(w["issue"] == "framework_producer_mixed_with_consumers" for w in warnings)
-    assert blocking_framework_warnings(warnings)
+    assert high_priority_framework_warnings(warnings)
 
 
 def test_peer_tasks_with_prompt_reference_but_no_framework_field_block():
@@ -259,11 +259,11 @@ def test_oversized_framework_helper_blocks():
     assert any(w["issue"] == "overconcentrated_framework_task" for w in warnings)
 
 
-def test_framework_block_cap_releases_after_two_blocks():
+def test_framework_priority_cap_releases_after_two_hits():
     warnings = [{"issue": "overconcentrated_helper_task", "severity": "high"}]
-    assert blocking_framework_warnings(warnings, trace_total=0, cap=2)
-    assert blocking_framework_warnings(warnings, trace_total=1, cap=2)
-    assert blocking_framework_warnings(warnings, trace_total=2, cap=2) == []
+    assert high_priority_framework_warnings(warnings, trace_total=0, cap=2)
+    assert high_priority_framework_warnings(warnings, trace_total=1, cap=2)
+    assert high_priority_framework_warnings(warnings, trace_total=2, cap=2) == []
 
 
 def test_removed_general_scaffold_kind_is_not_silently_rewritten():
@@ -283,7 +283,7 @@ def test_removed_general_scaffold_kind_is_not_silently_rewritten():
     assert tasks[0]["kind"] == "general"
 
 
-async def test_code_hard_backup_preserves_helper_envelope(tmp_path, monkeypatch):
+async def test_explicit_code_hard_backup_preserves_helper_envelope(tmp_path, monkeypatch):
     from app.core.runtime_mode import EnvironmentContext, runtime_context
 
     env = EnvironmentContext(
@@ -298,28 +298,52 @@ async def test_code_hard_backup_preserves_helper_envelope(tmp_path, monkeypatch)
     with runtime_context("environment", env):
         cleaned = await _sanitize_and_validate_tasks(
             {
-                "tasks": [{
-                    "task_id": "framework_infra",
-                    "kind": "code",
-                    "mode": "easy",
-                    "framework": "Shared contract: IndexBase API and benchmark CSV schema.",
-                    "input_files": ["_env/contract.json"],
-                    "prompt": (
-                        "Create the shared framework scaffold for a multi-file project. "
-                        "Use _env/src/base.py, _env/benchmark/runner.py, _env/benchmark/workloads.py, "
-                        "_env/analysis/plots.py, _env/tests/test_contract.py, and "
-                        "_env/scripts/check_project.py. Validate with the check script."
-                    ),
-                    "expected_outputs": [
-                        "_env/src/base.py",
-                        "_env/benchmark/workloads.py",
-                        "_env/benchmark/runner.py",
-                        "_env/analysis/plots.py",
-                        "_env/tests/test_contract.py",
-                        "_env/scripts/check_project.py",
-                    ],
-                    "acceptance_checks": ["python scripts/check_project.py"],
-                }]
+                "tasks": [
+                    {
+                        "task_id": "framework_infra",
+                        "kind": "code",
+                        "mode": "easy",
+                        "framework": "Shared contract: IndexBase API and benchmark CSV schema.",
+                        "input_files": ["_env/contract.json"],
+                        "prompt": (
+                            "Create the shared framework scaffold for a multi-file project. "
+                            "Use _env/src/base.py, _env/benchmark/runner.py, _env/benchmark/workloads.py, "
+                            "_env/analysis/plots.py, _env/tests/test_contract.py, and "
+                            "_env/scripts/check_project.py. Validate with the check script."
+                        ),
+                        "expected_outputs": [
+                            "_env/src/base.py",
+                            "_env/benchmark/workloads.py",
+                            "_env/benchmark/runner.py",
+                            "_env/analysis/plots.py",
+                            "_env/tests/test_contract.py",
+                            "_env/scripts/check_project.py",
+                        ],
+                        "acceptance_checks": ["python scripts/check_project.py"],
+                    },
+                    {
+                        "task_id": "framework_infra_hard",
+                        "kind": "code",
+                        "mode": "hard",
+                        "framework": "Shared contract: IndexBase API and benchmark CSV schema.",
+                        "input_files": ["_env/contract.json"],
+                        "prompt": (
+                            "Create the shared framework scaffold for a multi-file project. "
+                            "Use _env/src/base.py, _env/benchmark/runner.py, _env/benchmark/workloads.py, "
+                            "_env/analysis/plots.py, _env/tests/test_contract.py, and "
+                            "_env/scripts/check_project.py. Validate with the check script."
+                        ),
+                        "expected_outputs": [
+                            "_env/src/base.py",
+                            "_env/benchmark/workloads.py",
+                            "_env/benchmark/runner.py",
+                            "_env/analysis/plots.py",
+                            "_env/tests/test_contract.py",
+                            "_env/scripts/check_project.py",
+                        ],
+                        "acceptance_checks": ["python scripts/check_project.py"],
+                    },
+                ]
             },
             main_workspace=str(tmp_path),
             archive_id="arch",
@@ -327,7 +351,9 @@ async def test_code_hard_backup_preserves_helper_envelope(tmp_path, monkeypatch)
             user_id="user",
         )
     assert isinstance(cleaned, list)
+    assert {task["task_id"] for task in cleaned} == {"framework_infra", "framework_infra_hard"}
     hard = next(task for task in cleaned if task["task_id"] == "framework_infra_hard")
+    assert hard["paired_with"] == "framework_infra"
     assert hard["framework"].startswith("Shared contract")
     assert hard["input_files"] == ["_env/contract.json"]
     assert hard["expected_outputs"] == [
@@ -341,7 +367,7 @@ async def test_code_hard_backup_preserves_helper_envelope(tmp_path, monkeypatch)
     assert hard["acceptance_checks"] == ["python scripts/check_project.py"]
 
 
-def test_main_env_apply_create_large_source_requests_delegation(tmp_path, monkeypatch):
+def test_main_env_apply_create_medium_source_requires_helper(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr("app.llm.tools.environment.current_environment", lambda: type(
@@ -354,11 +380,10 @@ def test_main_env_apply_create_large_source_requests_delegation(tmp_path, monkey
     })
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_source_create_should_delegate"
-    assert result["suggested_next_action"]["task_template"]["kind"] == "code"
     assert not (project / "src" / "generated_module.py").exists()
 
 
-def test_main_env_apply_create_structured_source_requests_delegation(tmp_path, monkeypatch):
+def test_main_env_apply_create_structured_source_requires_helper(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr("app.llm.tools.environment.current_environment", lambda: type(
@@ -398,7 +423,7 @@ def test_main_env_apply_create_tiny_source_stub_allowed(tmp_path, monkeypatch):
     assert (project / "src" / "pkg" / "__init__.py").read_text(encoding="utf-8")
 
 
-def test_main_env_apply_create_short_project_contract_requests_delegation(tmp_path, monkeypatch):
+def test_main_env_apply_create_short_project_contract_requires_helper(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr("app.llm.tools.environment.current_environment", lambda: type(
@@ -410,8 +435,30 @@ def test_main_env_apply_create_short_project_contract_requests_delegation(tmp_pa
     })
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_project_artifact_create_should_delegate"
-    assert result["suggested_next_action"]["task_template"]["kind"] == "edit"
     assert not (project / "_shared" / "paper_framework_contract.md").exists()
+
+
+def test_main_env_apply_create_compact_design_summary_allowed(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr("app.llm.tools.environment.current_environment", lambda: type(
+        "Env", (), {"root_dir": str(project)}
+    )())
+    content = (
+        "# Design Thread Summary\n\n"
+        "## Decisions\n"
+        "- Final decision: option B.\n\n"
+        "## Open Items\n"
+        "- Mobile breakpoint remains open.\n\n"
+        "## Commitments\n"
+        "- You committed to the spec writeup by Friday.\n"
+    )
+    result = _handle_apply_create(str(tmp_path), {
+        "path": "design_thread_summary.md",
+        "content": content,
+    })
+    assert result["ok"] is True
+    assert (project / "design_thread_summary.md").read_text(encoding="utf-8") == content
 
 
 def test_main_env_apply_create_tiny_private_note_allowed(tmp_path, monkeypatch):
@@ -428,7 +475,7 @@ def test_main_env_apply_create_tiny_private_note_allowed(tmp_path, monkeypatch):
     assert (project / "notes.txt").read_text(encoding="utf-8") == "temporary coordination note\n"
 
 
-def test_main_env_apply_create_short_source_implementation_requests_delegation(tmp_path, monkeypatch):
+def test_main_env_apply_create_short_source_implementation_requires_helper(tmp_path, monkeypatch):
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setattr("app.llm.tools.environment.current_environment", lambda: type(
@@ -441,6 +488,23 @@ def test_main_env_apply_create_short_source_implementation_requests_delegation(t
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_source_create_should_delegate"
     assert not (project / "ui" / "app.js").exists()
+
+
+def test_main_env_apply_create_substantial_direct_source_requires_helper(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr("app.llm.tools.environment.current_environment", lambda: type(
+        "Env", (), {"root_dir": str(project)}
+    )())
+    content = "\n".join(f"def func_{i}():\n    return {i}" for i in range(180))
+    result = _handle_apply_create(str(tmp_path), {
+        "path": "src/generated_module.py",
+        "content": content,
+    })
+    assert result["ok"] is False
+    assert result["error_kind"] == "main_thread_source_create_should_delegate"
+    assert result["content_chars"] == len(content)
+    assert not (project / "src" / "generated_module.py").exists()
 
 
 async def test_code_helper_large_project_source_write_requests_segmentation(tmp_path):
@@ -462,10 +526,10 @@ async def test_code_helper_large_project_source_write_requests_segmentation(tmp_
     result = json.loads(result_text)
     assert result["ok"] is False
     assert result["error_kind"] == "helper_monolithic_project_write_should_segment"
-    assert result["suggested_next_action"]["same_task"] is True
-    assert "workspace.write" in result["suggested_next_action"]["write_first"]
-    assert "insert_in_file" in result["suggested_next_action"]["then"]
-    assert "python" in result["suggested_next_action"]["avoid"]
+    assert result["recovery_facts"]["same_task"] is True
+    assert "small skeleton or interface" in result["recovery_facts"]["available_authoring_shapes"]
+    assert "focused edit_file/multi_edit/insert_in_file steps" in result["recovery_facts"]["available_authoring_shapes"]
+    assert "isolated python execution is not a workspace file IO substitute" in result["recovery_facts"]["workspace_io_fact"]
     assert not (tmp_path / "_env" / "src" / "generated_big_module.py").exists()
 
 
@@ -489,6 +553,28 @@ async def test_code_helper_small_project_source_write_allowed(tmp_path):
     assert (tmp_path / "_env" / "src" / "small_stub.py").read_text(encoding="utf-8")
 
 
+async def test_main_thread_existing_staged_project_copy_write_returns_apply_fact(tmp_path):
+    import json
+
+    staged = tmp_path / "_env" / "pricing.py"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("def price():\n    return 1\n", encoding="utf-8")
+
+    result_text = await _handle_workspace(str(tmp_path), {
+        "action": "write",
+        "path": "_env/pricing.py",
+        "content": "def price():\n    return 2\n",
+    })
+
+    result = json.loads(result_text)
+    assert result["ok"] is True
+    assert result["staged_project_copy"] is True
+    assert result["staged_project_path"] == "_env/pricing.py"
+    assert "env_apply_replace" in result["pending_project_apply_fact"]
+    assert "env_diff" in result["suggested_next_tools"]
+    assert staged.read_text(encoding="utf-8") == "def price():\n    return 2\n"
+
+
 async def test_main_thread_project_framework_write_requests_delegate(tmp_path):
     import json
 
@@ -503,10 +589,9 @@ async def test_main_thread_project_framework_write_requests_delegate(tmp_path):
     assert result["recovery_action"] == "switch_tool"
     assert result["retry_same_tool"] is False
     assert result["recommended_tools"] == ["delegate"]
-    assert result["suggested_next_action"]["tool"] == "delegate"
-    task = result["suggested_next_action"]["task_template"]
-    assert "helper-owned staged output" in task["prompt"]
-    assert "internal handoff" in task["prompt"]
+    assert result["recovery_facts"]["same_goal"] is True
+    assert "helper-owned staged output" in result["recovery_facts"]["helper_prompt_fact"]
+    assert "internal handoff" in result["recovery_facts"]["helper_prompt_fact"]
     assert not (tmp_path / "db_index_project" / "_shared" / "CONTRACT.md").exists()
 
 
@@ -521,7 +606,7 @@ async def test_main_thread_project_source_write_requests_delegate(tmp_path):
     result = json.loads(result_text)
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_project_artifact_should_delegate"
-    assert result["suggested_next_action"]["task_template"]["kind"] == "code"
+    assert result["recovery_facts"]["matching_helper_kind"] == "code"
     assert not (tmp_path / "db_index_project" / "_shared" / "index_base.py").exists()
 
 
@@ -536,7 +621,7 @@ async def test_main_thread_root_project_script_write_requests_delegate(tmp_path)
     result = json.loads(result_text)
     assert result["ok"] is False
     assert result["error_kind"] == "main_thread_project_artifact_should_delegate"
-    assert result["suggested_next_action"]["task_template"]["kind"] == "code"
+    assert result["recovery_facts"]["matching_helper_kind"] == "code"
     assert not (tmp_path / "run_all_benchmarks.py").exists()
 
 
@@ -555,11 +640,11 @@ async def test_main_thread_project_benchmark_run_requests_delegate(tmp_path):
     assert result["recovery_action"] == "switch_tool"
     assert result["retry_same_tool"] is False
     assert result["recommended_tools"] == ["delegate"]
-    assert result["suggested_next_action"]["task_template"]["kind"] == "code"
+    assert result["recovery_facts"]["matching_helper_kind"] == "code"
     assert result["blocked_scripts"] == ["run_all_benchmarks.py"]
 
 
-async def test_main_thread_pytest_verification_run_still_allowed(tmp_path, monkeypatch):
+async def test_main_thread_pytest_verification_run_requests_delegate(tmp_path, monkeypatch):
     import json
 
     from app.llm.tools import registry
@@ -574,8 +659,9 @@ async def test_main_thread_pytest_verification_run_still_allowed(tmp_path, monke
         "timeout_sec": 60,
     })
     result = json.loads(result_text)
-    assert result["ok"] is True
-    assert result["command"] == "python -m pytest tests/test_benchmark.py"
+    assert result["ok"] is False
+    assert result["error_kind"] == "main_thread_workspace_run_should_delegate"
+    assert result["recovery_facts"]["matching_helper_kind"] == "code"
 
 
 async def test_main_thread_scratch_text_write_still_allowed(tmp_path):

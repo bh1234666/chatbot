@@ -32,11 +32,17 @@ from openai import AsyncOpenAI, APIStatusError, APITimeoutError, APIConnectionEr
 
 from app.config import settings
 from app.core import debug
-from app.core.prompt_cache_observer import describe_prompt_cache_input
+from app.core.prompt_cache_observer import (
+    common_prefix_bytes,
+    describe_prompt_cache_input,
+    serialized_prompt_cache_input,
+)
 from app.llm.tool_pairing import repair_tool_call_pairing as _repair_tool_call_pairing_impl
 from app.llm.tools.workspace import reset_fix_hint_counts  # Bug #30: hint 重复计数
 
 log = logging.getLogger(__name__)
+
+_last_prompt_shape_serialized: dict[tuple[str, str, str], bytes] = {}
 
 
 META_JUDGE_SYSTEM = (
@@ -94,12 +100,44 @@ def _helper_tool_args_are_write_like(tool_name: str, args_text: str) -> bool:
     return False
 
 
+_HELPER_SOURCE_WRITE_EXTS = (
+    ".py", ".pyw", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx",
+    ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".cs", ".kt", ".swift",
+)
+
+
+def _helper_tool_args_source_write_target(tool_name: str, args_text: str) -> bool:
+    """Best-effort source-file target detection for partial streamed args."""
+    if (tool_name or "").strip() != "workspace":
+        return False
+    head = (args_text or "")[:4096].lower()
+    match = re.search(r'"path"\s*:\s*"([^"]+)"', head)
+    if not match:
+        return False
+    path = match.group(1).replace("\\", "/")
+    if path.endswith((".py", ".pyw")):
+        # A document helper may create a small Python script that writes a DOCX.
+        # Treat that as write-like document assembly, not project source ownership.
+        if (
+            (".docx" in head or "python-docx" in head)
+            and ("from docx import" in head or "import docx" in head)
+            and any(s in head for s in ("document(", "doc.save", "save("))
+        ):
+            return False
+    return any(path.endswith(ext) for ext in _HELPER_SOURCE_WRITE_EXTS)
+
+
 def _helper_tool_arg_bloat_thresholds(tool_name: str, args_text: str) -> tuple[int, int, str]:
     """Return warn/close thresholds for streamed helper tool arguments."""
     # Keep the old general guard tight enough to catch runaway search/read/todo bodies.
     helper_tool_arg_bloat_warn_at = 14_000
     helper_tool_arg_bloat_close_at = 24_000
     if _helper_tool_args_are_write_like(tool_name, args_text):
+        if _helper_tool_args_source_write_target(tool_name, args_text):
+            # Full source files already have a workspace-tool guard; close the
+            # stream before the model spends minutes emitting a body that the
+            # tool layer will ask it to stage/segment anyway.
+            return 10_000, 18_000, "source_write"
         # Writing one coherent code/prose artifact can legitimately exceed 24K in
         # JSON-escaped arguments. The tool result still has normal file-size and
         # ownership checks, so allow a larger first physical window before recovery.
@@ -150,7 +188,15 @@ def _extract_recent_artifact_facts_for_meta_judge(msgs: list[dict], *, max_items
         candidates: list[str] = []
         if isinstance(data, dict):
             if data.get("outputs_complete") is True:
-                candidates.append("outputs_complete=true")
+                candidates.append("outputs_complete=true (file-presence fact)")
+            if data.get("producer_self_verified") is True:
+                candidates.append("producer_self_verified=true")
+            outputs_check = data.get("outputs_check")
+            if isinstance(outputs_check, dict):
+                if outputs_check.get("outputs_complete") is True:
+                    candidates.append("outputs_complete=true (file-presence fact)")
+                if outputs_check.get("producer_self_verified") is True:
+                    candidates.append("producer_self_verified=true")
             if data.get("quality_blocked_count") == 0:
                 candidates.append("quality_blocked_count=0")
             if data.get("path"):
@@ -196,6 +242,27 @@ def _log_prompt_cache_shape(
     """Log deterministic prompt/cache structure without logging full content."""
     try:
         shape = describe_prompt_cache_input(messages=messages, tools=tools)
+        local_lcp_payload: dict[str, Any] | None = None
+        try:
+            serialized = serialized_prompt_cache_input(messages=messages, tools=tools)
+            trace_id = debug.current_trace_id() or ""
+            key = (trace_id, str(label or ""), str(model or ""))
+            previous = _last_prompt_shape_serialized.get(key)
+            _last_prompt_shape_serialized[key] = serialized
+            if previous is not None:
+                common = common_prefix_bytes(previous, serialized)
+                denominator = max(1, min(len(previous), len(serialized)))
+                local_lcp_payload = {
+                    "trace_id": trace_id,
+                    "label": label,
+                    "model": model,
+                    "common_prefix_bytes": common,
+                    "previous_bytes": len(previous),
+                    "current_bytes": len(serialized),
+                    "common_prefix_percent": round(common * 100 / denominator, 4),
+                }
+        except Exception:
+            local_lcp_payload = None
         try:
             from app.core import metrics as _metrics
             _metrics.record_prompt_shape(
@@ -222,6 +289,8 @@ def _log_prompt_cache_shape(
             "system_sections": shape.get("system_sections", []),
             "message_sections": shape.get("message_sections", []),
         }
+        if local_lcp_payload is not None:
+            payload["local_adjacent_common_prefix"] = local_lcp_payload
         if getattr(settings, "debug_prompt_cache_full_shape", False):
             payload["messages"] = shape["messages"]
         debug.log(
@@ -234,6 +303,17 @@ def _log_prompt_cache_shape(
             ),
             payload,
         )
+        if local_lcp_payload is not None:
+            debug.log(
+                "llm.prompt_cache_lcp",
+                (
+                    f"{label}: model={model} local_common_prefix="
+                    f"{local_lcp_payload['common_prefix_percent']}% "
+                    f"bytes={local_lcp_payload['common_prefix_bytes']}/"
+                    f"{min(local_lcp_payload['previous_bytes'], local_lcp_payload['current_bytes'])}"
+                ),
+                local_lcp_payload,
+            )
     except Exception:
         pass
 

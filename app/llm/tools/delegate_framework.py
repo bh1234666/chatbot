@@ -121,6 +121,14 @@ def format_helper_request_envelope(task: dict) -> str:
     expected_outputs = normalize_string_list(task.get("expected_outputs"), max_items=40)
     write_scopes = normalize_string_list(task.get("write_scopes"), max_items=30)
     acceptance_checks = normalize_string_list(task.get("acceptance_checks") or task.get("checks"))
+    dispatch_reason = str(
+        task.get("dispatch_reason")
+        or task.get("routing_reason")
+        or task.get("delegation_reason")
+        or ""
+    ).strip()
+    if len(dispatch_reason) > 1200:
+        dispatch_reason = dispatch_reason[:1200].rstrip() + "..."
     kind = str(task.get("kind") or "code").strip() or "code"
     mode = str(task.get("mode") or "easy").strip() or "easy"
     task_id = str(task.get("task_id") or "").strip() or "unnamed"
@@ -136,12 +144,18 @@ def format_helper_request_envelope(task: dict) -> str:
         f"- fork_from: {fork_from or 'none'}\n\n"
         "### Shared Framework Contract\n"
         f"{contract or 'Not provided. If this task depends on a shared interface, schema, outline, evidence map, validation plan, or merge order, report that the framework is missing instead of inventing one.'}\n\n"
+        "### Main Dispatch Reason\n"
+        f"{dispatch_reason or 'Not provided. Follow the explicit task envelope and report any boundary, kind, or split concern as a fact.'}\n\n"
         "### Transferred Or Readable Files\n"
         f"{_bullet_list(input_files, empty='Not specified. Inspect only concrete paths provided in the request or existing workspace evidence.')}\n\n"
         "### Expected Outputs\n"
         f"{_bullet_list(expected_outputs, empty='No concrete output files declared. Return a precise report and note any files that should have been declared.')}\n\n"
         "### Writable Project Scopes\n"
         f"{_bullet_list(write_scopes, empty='Same as expected outputs. Ask the main process before editing other staged project paths.')}\n\n"
+        "### Project Visibility Fact\n"
+        "In environment project work, project validators and check scripts read the real project/workspace state. "
+        "Bare output filenames are chat-workspace artifacts. Outputs that must become project-visible should be declared and produced as `_env/<project-relative-path>` staged files for main acceptance/apply, or reported as needing env_apply_* by the main process.\n\n"
+        "项目验收可见产物需要 `_env/<项目相对路径>` 暂存输出或主进程 env_apply_*；裸文件名只是聊天工作区产物。\n\n"
         "### Acceptance Checks\n"
         f"{_bullet_list(acceptance_checks, empty='Infer focused local checks from the request, then state exactly what was verified.')}\n\n"
         "### Request Content\n"
@@ -450,10 +464,11 @@ def broad_framework_guard_warnings(tasks: list[dict]) -> list[dict]:
                 "issue": "framework_producer_mixed_with_consumers",
                 "severity": "high",
                 "task_ids": [str(t.get("task_id") or "?") for t in missing_consumers[:20]],
-                "suggested_action": "finish_framework_then_respawn_consumers",
-                "suggestion": (
-                    "Finish the framework/spec helper first. After it completes, pass the resulting compact contract through each consumer task's `framework` field.\n\n"
-                    "先完成框架 helper，再把框架契约放入每个消费型 helper 的 framework 字段。"
+                "observed_framework_dependency_fact": (
+                    "A framework/spec producer is in the same batch as consumer helpers, and those consumers do not carry "
+                    "a concrete `framework` field yet. Consumers need the compact contract as task-envelope evidence before "
+                    "their outputs can be compared or merged reliably.\n\n"
+                    "观察到框架生产者与消费者同批，消费者尚无 framework 字段；消费型 helper 需要框架契约事实。"
                 ),
             })
 
@@ -507,11 +522,12 @@ def broad_framework_guard_warnings(tasks: list[dict]) -> list[dict]:
             "issue": "missing_framework_for_peer_fanout",
             "severity": "high",
             "task_ids": [str(t.get("task_id") or "?") for t in comparable[:20]],
-            "suggested_action": "create_framework_contract_first",
-            "suggestion": (
-                "Create a shared framework contract or spec first, then respawn peer helpers with the `framework` field and bounded slice prompts. "
-                "The framework should define interfaces/schema, evidence map, validation checks, ownership, merge order, and an exact output matrix for each downstream helper: task_id, kind, mode, input_files, expected_outputs, and final merge/apply target. Treat `_helpers_shared/...` as handoff evidence, not as the final user-facing artifact.\n\n"
-                "先建立共享框架契约，再给同类 helper 传 framework 字段和明确分片。"
+            "observed_framework_gap_fact": (
+                "Several peer helpers appear to produce comparable slices, but their task envelopes do not include a shared "
+                "`framework` field. A comparable fan-out needs common interfaces/schema, evidence map, validation checks, "
+                "ownership, merge order, and output matrix facts: task_id, kind, mode, input_files, expected_outputs, and final merge/apply target. "
+                "`_helpers_shared/...` is handoff evidence, not a final user-facing artifact.\n\n"
+                "观察到同类分片缺少共享 framework 字段；横向可比工作需要共同接口、schema、验收和合并事实。"
             ),
         })
 
@@ -520,11 +536,13 @@ def broad_framework_guard_warnings(tasks: list[dict]) -> list[dict]:
             "task_id": str(task.get("task_id") or "?"),
             "issue": "overconcentrated_framework_task",
             "severity": "high",
-            "suggested_action": "compact_framework_contract_only",
-            "suggestion": (
-                "The first framework helper should produce a compact contract, inventory, interfaces, schemas, ownership boundaries, and validation plan. "
-                "It must list the exact downstream output matrix: task_id, kind, mode, input_files, expected_outputs, and merge/apply target. Keep the contract structural: slots, dependencies, ownership, and acceptance. Move implementation bodies, long scripts, experiments, evidence-backed claims, citations, conclusions, final-value tables, charts, and final documents into later slice helpers that receive this contract through the `framework` field. `_helpers_shared/...` is handoff evidence; final deliverables must later be assembled into non-shared files or `_env/...` project paths.\n\n"
-                "框架 helper 只负责紧凑契约、槽位、依赖、归属和验收；实质内容在后续分片完成。"
+            "observed_framework_scope_fact": (
+                "This framework helper envelope is large enough to include likely implementation, experiment, evidence, chart, "
+                "or final-document work in addition to the structural contract. A framework contract is most reliable when it "
+                "stays compact: inventory, interfaces, schemas, ownership boundaries, validation plan, slots, dependencies, "
+                "acceptance, and downstream output matrix. `_helpers_shared/...` is handoff evidence; final deliverables need "
+                "non-shared files or `_env/...` project paths.\n\n"
+                "观察到框架任务可能混入实质产出；框架契约应保持结构化、紧凑、可传递。"
             ),
             "signals": {
                 "prompt_chars": len(str(task.get("prompt") or "")),
@@ -539,26 +557,28 @@ def broad_framework_guard_warnings(tasks: list[dict]) -> list[dict]:
         has_framework_contract = task_has_framework(task)
         looks_like_framework_reference = _looks_like_framework_reference(task)
         if has_framework_contract and not looks_like_framework_reference:
-            suggested_action = "split_using_existing_framework"
-            suggestion = (
-                "This helper already has a framework contract, but still owns too many weakly coupled responsibilities. "
-                "Keep the same framework and respawn bounded slice helpers by module, chapter, algorithm, source range, data shard, experiment, or verification target. "
-                "Each slice should have a narrow prompt, concrete expected outputs, and the same framework field; keep final assembly/apply as its own explicit slice when the user asked for a report, document, or project files.\n\n"
-                "已有框架不等于可以集中长任务；保留 framework，按模块/章节/算法/数据分片。"
+            framework_boundary_fact = (
+                "This helper already has a framework contract, but the envelope still appears to own many weakly coupled "
+                "responsibilities. Bounded slice boundaries may exist by module, chapter, algorithm, source range, data shard, "
+                "experiment, or verification target. Final assembly/apply remains a separate explicit slice when the user asked "
+                "for a report, document, or project files.\n\n"
+                "观察到已有 framework 但职责仍集中；可能存在模块、章节、算法、数据或验证分片边界。"
             )
+            observed_framework_state = "has_framework"
         else:
-            suggested_action = "split_after_framework"
-            suggestion = (
-                "This helper owns too many weakly coupled responsibilities. First define or reference a shared framework contract, then split into bounded helpers by module, chapter, data shard, experiment, source range, or verification target. "
-                "Long outputs should be produced as inspectable segments.\n\n"
-                "任务职责过集中；先框架后分片，长产物按可检查片段输出。"
+            framework_boundary_fact = (
+                "This helper appears to own many weakly coupled responsibilities without a concrete framework field. "
+                "A shared framework fact can make later module, chapter, data-shard, experiment, source-range, or verification-target "
+                "slices comparable and mergeable. Long outputs are easier to inspect when produced as bounded segments.\n\n"
+                "观察到职责集中且缺少 framework 字段；共享框架事实可让后续分片可比较、可合并。"
             )
+            observed_framework_state = "missing_framework"
         warnings.append({
             "task_id": str(task.get("task_id") or "?"),
             "issue": "overconcentrated_helper_task",
             "severity": "high",
-            "suggested_action": suggested_action,
-            "suggestion": suggestion,
+            "observed_framework_state": observed_framework_state,
+            "observed_framework_boundary_fact": framework_boundary_fact,
             "signals": {
                 "prompt_chars": len(str(task.get("prompt") or "")),
                 "expected_outputs": len(task.get("expected_outputs") or []),
@@ -570,8 +590,15 @@ def broad_framework_guard_warnings(tasks: list[dict]) -> list[dict]:
     return warnings
 
 
-def blocking_framework_warnings(warnings: list[dict], *, trace_total: int = 0, cap: int = 2) -> list[dict]:
-    """Return framework warnings that should block this spawn attempt."""
+def high_priority_framework_warnings(warnings: list[dict], *, trace_total: int = 0, cap: int = 2) -> list[dict]:
+    """Return high-priority framework facts for the guard LLM.
+
+    These facts no longer hard-block helper startup by themselves. Runtime
+    callers pass them as model-visible guard observations; only the guard LLM
+    may turn them into a hard intervention.
+
+    框架事实只供守卫判断；符号化检测本身不执行硬拦截。
+    """
     if trace_total >= cap:
         return []
     return [
@@ -584,3 +611,8 @@ def blocking_framework_warnings(warnings: list[dict], *, trace_total: int = 0, c
             "overconcentrated_helper_task",
         }
     ]
+
+
+def blocking_framework_warnings(warnings: list[dict], *, trace_total: int = 0, cap: int = 2) -> list[dict]:
+    """Compatibility alias for older tests/tools; does not imply runtime blocking."""
+    return high_priority_framework_warnings(warnings, trace_total=trace_total, cap=cap)

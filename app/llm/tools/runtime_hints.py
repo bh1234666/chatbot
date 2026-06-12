@@ -34,6 +34,8 @@ def helper_tool_call_bloat_checkpoint(
         f"You are a {kind} helper at iteration {iteration}. The current {tool} tool call grew to "
         f"about {arg_chars} argument characters before dispatch and was stopped locally to avoid a "
         "runaway single-call body. Treat this as a recoverable planning signal. The next tool call must be much smaller than the stopped call. For long "
+        "Office deliverables such as DOCX/PPTX/XLSX, the Office tool can write and append structured blocks directly; this is available alongside script-based assembly. "
+        "If you choose a custom script, account for the cost of streaming the script body and keep the script or section payload bounded. For long "
         "markdown/text/prose artifacts, use this protocol: first write a compact outline or skeleton, "
         "then append or edit one named section at a time, keeping each tool-call content block under "
         "about 2,000-4,000 characters. If a single artifact needs many long sections, split it into "
@@ -64,6 +66,7 @@ def helper_repeated_tool_call_bloat_checkpoint(
         f"You are a {kind} helper at iteration {iteration}. The {tool} tool call has reached "
         f"the large-argument recovery path {count} times in this helper run; the latest stopped "
         f"call was about {arg_chars} argument characters. Treat this as a convergence checkpoint. "
+        "Fact: for Office deliverables, office(action='write'/'append'/'replace_block', ...) calls can preserve structured document intent without first generating a long python-docx script, while a script remains an available choice when it is justified by formatting or validation needs. "
         "Choose the next action to preserve useful work in a bounded handoff shape: write or update "
         "one compact evidence, source, section, or progress file; verify that one file when cheap; "
         "then finalize with PASS if the helper contract is satisfied or PARTIAL if named gaps remain. "
@@ -160,14 +163,113 @@ def helper_read_to_write_checkpoint(
         "[SYSTEM_HINT/helper_read_to_write_checkpoint]\n"
         f"You are a {kind} helper at iteration {iteration}. Your recent workflow has spent about "
         f"{recent_reads} consecutive tool results on reading, searching, or inspecting without writing the "
-        "expected artifact. Treat this as enough evidence for a first handoff draft unless a named source is "
-        "still missing. Write or update the expected output now with the verified sections you already have. "
+        "expected artifact or read-helper evidence file. Treat this as enough evidence for a first handoff draft unless a named source is "
+        "still missing. Write or update the expected output now with the verified sections you already have. For a read helper, the expected output is usually a compact `*_evidence.txt` or `*_long_report.md` with PASS/PARTIAL/FAIL, covered files or ranges, unresolved gaps, and representative evidence. "
         "If the expected artifact now satisfies the contract, finish with PASS and exact paths. If coverage is "
         "incomplete, mark the missing section explicitly inside the artifact or in a PARTIAL handoff, then "
         "continue only with a targeted read for that named gap. For merge or synthesis tasks, "
         "create the merged file when the current evidence is sufficient instead of waiting for perfect source coverage; create the merged file "
         "from available sections, then page missing sections into it.\n\n"
         "连续读取但未写产物时，先把已有证据写成可验收草稿或 PARTIAL，再只针对明确缺口继续。"
+    )
+
+
+def helper_office_write_convergence_checkpoint(
+    *,
+    iteration: int,
+    helper_kind: str | None,
+    artifact: str,
+    write_count: int,
+) -> str:
+    kind = (helper_kind or "helper").strip() or "helper"
+    path = (artifact or "the Office artifact").strip() or "the Office artifact"
+    return (
+        "[SYSTEM_HINT/helper_office_write_convergence]\n"
+        f"You are a {kind} helper at iteration {iteration}. The same Office artifact `{path}` "
+        f"has already had {write_count} successful write/append/edit-style tool calls in this helper run. "
+        "Treat this as a document-build convergence checkpoint, not as an automatic stop or forced batch rule. Compare the "
+        "current artifact, original task contract, expected outputs, required sections/tables/images, and "
+        "available evidence. Fact: office(action='write'/'append', ...) can carry multiple coherent blocks within the active "
+        "adaptive size limits, and the tool reports arg_size_warning when those limits matter. If the artifact "
+        "now satisfies the requested deliverable, finalize with a PASS report, exact Output files JSON, and "
+        "verification facts. If one acceptance gap remains, name that gap and take a targeted repair or verification "
+        "step. If the remaining gap cannot be closed with available evidence, return a PARTIAL handoff with the "
+        "specific continuation request. If several related sections remain and the JSON payload stays reliable, a "
+        "coherent batched call is available; if smaller calls are safer for quoting, tables, or verification, keep "
+        "them bounded and evidence-driven.\n\n"
+        "Office 文档已多次成功写入：这是收敛事实；可按剩余缺口、当前上限和 JSON 稳定性决定批量或小步修复。"
+    )
+
+
+def helper_office_read_convergence_checkpoint(
+    *,
+    iteration: int,
+    helper_kind: str | None,
+    artifact: str,
+    read_count: int,
+) -> str:
+    kind = (helper_kind or "helper").strip() or "helper"
+    path = (artifact or "the Office artifact").strip() or "the Office artifact"
+    return (
+        "[SYSTEM_HINT/helper_office_read_convergence]\n"
+        f"You are a {kind} helper at iteration {iteration}. The same Office artifact `{path}` "
+        f"has already had {read_count} successful read/inspect-style checks in this helper run. "
+        "This is a factual convergence signal, not a rule that forbids another read. A successful "
+        "office(action='read', ...) normally provides headings plus paragraph/block, table, and image counts. "
+        "Before reading the same artifact again, compare those existing structural facts with the "
+        "current acceptance contract and evidence already gathered. If they are enough, finalize "
+        "with PASS, the exact path, structure facts, and Output files JSON. If one named detail is "
+        "missing, use a targeted block/section check or repair step rather than another whole-artifact "
+        "read. If the artifact changed since the last read, state that changed fact and inspect the "
+        "changed area. If useful evidence exists but a required acceptance point remains unresolved, "
+        "return PARTIAL with the exact gap and continuation request.\n\n"
+        "同一 Office 产物已多次读取：这是收敛事实；若结构事实足够则交付，若仍有缺口则只针对明确缺口读取或修复。"
+    )
+
+
+def main_helper_completion_checkpoint(
+    *,
+    iteration: int,
+    files: list[str] | None = None,
+    facts: list[str] | None = None,
+    warning_count: int = 0,
+    contract_snapshot: str = "",
+) -> str:
+    clean_files = [
+        str(item).strip()
+        for item in (files or [])
+        if str(item).strip()
+    ][:8]
+    clean_facts = [
+        str(item).strip()
+        for item in (facts or [])
+        if str(item).strip()
+    ][:6]
+    file_text = ", ".join(f"`{item}`" for item in clean_files) or "the helper output file(s)"
+    fact_text = "; ".join(clean_facts) or "helper producer_self_verified/output facts"
+    warning_text = (
+        f" The helper result also contains {warning_count} quality warning(s); weigh those warnings against the current acceptance contract."
+        if warning_count
+        else " No quality warnings were reported by the helper result."
+    )
+    contract_text = (
+        f"\nCurrent task contract snapshot:\n{contract_snapshot}\n"
+        if str(contract_snapshot or "").strip()
+        else ""
+    )
+    return (
+        "[SYSTEM_HINT/main_helper_completion_checkpoint]\n"
+        f"You are the main process at iteration {iteration}. A helper returned completed output evidence for {file_text}. "
+        f"Known facts from the helper/tool result: {fact_text}.{warning_text} "
+        f"{contract_text}"
+        "Treat this as model-visible evidence. Trust the successful helper's producer-owned content judgment when the result is clean. "
+        "Do not re-read helper-produced text, Markdown, source, or project artifacts, and do not re-run checks over helper-owned artifacts merely to validate them again. If the active contract is covered by "
+        "the helper report, output map, and helper-run check facts, finalize with PASS from those compact facts and exact deliverables. "
+        "If a separate boundary remains, keep it outside helper-owned content QA: explicit user display/quote requests, main-owned apply/transfer/accounting, "
+        "or helper warnings/contradictions. Send helper-owned quality, verifier, build, or acceptance gaps back to the producer helper or a verify helper; "
+        "use main-thread inspection only for narrow main-owned runtime/file-management facts. Report PARTIAL only for an exact unresolved non-helper-trust boundary, "
+        "not for uninspected helper-owned content.\n\n"
+        "helper 自检且干净完成时信任其内容和结构判断；主进程用精简事实交付，不复读正文或重跑 helper 自有检查；helper 产物质量缺口交回生产 helper 或 verify helper。"
     )
 
 
@@ -218,14 +320,34 @@ def main_finalize_window(iteration: int, hard_cap: int) -> str:
     )
 
 
+def main_env_run_convergence_hint(
+    *,
+    family: str,
+    count: int,
+) -> str:
+    label = (family or "env_run family").strip() or "env_run family"
+    return (
+        "[SYSTEM_HINT/main_env_run_convergence]\n"
+        f"Current loop fact: the main process has run {count} env_run commands in the same evidence family "
+        f"`{label}`. These command results are already available in the tool transcript. Before running another "
+        "command in the same family, compare the existing stdout/stderr, schema/query/verifier facts, active task, "
+        "and remaining named gap. If the existing evidence is enough, move to the artifact, verifier, plan, or final "
+        "step. If one fact is still missing, run one targeted command that names that missing fact. This is a "
+        "convergence fact, not a forced stop.\n\n"
+        "主进程同类 env_run 已多次执行；先比较已有 stdout/schema/query/verifier 事实和剩余缺口，再决定是否还需一个有明确目标的命令。"
+    )
+
+
 SOURCE_WRITE_DELEGATION_HINT = (
     "[SYSTEM_HINT/source_write_delegation]\n"
     "The last model output started a substantial project-file write from the main thread. "
     "That path was stopped before dispatch because substantial source authoring, "
     "multi-file edits, benchmark scripts, and iterative debugging belong to a code helper. "
-    "Recover by changing the work shape rather than repeating the same write call or shortening it just to bypass the stop. "
-    "Continue by preserving the latest stable evidence, fetching any needed project files, "
-        "and immediately spawning or resuming focused helpers with a helper request envelope: "
+    "The recoverable facts are the target path, content size, latest stable evidence, and whether the active task still "
+    "needs durable project/source work. Repeating the same write call or shortening content only to bypass the stop does "
+    "not add evidence. "
+    "If the active task still needs durable project/source work, "
+        "use a focused helper request envelope: "
         "`task_id`, `kind`, `mode`, `framework`, `input_files`, focused `prompt`, "
         "`expected_outputs`, and `acceptance_checks`. For a new project, large feature, "
         "analysis report, or long document, the shared framework, outline, interface/schema, "
@@ -233,12 +355,12 @@ SOURCE_WRITE_DELEGATION_HINT = (
         "project files, source-like content, or more than a compact plan. The main thread may "
         "state the contract in `agent_state` and in delegate `framework` fields, while helpers own "
         "shared interfaces, framework files, benchmark harnesses, source modules, and "
-        "long sections. Delegate one coherent vertical slice or a small batch of "
+        "long sections. A recoverable shape is one coherent vertical slice or a small batch of "
         "independent files/sections instead of streaming a long body from the main thread. "
-    "If a helper already owns the failing file or section, resume that "
+    "If a helper already owns the failing file or section, the preserved workspace may support resuming that "
     "same task_id with the same envelope fields and exact failure output. The main thread "
-    "should inspect helper outputs, apply project diffs or merge sections, and run final verification.\n\n"
-    "主进程长产物写入被停止；框架文件、共享接口、脚手架和源码也应由 helper 产出。主进程只记录契约、派发/续作分片、验收、合并和最终验证。"
+    "can consume helper reports, apply project diffs or merge sections, and keep final acceptance/accounting compact.\n\n"
+    "主进程长产物写入被停止；框架文件、共享接口、脚手架和源码也应由 helper 产出并自验。主进程只记录契约、派发/续作分片、应用、合并和验收记账。"
 )
 
 
@@ -276,30 +398,28 @@ LLM_REPEAT_TIMEOUT_RECOVERY_HINT = (
 
 def retry_required_before_final(current: int, maximum: int, retry_lines: list[str]) -> str:
     return (
-        "[SYSTEM_HINT/retry_required_before_final]\n"
+        "[SYSTEM_HINT/unresolved_helper_facts_before_final]\n"
         f"Recovery checkpoint {current}/{maximum}. "
         "The latest delegate result shows recoverable incomplete helper work, and the target "
-        "deliverable has not been confirmed complete. Continue with delegate before finalizing: "
-        "reuse the same task_id and preserved workspace, upgrade mode when the evidence shows "
-        "capability or repeated-error gaps, or split the work when the scope is too broad. "
-        "Only end now if the user interrupted, the deliverable is already verified complete, "
-        "or the remaining gap is verified unrecoverable and must be reported as incomplete.\n"
+        "deliverable has not been confirmed complete. This checkpoint records facts for the next "
+        "decision; it does not by itself choose a tool. Decide from the active task and evidence "
+        "whether to resume the same task_id, escalate or split the gap, verify an already-complete "
+        "deliverable, or finish with an explicit incomplete-state summary.\n"
         + "\n".join(retry_lines)
-        + "\n\nhelper 未完成且产物未确认时，优先续作、升级、拆分，或说明已验证的不可恢复缺口。"
+        + "\n\nhelper 未完成事实检查点；由模型根据当前任务和证据决定续作、升级/拆分、验收或说明未完成。"
     )
 
 
 def retry_still_required_before_final(retry_lines: list[str]) -> str:
     return (
-        "[SYSTEM_HINT/retry_still_required_before_final]\n"
-        "A recoverable helper gap is still blocking final synthesis. The previous reminders were "
-        "not satisfied, so final synthesis should wait for recovery. Make a delegate "
-        "tool call now using the listed same-task resume/escalation parameters, or split the same "
-        "coverage gap into a replacement helper with a clear framework and acceptance checks. Only "
-        "finish without retry if the user explicitly interrupted or a tool result proves the gap is "
-        "unrecoverable.\n"
+        "[SYSTEM_HINT/unresolved_helper_facts_still_visible]\n"
+        "Recovery checkpoints were already shown, but the same helper gap remains. This is a "
+        "factual checkpoint, not a forced tool decision: the model should decide whether to retry "
+        "the same task_id, split/escalate the gap, or finish with an explicit incomplete-state "
+        "summary when the available evidence supports that. Success still requires verified "
+        "deliverables or concrete tool evidence.\n"
         + "\n".join(retry_lines)
-        + "\n\n可恢复 helper 缺口仍阻塞收束；现在必须调用 delegate 续作、升级或拆分同一缺口。"
+        + "\n\n恢复检查点已用尽；陈述缺口事实，由模型决定续作、拆分/升级，或基于证据说明未完成。"
     )
 
 
@@ -307,9 +427,9 @@ def repeated_failure(stuck_reason: str) -> str:
     return (
         f"[SYSTEM_HINT/repeated_failure]\n"
         f"Repeated failure pattern detected: {stuck_reason}\n\n"
-        f"Recover by reading the latest failure evidence, identifying the concrete error and next verifiable step, "
-        f"then changing strategy. If partial results are useful, summarize them in the plan and record remaining gaps "
-        f"in internal_note. If a clear repair path remains and the task matters, consider escalation or a better helper split.\n\n"
+        f"Latest failure evidence, the concrete error, and the next verifiable step are the relevant facts for deciding whether "
+        f"to change strategy. Useful partial results can be summarized in the plan with remaining gaps in internal_note. "
+        f"A clear repair path and task importance can justify escalation or a better helper split.\n\n"
         f"检测到反复失败时，基于最新证据换策略或升级。"
     )
 
@@ -318,15 +438,15 @@ def retry_before_finalize(task_names: str, *, short: bool = False) -> str:
     if short:
         return (
             "[SYSTEM_HINT/retry_before_finalize]\n"
-            f"A helper next_action is available for task(s): {task_names}. Continue or escalate first before ending.\n\n"
-            "先处理可续作任务，再结束。"
+            f"A helper next_action is available for task(s): {task_names}. Compare it with the active task before ending.\n\n"
+            "存在 helper 续作事实；先与当前任务契约对照。"
         )
     return (
         "[SYSTEM_HINT/retry_before_finalize]\n"
         f"A helper next_action is available for task(s): {task_names}. "
-        "Continue via delegate using the suggested resume/escalation parameters before finalizing, "
-        "unless the user interrupted, deliverables are already sufficient, or retry has proven unrecoverable.\n\n"
-        "有 next_action 时优先续作，满足交付或不可恢复时再总结。"
+        "This is recovery evidence, not an automatic decision. Compare the suggested resume/escalation parameters "
+        "with the active task, verified deliverables, user interruptions, and retry history before finalizing.\n\n"
+        "有 next_action 是恢复事实；由模型结合当前任务、交付物和重试历史决定续作或收束。"
     )
 
 
@@ -335,8 +455,8 @@ def strategy_recovery(stuck_reason: str, *, consecutive: bool = False) -> str:
         return (
             f"[SYSTEM_HINT/strategy_recovery]\n"
             f"The workflow is still repeating a failed pattern after several iterations: {stuck_reason}. "
-            "Pause the current tactic and choose a different recoverable path. Prefer a helper "
-            "resume or hard-mode retry for the same narrow task when prior work is useful; split "
+            "This is evidence that the current tactic may need a different recoverable path. A helper "
+            "resume or hard-mode retry can fit the same narrow task when prior work is useful; split "
             "the task if the boundary is too broad; use targeted verification before accepting "
             "or rejecting helper output. Continue only if the next action can add evidence.\n\n"
             "连续卡住时换策略：续作、升级、拆分或验证，不直接结束。"

@@ -68,6 +68,7 @@ from app.core.message_routing import (
     is_direct_short_reply_request as _is_direct_short_reply_request,
     is_negative_feedback as _is_negative_feedback,
     is_trivial_message as _is_trivial_message,
+    observed_route_text_facts as _observed_route_text_facts,
 )
 from app.core.meta_judge_state import (
     record_cross_llm_outcome as _record_cross_llm_outcome,
@@ -110,15 +111,21 @@ def _append_round2_dynamic_user_tail(messages: list[dict], content: str) -> None
     payload = (content or "").strip()
     if not payload:
         return
-    block = (
+    header = (
         "## Round 2 Dynamic Task Guidance\n"
         "Read-only task-local context for this planning run. It preserves the system/persona frame while carrying current-request facts, preflight results, or routing hints.\n\n"
-        "本轮动态任务信息，只读；不改变系统与人设框架。\n\n"
+        "本轮动态任务信息，只读；不改变系统与人设框架。"
+    )
+    block = (
+        header
+        + "\n\n"
         + payload
     )
     for idx in range(len(messages) - 1, -1, -1):
         if messages[idx].get("role") == "user":
             existing = str(messages[idx].get("content") or "")
+            if "## Round 2 Dynamic Task Guidance" in existing:
+                block = payload
             messages[idx] = {
                 **messages[idx],
                 "content": existing + "\n\n---\n\n" + block if existing else block,
@@ -135,6 +142,143 @@ def _clip_middle_text(text: str, limit: int) -> str:
     head = max(1, limit // 2)
     tail = max(1, limit - head - 64)
     return value[:head] + "\n[...middle omitted for task-anchor budget...]\n" + value[-tail:]
+
+
+_EXPLICIT_CURRENT_TURN_CONSTRAINT_MARKERS = (
+    "use ", "using ", "must", "required", "before", "after", "first", "then",
+    "reproduce", "observe", "confirm", "verify", "validate", "test",
+    "tool", "browser", "host", "do not", "don't", "without",
+    "fit", "fits", "feasible", "budget", "mobility", "constraint", "constraints", "risk",
+    "使用", "必须", "需要", "先", "再", "然后", "之前", "之后",
+    "复现", "观察", "确认", "验证", "测试", "工具", "浏览器", "不要", "不能",
+    "可行", "预算", "行动", "限制", "约束", "风险",
+)
+
+_CONSTRAINT_REVIEW_FACT_MARKERS = (
+    "fit", "fits", "feasible", "budget", "mobility", "constraint", "constraints",
+    "risk", "requirement", "requirements", "validation", "verify", "verified",
+    "可行", "预算", "行动", "限制", "约束", "风险", "要求", "验证",
+)
+
+_CONSTRAINT_REVIEW_LANGUAGE_MARKERS = (
+    "actually", "really", "tell me up front", "up front", "don't fudge", "do not fudge",
+    "doesn't", "does not", "won't", "will not", "can't", "cannot", "if anything",
+    "be honest", "honestly",
+    "如实", "直接说", "提前说", "不要勉强", "不要硬凑", "不能满足", "不符合", "不行",
+)
+
+_RECENT_TASK_EVIDENCE_MARKERS = (
+    "<bot_log", "<bot_log_brief", "Conversation History", "Recent Shared Messages",
+    "Historical tasks and deliverables", "plan_key_points", "plan_deliverables",
+    "verify_", "PASS:", "returncode", "artifact", "deliverable", "outputs_complete",
+    "accepted", "evidence",
+    "历史对话", "最近共享消息", "验证结果", "交付物",
+)
+
+_ASSURANCE_FOLLOWUP_MARKERS = (
+    "make sure", "confirm", "check that", "ensure", "double-check", "verify that",
+    "确认", "确保", "核实", "检查一下", "再检查", "复核",
+)
+_STATE_FOLLOWUP_MARKERS = (
+    "flag", "mark", "classify", "label", "note", "leave alone", "leave untouched",
+    "do not touch", "don't touch", "do not send", "don't send",
+    "标记", "归类", "分类", "注明", "记录", "保留不动", "不要碰", "别碰", "不发送",
+)
+
+
+def _has_current_turn_constraint_review_language(current_user_turn: str) -> bool:
+    """Return true when the current turn asks to compare prior work with constraints.
+
+    This is a routing fact only. It does not decide whether any constraint is
+    satisfied, violated, or important enough for the final answer.
+
+    只识别“约束/可行性复核”语言；不判断约束是否满足。
+    """
+    lowered = re.sub(r"\s+", " ", str(current_user_turn or "")).strip().lower()
+    if not lowered:
+        return False
+    has_constraint_fact = any(marker in lowered for marker in _CONSTRAINT_REVIEW_FACT_MARKERS)
+    has_review_language = any(marker in lowered for marker in _CONSTRAINT_REVIEW_LANGUAGE_MARKERS)
+    return bool(has_constraint_fact and has_review_language)
+
+
+def _has_current_turn_assurance_followup_language(current_user_turn: str) -> bool:
+    """Return true for assurance/check/state wording without deciding the answer."""
+    lowered = re.sub(r"\s+", " ", str(current_user_turn or "")).strip().lower()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in _ASSURANCE_FOLLOWUP_MARKERS) or any(
+        marker in lowered for marker in _STATE_FOLLOWUP_MARKERS
+    )
+
+
+def _should_route_constraint_review_to_round2(
+    current_user_turn: str,
+    base_messages: list[dict] | None,
+) -> bool:
+    """Keep recent-task constraint reviews out of the easy direct-reply path.
+
+    The predicate only states two facts:
+    - the current turn asks for an honesty/fit/feasibility boundary; and
+    - the visible prompt contains prior task or tool evidence to compare.
+
+    It does not choose the final answer and does not force a tool call.
+
+    当前轮要求复核约束且上下文已有历史任务证据时，不跳过 Round2。
+    """
+    if not _has_current_turn_constraint_review_language(current_user_turn):
+        return False
+    context_text = "\n".join(
+        str((msg or {}).get("content") or "")
+        for msg in (base_messages or [])
+        if isinstance(msg, dict)
+    )
+    if not context_text.strip():
+        return False
+    return any(marker in context_text for marker in _RECENT_TASK_EVIDENCE_MARKERS)
+
+
+def _explicit_current_turn_constraint_facts(
+    current_user_turn: str,
+    *,
+    max_items: int = 6,
+    max_chars_each: int = 360,
+) -> list[str]:
+    """Extract factual current-turn procedural constraints for task contracts.
+
+    This does not decide whether a constraint is feasible or already satisfied.
+    It preserves explicit user wording so the model and helpers can compare
+    later evidence against the current request instead of drifting to a
+    rewritten goal.
+
+    只摘录当前请求中显式工具、顺序、复现和验证约束；不替模型判断完成。
+    """
+    text = re.sub(r"\s+", " ", str(current_user_turn or "")).strip()
+    if not text:
+        return []
+    chunks = [
+        part.strip(" \t\r\n-;；")
+        for part in re.split(r"(?<=[。！？!?])\s+|[。！？!?]\s*", text)
+        if part.strip(" \t\r\n-;；")
+    ]
+    if not chunks:
+        chunks = [text]
+
+    facts: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        lowered = chunk.lower()
+        if not any(marker in lowered for marker in _EXPLICIT_CURRENT_TURN_CONSTRAINT_MARKERS):
+            continue
+        clipped = chunk[:max_chars_each].rstrip()
+        fact = f"Current user turn explicit constraint: {clipped}"
+        if fact in seen:
+            continue
+        seen.add(fact)
+        facts.append(fact)
+        if len(facts) >= max_items:
+            break
+    return facts
 
 
 def _build_active_task_contract_anchor(
@@ -159,11 +303,30 @@ def _build_active_task_contract_anchor(
         current_user_turn or "(empty current user turn)",
         "",
         "Active task resolution facts:",
-        "- The active task is the latest explicit user task unless the current turn is a continuation, correction, retry, completion, or follow-up instruction.",
-        "- For short follow-ups such as continue, fix, retry, finish, complete the previous task, or complete the task from when X happened, resolve the active task from this turn plus prior plan snapshots, toolchain cache, agent_state contracts, recent execution records, and concrete tool evidence.",
+        "- Resolve the active task from the current user turn plus maintained task_plan, toolchain cache, agent_state contracts, recent execution records, and concrete tool evidence.",
+        "- The latest user turn is a strong task fact, but it may be a continuation, correction, retry, completion, follow-up constraint, or reference to an earlier maintained task.",
+        "- Follow-up instructions include constraints or corrections about recent task evidence, artifacts, schema, validation, assumptions, or output, even when phrased as a reminder.",
+        "- For follow-ups such as continue, fix, retry, finish, complete the previous task, complete the task from when X happened, or double-check a recent task assumption, resolve the active task from this turn plus prior plan snapshots, toolchain cache, agent_state contracts, recent execution records, and concrete tool evidence.",
         "- Conversation history, recent activity, workspace listings, and previous delivery lists are background evidence. They can identify the active task when the user refers back to it, but they do not add deliverables by themselves.",
         "- Before final JSON, compare deliverables and key_points against the resolved active task and the verified evidence for that task.",
     ]
+
+    explicit_constraints = _explicit_current_turn_constraint_facts(current_user_turn)
+    if explicit_constraints:
+        sections.extend([
+            "",
+            "Explicit current-turn constraint facts:",
+            *[f"- {item}" for item in explicit_constraints],
+            "These are factual excerpts from the current request. Keep them visible in task_plan, helper envelopes, and final evidence comparison unless later verified evidence shows a constraint is infeasible, superseded, or not part of the resolved active task.",
+        ])
+    if _has_current_turn_assurance_followup_language(current_user_turn):
+        sections.extend([
+            "",
+            "Current-turn assurance/check wording fact:",
+            "- The current user turn contains assurance, checking, marking, classification, or leave-untouched wording. Compare existing task_plan, artifact, and verified evidence against the requested requirement before adding or modifying deliverables.",
+            "- This wording alone does not name a workspace mutation. If the existing evidence satisfies the requested state, record that fact and keep deliverables empty; modify only when evidence shows a missing/misaligned/stale requirement or the current turn explicitly asks to change an artifact.",
+            "确认/确保/标记/归类/保留不动类措辞先核实现有证据；已满足则不新增交付物，不因措辞本身修改文件。",
+        ])
 
     plan_bits: list[str] = []
     if prior_plan is not None:
@@ -195,7 +358,7 @@ def _build_active_task_contract_anchor(
             if tendency_facts:
                 sections.extend([
                     "",
-                    "Round1 routing facts:",
+                    "Entry routing snapshot (coarse; used for the initial Round2/tool budget, not the final task contract):",
                     json.dumps(tendency_facts, ensure_ascii=False, sort_keys=True)[:1200],
                 ])
         except Exception:
@@ -206,6 +369,42 @@ def _build_active_task_contract_anchor(
         "当前主线任务不总等于最后一句话；如果当前回合是继续、修复、重试、完成上次/某时任务，就用当前回合结合 prior plan、toolchain cache、agent_state、最近执行记录和工具证据确定主线。历史文件名和旧交付清单只是证据，不会自动成为本次交付物。",
     ])
     return "\n".join(sections)
+
+
+def _build_coding_task_contract_anchor() -> str:
+    """Build task-local coding facts for Round 2 without changing tool schemas."""
+    return (
+        "## Current Coding Task Contract\n"
+        "Current coding task contract: project path discovery facts from env_list_tree, env_inventory, env_search, "
+        "or explicit user-provided project paths are usually enough to start a code helper. In environment project mode, "
+        "workspace listings and workspace.locate are chat/staged-workspace facts, not real-project-root search facts; "
+        "use env_* facts for project source, test, config, and data paths. A code helper can receive likely "
+        "project paths in input_files plus acceptance checks and own optional baseline failure reproduction. A parallel batch of main-thread source/test env_read calls before helper handoff usually duplicates helper-owned reading and expands coordinator context. Once likely source/test paths and a verification command "
+        "or acceptance check are known, the next useful action is usually that helper route. The helper can read source bodies, use existing failure evidence or run a baseline only when useful, "
+        "diagnose, edit, and test. baseline test failure reproduction can be delegated and is optional diagnostic evidence unless the user or contract asks for it. source-body env_read/read_file calls or baseline env_run loops before delegation add value mainly "
+        "when they reveal missing routing facts or acceptance constraints. When baseline failure output is already "
+        "known, pass the observed failure as evidence; do not turn it into a required fix recipe unless the user or contract "
+        "requires the exact patch. For helper input_files, project-relative paths already carry the routing fact; env_fetch is useful after helper "
+        "output when expected_hash, diff, or apply evidence is needed. "
+        "For project-local coding tasks, project files, tests, helper reports, diffs, and run outputs are primary evidence; "
+        "memory expansion is useful when the current context provides concrete memory IDs or the user asks for historical recall. "
+        "The main thread "
+        "can keep route facts, helper contracts, env_diff / env_apply decisions, and acceptance evidence summaries compact. "
+        "Pre-helper env_read or env_run is mainly useful when routing facts are missing, the user requested read-only "
+        "diagnosis in the main thread, or concrete tool evidence is needed before delegation.\n\n"
+        "If the current task provides an already-running service URL, treat the URL as a real-project acceptance endpoint fact. "
+        "A helper editing staged `_env/...` files has not changed that URL until the main thread applies the staged file with env_apply_*. "
+        "Baseline/reproduction against the URL can be delegated when useful; post-fix URL acceptance belongs after main-thread apply. "
+        "Helper contracts should state paths, observed facts, expected staged output, and local checks rather than requiring a pre-apply URL pass.\n\n"
+        "User-requested baseline reproduction is separate from post-fix producer verification. When the current request asks to reproduce, observe, demonstrate, or confirm a failure before fixing, keep that as a pre-change acceptance fact and run or delegate the baseline check before applying edits when feasible. A post-change pass is producer-side verification evidence, not the same evidence as pre-change reproduction.\n\n"
+        "If the current request explicitly names a browser or host-browser reproduction, observation, confirmation, or verification step, "
+        "source reading or static diagnosis is not the same evidence. Once path and URL routing facts are known, treat that browser step "
+        "as the first evidence milestone before source/project edits, env_apply transfers, generated notes, or user-facing deliverable writes "
+        "that depend on the browser-confirmed values. Get the browser evidence in the main thread or delegate a helper that owns browser "
+        "automation/page-observation evidence before helper-owned edits; then pass the browser facts, likely files, and acceptance checks "
+        "to the focused producer helper. If browser evidence is infeasible, record the concrete blocker before changing browser-dependent files.\n\n"
+        "当前代码任务契约：环境项目路径以 env_* 事实为准，workspace 只代表聊天/暂存工作区；显式浏览器任务在路径和 URL 已知后优先获取或委派浏览器证据，再读大量源码/编辑；路径和验收命令已知时通常派发 code helper；失败输出作为事实传递，不替 helper 写死修法；主进程保留应用 diff、交付映射和验收记账。"
+    )
 
 
 def _insert_round2_system_messages_before_user(
@@ -537,19 +736,26 @@ def _user_request_requires_code_or_build(text: str) -> bool:
 
 
 def _plan_looks_preparatory(plan: ResponsePlan) -> bool:
+    # 2026-06-10: lowercase the plan text before marker matching. A finished
+    # triage plan saying "All 3 verifiers PASS ... draft text prepared for
+    # review" matched prep marker "prepare" while uppercase "PASS" missed the
+    # lowercase done markers, forcing a hard-round upgrade of a completed task
+    # (t3-msg-inbox-triage 20260610_112337, ~200s wasted rerun).
     text = " ".join([
         plan.intent or "",
         " ".join(plan.key_points or []),
         plan.internal_note or "",
-    ])
+    ]).lower()
     prep = (
-        "先看", "先检查", "先确认", "先探查", "准备", "接下来", "下一步",
-        "还没", "尚未", "如果", "需要你", "需要用户", "没有实际",
-        "inspect", "prepare", "next step", "not yet",
+        "先看", "先检查", "先确认", "先探查", "正在准备", "准备先", "接下来", "下一步",
+        "还没", "尚未", "需要你", "需要用户", "没有实际",
+        "inspect", "preparing", "prepare to", "next step", "not yet",
     )
     done = (
         "已修改", "已创建", "已新增", "已修复", "验证通过", "测试通过",
-        "pytest 通过", "passed", "created", "updated", "fixed", "verified",
+        "pytest 通过", "全部通过", "passed", "created", "updated", "fixed", "verified",
+        "verifiers pass", "verifier pass", "checks pass", "tests pass",
+        "verifier scripts pass", "✓",
     )
     return any(x in text for x in prep) and not any(x in text for x in done)
 
@@ -620,18 +826,116 @@ def _plan_has_closed_completion_evidence(
     positive = (
         "task_ok\": true", "'task_ok': true", "task_ok=true",
         "helpers_still_running\": 0", "'helpers_still_running': 0",
+        "outputs_complete\": true", "'outputs_complete': true", "outputs_complete=true",
         "verdict: pass", " pass evidence", "证据 pass", "pass 证据",
+        "verifiers pass", "verifier pass", "checks pass", "tests pass",
+        "verifier scripts pass", "全部通过", "验证脚本通过",
         "terminal_reason\": \"completed\"", "'terminal_reason': 'completed'",
+        "terminal_reason=completed", "ok\": true", "'ok': true",
         "contract closed", "合同已闭合", "all requested", "全部确认",
+        "completed and verified", "verified:", "artifacts applied",
+        "产物完整", "已完成并验证", "已验证",
         "无缺口", "无产物", "无需升级", "no deliverable files",
     )
     negative = (
         "task_ok\": false", "'task_ok': false", "task_ok=false",
         "helpers_still_running\": 1", "'helpers_still_running': 1",
         "terminal_reason\": \"resource_required\"",
+        "outputs_complete\": false", "'outputs_complete': false", "outputs_complete=false",
         "quality_blocked\": true", "blocked_count", "failed_count\": 1",
     )
     return any(marker in text for marker in positive) and not any(marker in text for marker in negative)
+
+
+def _helper_result_is_clean_producer_verified(item: dict) -> bool:
+    """Return true when a helper result is a producer-owned acceptance boundary.
+
+    This is a workflow fact, not a content judgment by the main process. The
+    helper must have completed, declared outputs complete, and self-verified
+    without blocking warnings or missing outputs.
+
+    helper 自验且无阻塞时，主进程可把报告当作生产者边界事实。
+    """
+    if not isinstance(item, dict):
+        return False
+    terminal_reason = str(item.get("terminal_reason") or "").strip().lower()
+    if terminal_reason in {
+        "stuck", "interrupted", "timeout", "failed", "error",
+        "resource_required", "outputs_missing", "quality_blocked",
+    }:
+        return False
+    if item.get("ok") is False:
+        return False
+    if any(
+        item.get(key)
+        for key in (
+            "interrupted", "stuck", "error", "error_kind", "resource_required",
+            "needs_resource", "quality_blocked", "declared_missing",
+            "outputs_missing",
+        )
+    ):
+        return False
+
+    outputs_check = item.get("outputs_check")
+    outputs_complete = item.get("outputs_complete")
+    producer_self_verified = False
+    if isinstance(outputs_check, dict):
+        outputs_complete = outputs_check.get("outputs_complete", outputs_complete)
+        producer_self_verified = outputs_check.get("producer_self_verified") is True
+        if outputs_check.get("quality_blocked") or outputs_check.get("blocking_quality_warnings"):
+            return False
+        if outputs_check.get("outputs_missing"):
+            return False
+    if outputs_complete is not True or not producer_self_verified:
+        return False
+
+    report = str(item.get("report") or "")
+    if any(marker in report for marker in ("冻结", "需要主线程提供资源", "反复失败")):
+        return False
+    return True
+
+
+def _clean_helper_boundary_note(item: dict) -> str:
+    """Build a compact Round3 fact for clean helper-owned outputs."""
+    paths: list[str] = []
+
+    def add(value) -> None:
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value not in paths:
+                paths.append(value)
+        elif isinstance(value, list):
+            for child in value:
+                add(child)
+        elif isinstance(value, dict):
+            for key in (
+                "env_copied_files", "copied_files", "copied_project_files",
+                "matched_files", "delivered_files",
+            ):
+                add(value.get(key))
+
+    for key in (
+        "main_available_files", "workspace_files", "files",
+        "staged_project_files", "copied_project_files",
+    ):
+        add(item.get(key))
+    add(item.get("copy_stats"))
+    outputs_check = item.get("outputs_check")
+    if isinstance(outputs_check, dict):
+        for key in ("matched_files", "delivered_files"):
+            add(outputs_check.get(key))
+
+    shown = paths[:8]
+    more = f", +{len(paths) - len(shown)} more" if len(paths) > len(shown) else ""
+    path_text = ", ".join(shown) + more if shown else "reported outputs"
+    return (
+        "[CLEAN_HELPER_PRODUCER_BOUNDARY]\n"
+        "This helper reported outputs_complete=true and producer_self_verified=true with no blocking warnings. "
+        "Treat its report, output map, and self-check facts as the helper-owned content boundary; the main process "
+        "should not re-read helper-owned artifact bodies or re-run helper-owned checks solely to verify content. "
+        f"Helper-owned outputs: {path_text}.\n"
+        "helper 已自验且无阻塞；主进程消费短报告和文件映射，不为复验内容而读回产物正文。"
+    )
 
 
 def _should_continue_incomplete_complex_plan(
@@ -671,14 +975,40 @@ def _should_continue_incomplete_complex_plan(
     has_report_like = any(x.endswith((".md", ".txt", ".docx", ".pdf", ".pptx", ".xlsx")) for x in deliverables)
     has_code_like = any(x.endswith((".py", ".js", ".ts", ".html", ".c", ".cpp", ".h", ".hpp", ".java", ".go", ".rs")) for x in deliverables)
 
-    helper_text = "\n".join(str(v) for v in (helper_excerpts or {}).values()).lower()
-    tool_text = "\n".join(str(v) for v in (main_tool_results or {}).values()).lower()
-    evidence_text = (helper_text + "\n" + tool_text)[:20000]
-    partial_markers = (
-        "partial", "incomplete", "unread", "missing", "blocked", "failed",
-        "未读", "部分", "缺失", "阻塞", "失败", "尚未",
-    )
-    has_partial_evidence = any(x in evidence_text for x in partial_markers)
+    def _structured_gap_facts(values: dict | None) -> bool:
+        for raw in (values or {}).values():
+            data = raw
+            if isinstance(raw, str):
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+            if not isinstance(data, dict):
+                continue
+            if data.get("ok") is False or data.get("outputs_complete") is False:
+                return True
+            for key in ("outputs_missing", "blocking_quality_warnings", "blocked_helpers"):
+                if data.get(key):
+                    return True
+            for key in ("failed_count", "incomplete_count", "resource_required_count", "quality_blocked_count"):
+                try:
+                    if int(data.get(key) or 0) > 0:
+                        return True
+                except (TypeError, ValueError):
+                    pass
+            results = data.get("results")
+            if isinstance(results, list):
+                for item in results:
+                    if isinstance(item, dict) and (
+                        item.get("ok") is False
+                        or item.get("outputs_complete") is False
+                        or item.get("outputs_missing")
+                        or item.get("terminal_reason") in {"failed", "interrupted", "timeout", "stuck", "resource_required"}
+                    ):
+                        return True
+        return False
+
+    has_partial_evidence = _structured_gap_facts(helper_excerpts) or _structured_gap_facts(main_tool_results)
     tool_result_count = sum(1 for m in (final_msgs or []) if isinstance(m, dict) and m.get("role") == "tool")
 
     if requested_code_like and not has_code_like and _plan_looks_like_only_orientation(plan):
@@ -813,6 +1143,7 @@ async def _round1(
     user_name: str, current_message: str, hot_user: list,
 ) -> Round1Result:
     msgs = ctx_build.round1_messages_light(user_name, current_message, hot_user)
+    llm_failed = False
     try:
         from app.llm.model_pool import resolve_task
         _r1_spec = resolve_task("round1_intent")
@@ -824,6 +1155,7 @@ async def _round1(
     except Exception:
         log.exception("round1 llm/json failed; using default")
         raw = _DEFAULT_TENDENCY
+        llm_failed = True
 
     # tendency
     try:
@@ -882,12 +1214,16 @@ async def _round1(
     needs_recall = bool(raw.get("needs_recall", False)) if isinstance(raw, dict) else False
     parallelizable = bool(raw.get("parallelizable", True)) if isinstance(raw, dict) else True
 
-    if _has_artifact_creation_intent(current_message):
+    if llm_failed and _has_artifact_creation_intent(current_message):
         needs_tools = True
         if tendency.complexity == "easy":
             tendency.complexity = "medium"
         if _is_office_document_creation_intent(current_message):
             tendency.is_document_task = True
+        debug.log(
+            "round1.fallback_route_signal",
+            "Round1 LLM failed; used artifact candidate signal only as fallback routing.",
+        )
 
     return Round1Result(
         tendency=tendency,
@@ -1432,14 +1768,14 @@ async def _round2(
     _round2_tendency_payload["needs_tools"] = needs_tools
     _round2_tendency_payload["needs_recall"] = needs_recall
     _round2_tendency_payload["parallelizable"] = parallelizable
-    _round2_tendency_payload["artifact_creation_intent"] = _has_artifact_creation_intent(
-        user_message_text or ""
-    )
-    if _round2_tendency_payload["artifact_creation_intent"]:
+    _observed_route_facts = _observed_route_text_facts(user_message_text or "")
+    _round2_tendency_payload["observed_route_facts"] = _observed_route_facts
+    _round2_tendency_payload["artifact_creation_intent"] = False
+    if any("creation/persistence wording" in fact for fact in _observed_route_facts):
         _round2_tendency_payload["creation_instruction"] = (
-            "The current user is asking to create, generate, write, or save an artifact. If the target file does not "
-            "exist, create it or delegate a helper; a failed locate/search_files result is not completion.\n\n"
-            "用户要求产物时，文件不存在就创建或派 helper，不能把没找到当完成。"
+            "Observed text facts include creation or persistence wording with an output noun, extension, or reusable written-product noun. "
+            "This is a text fact, not a route decision. Compare it with the active task, verifier/project visibility, and user wording: if a real artifact is required and the target does not exist, create it or delegate a helper; if inline answer is sufficient, record that evidence. A failed locate/search_files result is not completion for a still-required artifact.\n\n"
+            "观察到创建/持久化相关措辞；这不是路由决定。由模型结合当前任务和验收可见性判断。"
         )
 
     msgs = ctx_build.round2_messages(
@@ -1595,6 +1931,8 @@ async def _round2(
             prior_plan=prior_plan,
         ),
     )
+    if is_coding:
+        _append_round2_dynamic_user_tail(msgs, _build_coding_task_contract_anchor())
 
     # _dispatcher 只是为了把 (archive_id, group_id, user_id, workspace_dir)
     # 注入到工具上下文(避免暴露给模型)。统计/反馈/升级判断都不在这里。
@@ -1762,6 +2100,7 @@ async def _round2(
         "start_time": _time.monotonic(),  # 进入 round2 时刻
         "batch_timeout_seen": False,      # delegate 返回 batch_timeout_majority 过
         "batch_timeout_advice": "",       # 来自 delegate 的 escalation_advice
+        "clean_helper_producer_boundary_seen": False,  # helper 已自验完成；主进程不再补跑内容复验
         "workspace_snapshot": frozenset(ws_tool.list_generated_files(workspace_dir)) if workspace_dir else frozenset(),  # round2 开始时的文件快照 — 用于 stall 检测
         "last_file_check_iter": 0,        # 上次文件检查时的 iter 数
     }
@@ -1841,11 +2180,62 @@ async def _round2(
             try:
                 import json as _json_p84
                 _parsed = _json_p84.loads(raw_result)
-                if not isinstance(_parsed, dict) or _parsed.get("ok") is False:
+                if not isinstance(_parsed, dict):
+                    return
+                _status_failed = _parsed.get("ok") is False
+                _status_tools = {"env_run", "env_apply_replace", "env_apply_create"}
+                if _status_failed and tn not in _status_tools:
                     return
                 _content_text: str = ""
                 _label_kind: str = tn  # 默认显示工具名
-                if tn in _DATA_TOOLS_FIELDS:
+                _meta_lines: list[str] = []
+
+                def _add_meta(label: str, value) -> None:
+                    if value is None or value == "":
+                        return
+                    _meta_lines.append(f"- {label}: {value}")
+
+                def _compact_excerpt(text: str, *, cap: int) -> str:
+                    text = str(text or "").strip()
+                    if len(text) <= cap:
+                        return text
+                    head = max(200, int(cap * 0.68))
+                    tail = max(120, cap - head - 80)
+                    omitted = len(text) - head - tail
+                    return (
+                        text[:head].rstrip()
+                        + f"\n...[excerpt truncated, omitted_chars={omitted}]...\n"
+                        + text[-tail:].lstrip()
+                    )
+
+                for _k in (
+                    "ok", "action", "path", "source_zone", "start_line", "end_line",
+                    "total_lines", "truncated", "next_start_line", "command",
+                    "returncode", "timed_out", "elapsed_sec", "backup_workspace_path",
+                    "backup_project_path",
+                ):
+                    if _k in _parsed:
+                        _add_meta(_k, _parsed.get(_k))
+                if _parsed.get("sha256"):
+                    _add_meta("sha256", str(_parsed.get("sha256"))[:16] + "...")
+                if _parsed.get("new_sha256"):
+                    _add_meta("new_sha256", str(_parsed.get("new_sha256"))[:16] + "...")
+
+                if tn in {"env_apply_replace", "env_apply_create"}:
+                    _label_kind = tn
+                    _path = str(_parsed.get("path") or "").strip()
+                    _action = str(_parsed.get("action") or tn).strip()
+                    _ok = _parsed.get("ok")
+                    _content_text = (
+                        f"Project apply result: ok={_ok}, action={_action}"
+                        + (f", path={_path}" if _path else "")
+                        + "."
+                    )
+                    if _parsed.get("new_sha256"):
+                        _content_text += f" new_sha256={str(_parsed.get('new_sha256'))[:16]}..."
+                    if _parsed.get("backup_workspace_path"):
+                        _content_text += f" backup_workspace_path={_parsed.get('backup_workspace_path')}."
+                elif tn in _DATA_TOOLS_FIELDS:
                     _field = _DATA_TOOLS_FIELDS[tn]
                     _v = _parsed.get(_field)
                     if isinstance(_v, str) and _v.strip():
@@ -1854,7 +2244,7 @@ async def _round2(
                         # search_in_file / search_across_files / code_index 返 list
                         # 序列化为可读文本 (每条占一行, 最多 30 条)
                         _lines = []
-                        for _item in _v[:30]:
+                        for _item in _v[:12]:
                             if isinstance(_item, dict):
                                 # match: {"file":..., "line":..., "text":...}
                                 _path = _item.get("file") or _item.get("path") or "?"
@@ -1865,11 +2255,13 @@ async def _round2(
                                 _lines.append(f"  {_item}")
                         if _lines:
                             _content_text = "\n".join(_lines)
-                            if len(_v) > 30:
-                                _content_text += f"\n  ...({len(_v) - 30} more)"
+                            _add_meta("match_count_seen", len(_v))
+                            if len(_v) > 12:
+                                _content_text += f"\n  ...({len(_v) - 12} more matches omitted from Round 3 excerpt)"
                 elif tn in {"workspace", "env_run"}:
                     # workspace.run stdout — 仅当是只读命令(cat/grep/find/dir/head)
                     _stdout = _parsed.get("stdout") or ""
+                    _stderr = _parsed.get("stderr") or ""
                     _cmd_used = _parsed.get("command") or _parsed.get("argv") or ""
                     _cmd_str = _cmd_used.lower() if isinstance(_cmd_used, str) else ""
                     _is_readonly = any(
@@ -1889,9 +2281,25 @@ async def _round2(
                             or str(_parsed.get("script_path") or "").startswith(".env_run_")
                         ):
                             _is_readonly = True
-                    if _stdout and _is_readonly and len(_stdout.strip()) > 20:
+                    if tn == "env_run":
+                        _label_kind = f"{tn}({_cmd_str[:40]})" if _cmd_str else tn
+                        _add_meta("command", _cmd_str[:160])
+                        _rc = _parsed.get("returncode")
+                        _ok = _parsed.get("ok")
+                        _parts: list[str] = [
+                            f"Command result: ok={_ok}, returncode={_rc}, command={_cmd_used!r}."
+                        ]
+                        if _stdout.strip():
+                            _parts.append("stdout:\n" + str(_stdout).strip())
+                        if _stderr.strip():
+                            _parts.append("stderr:\n" + str(_stderr).strip())
+                        if not _stdout.strip() and not _stderr.strip():
+                            _parts.append("The command produced no stdout or stderr.")
+                        _content_text = "\n".join(_parts)
+                    elif _stdout and _is_readonly and len(_stdout.strip()) > 20:
                         _content_text = _stdout
                         _label_kind = f"{tn}({_cmd_str[:40]})"
+                        _add_meta("command", _cmd_str[:160])
                 if not _content_text:
                     return
                 if tn == "ocr":
@@ -1903,28 +2311,75 @@ async def _round2(
                         "看图结果只代表识别到的文字，用户侧不要暴露工具细节。\n\n"
                         f"{_content_text}"
                     )
-                # 通用截断: 单条 ≤2500 字 (OCR/原文/搜索结果都够), 总条数 ≤10
-                if len(main_tool_results) >= 10:
+
+                _excerpt_cap = 900
+                if tn == "ocr":
+                    _excerpt_cap = 1600
+                elif tn in {"env_run", "workspace"}:
+                    _excerpt_cap = 1200
+                elif tn in {"env_search", "search_in_file", "search_across_files", "code_index"}:
+                    _excerpt_cap = 1200
+                elif tn in {"inspect_file"}:
+                    _excerpt_cap = 1000
+                _orig_chars = len(_content_text)
+                _content_text = _compact_excerpt(_content_text, cap=_excerpt_cap)
+                _add_meta("excerpt_chars", len(_content_text))
+                if _orig_chars > len(_content_text):
+                    _add_meta("original_chars", _orig_chars)
+                    _add_meta("recovery", "read the recorded path/range again if exact omitted content is needed")
+
+                # 通用截断: 单条用短摘录，最多保留最近 8 条，避免 Round 3 动态区吞掉缓存。
+                if len(main_tool_results) >= 8:
                     # 删最早 key (FIFO) — main_tool_results 是 dict, 用 list 顺序近似
                     _oldest_key = next(iter(main_tool_results), None)
                     if _oldest_key:
                         main_tool_results.pop(_oldest_key, None)
-                _content_text = _content_text[:2500]
                 _seq = len(main_tool_results) + 1
                 _key = f"🔍 主线程工具结果(权威) {_label_kind} #{_seq}"
+                _meta_block = "\n".join(_meta_lines) if _meta_lines else "- metadata: unavailable"
                 main_tool_results[_key] = (
-                    f"This is authoritative internal output from a main-thread read/vision tool. Round 3 must rely on "
-                    f"this literal content rather than memory or guesswork, and should not expose tool names or internal "
-                    f"tiers to the user. If the user asks about this content, answer directly from the text below.\n\n"
-                    f"主线程工具结果是事实依据，回复时基于原文改写，不暴露内部工具细节。\n\n"
+                    f"This is an authoritative fact or excerpt from a main-thread tool. Use the excerpt and metadata "
+                    f"as evidence; do not guess beyond them or expose internal tool names to the user. If metadata says "
+                    f"the excerpt is truncated, treat omitted content as unknown unless it appears elsewhere in the plan.\n\n"
+                    f"主线程工具摘录是事实依据；截断部分视为未知，可按路径/行号恢复读取。\n\n"
+                    f"Metadata:\n{_meta_block}\n\n"
                     f"--- Raw result begins ---\n{_content_text}\n--- Raw result ends ---"
                 )
             except (ValueError, TypeError, AttributeError):
                 pass  # 静默 — Round 3 拿不到不影响主流程
 
-        if tool_name in _DATA_TOOLS_FIELDS or tool_name in {"workspace", "env_run"}:
+        if tool_name in _DATA_TOOLS_FIELDS or tool_name in {
+            "workspace", "env_run", "env_apply_replace", "env_apply_create",
+        }:
             if isinstance(result, str):
                 _capture_main_tool_result(tool_name, result)
+
+        if tool_name == "workspace" and isinstance(result, str):
+            try:
+                import json as _json_write_fact
+                _parsed_write = _json_write_fact.loads(result)
+                if (
+                    isinstance(_parsed_write, dict)
+                    and _parsed_write.get("ok") is True
+                    and str(_parsed_write.get("action") or "").lower() == "write"
+                ):
+                    _path = str(_parsed_write.get("path") or "").strip()
+                    if _path:
+                        _size = _parsed_write.get("size")
+                        _seq = 1 + sum(1 for k in main_tool_results if str(k).startswith("workspace_write#"))
+                        main_tool_results[f"workspace_write#{_seq}"] = (
+                            "Metadata:\n"
+                            "- action: workspace.write\n"
+                            f"- path: {_path}\n"
+                            + (f"- size: {_size}\n" if _size is not None else "")
+                            + "- delivery: workspace/internal write fact; user-facing delivery still depends on plan.deliverables and file promotion\n\n"
+                            "--- Raw result begins ---\n"
+                            f"A workspace file was written in this turn: {_path}."
+                            + (f" Size: {_size} bytes." if _size is not None else "")
+                            + "\n--- Raw result ends ---"
+                        )
+            except (ValueError, TypeError, AttributeError):
+                pass
 
         if tool_name != "delegate" or not isinstance(result, str):
             return
@@ -2006,6 +2461,13 @@ async def _round2(
                         # fallback: report 首 1600 chars
                         summary = h.get("summary") or ""
                         excerpt = summary.strip()[:300] if summary.strip() else report[:1600].strip()
+                        if _helper_result_is_clean_producer_verified(h):
+                            macro_signals["clean_helper_producer_boundary_seen"] = True
+                            boundary_note = _clean_helper_boundary_note(h)
+                            if excerpt:
+                                excerpt = f"{boundary_note}\n\n{excerpt}"
+                            else:
+                                excerpt = boundary_note
                         if helper_incomplete:
                             excerpt = (
                                 "[INCOMPLETE_HELPER_RESULT]\n"
@@ -2079,30 +2541,50 @@ async def _round2(
             plan_intent=_initial_intent,
             plan_key_points=_initial_kp,
             plan_deliverables=_initial_dlv,
+            plan_markers={
+                "source": "round2_started",
+                "round1_scope_fact": (
+                    "Round1 is a coarse entry route and Round2-skip gate; after Round2 runs, "
+                    "latest task_plan/thread-plan facts are the current task markers."
+                ),
+                "entry_route_snapshot": {
+                    "complexity": getattr(tendency, "complexity", None),
+                    "needs_tools": bool(needs_tools),
+                    "needs_recall": bool(needs_recall),
+                    "parallelizable": bool(parallelizable),
+                    "is_coding_task": bool(getattr(tendency, "is_coding_task", False)),
+                    "is_document_task": bool(getattr(tendency, "is_document_task", False)),
+                },
+            },
             role_label="main",
         )
         _thread_token = _proc_set_thread_ctx(_thread_ctx)
         try:
             from app.core import agent_state as _agent_state
             _active_goal_seed = (user_message_text or _initial_intent or "current active task").strip()
+            _explicit_constraints = _explicit_current_turn_constraint_facts(user_message_text or "")
             _agent_state.upsert_task_contract(
                 trace_id=_trace_id,
                 task_id="main",
                 goal=_active_goal_seed[:1200],
                 acceptance=[
-                    "Resolve the active task from the current user turn plus prior plan/toolchain/agent_state evidence when the turn is a continuation or follow-up.",
-                    "Keep history, workspace listings, and previous delivery lists as evidence; do not let them expand deliverables by themselves.",
-                    "List only user-facing artifacts verified against the resolved active task.",
+                    *_explicit_constraints,
                 ],
                 evidence_required=[
                     "current user turn",
                     "prior plan/toolchain/agent_state facts when the turn refers back",
                     "verified tool or helper evidence for final deliverables",
+                    *[
+                        "evidence compared with explicit current-turn constraint: " + item.split(": ", 1)[-1]
+                        for item in _explicit_constraints[:4]
+                    ],
                 ],
                 deliverables=_initial_dlv,
                 risks=[
                     "Short continuation turns may need prior task context.",
                     "Historical filenames can look like current deliverables if not compared with the active task.",
+                    "Resolve continuation/follow-up tasks from the current turn plus prior plan/toolchain/agent_state evidence.",
+                    "List user-facing artifacts only after comparing them with the resolved active task and verified evidence.",
                 ],
                 current_stage="round2_started",
             )
@@ -2489,7 +2971,12 @@ async def _round2(
     # 例: 用户让批量编辑 50 个文件 → iter 数必然多,但模型能力没问题,升级毫无意义。
     # v3 正确做法: 硬信号只是"高优先级触发完整判定"的入口,
     #              判定本身仍交给 cross-LLM(它能区分"步骤多 vs 真卡死")。
-    if not (plan.upgrade_to_hard or plan.upgrade_to_veryhard) \
+    if _closed_completion_evidence:
+        debug.log(
+            "round2.full_assessment_suppressed",
+            "macro cross-LLM assessment skipped because completion evidence is closed",
+        )
+    elif not (plan.upgrade_to_hard or plan.upgrade_to_veryhard) \
             and not (abort_event and abort_event.is_set()) \
             and not think:  # 只在 medium 路径才需要,hard 已经够强
         # 红信号 → 高优先级触发完整判定(不再直接升级)
@@ -2539,7 +3026,16 @@ async def _round2(
                     upgraded_this = bool(second.get("should_upgrade"))
                     # A2:记录本次决策结果到 sliding window
                     _record_cross_llm_outcome(trigger_priority, upgraded_this)
-                    if upgraded_this:
+                    if upgraded_this and _plan_has_closed_completion_evidence(
+                        plan,
+                        helper_excerpts=helper_excerpts,
+                        main_tool_results=main_tool_results,
+                    ):
+                        debug.log(
+                            "round2.full_assessment_upgrade_suppressed",
+                            "full chain upgrade ignored because completion evidence closed during assessment",
+                        )
+                    elif upgraded_this:
                         plan.upgrade_to_hard = True
                         debug.log(
                             "round2.full_assessment_upgrade",
@@ -2601,9 +3097,12 @@ async def _round2(
     # 加一次 lite 自检 1-2s,核对 plan.deliverables / key_points 是否完整。
     # 只在 abort 未设 + 非 lite 路径(已经是 hard/veryhard)+ workspace 有产物时跑。
     # 失败/超时不阻塞主流程,只 log 提示。
+    # 2026-06-11: clean helper producer boundary 已经是内容验收边界；主进程不再用
+    # plan 自检补充读取/验证压力，避免把 producer 自检产物重新拉回主上下文。
     if (think                             # main 模型(说明走了 medium_coding / hard / veryhard)
             and not (abort_event and abort_event.is_set())
             and workspace_dir
+            and not macro_signals.get("clean_helper_producer_boundary_seen")
             and not plan.upgrade_to_hard  # 这个 plan 是终态(没有再升级请求)
             and not plan.upgrade_to_veryhard):
         try:
@@ -2662,15 +3161,21 @@ async def _round2(
             _plan_intent = (plan.intent or "")
             _plan_combined = _plan_kp_joined + " " + _plan_intent
             for _key, _val in list(main_tool_results.items()):
-                if "OCR" not in _key and "inspect" not in _key:
+                _key_l = str(_key).lower()
+                if "ocr" not in _key_l and "inspect" not in _key_l:
                     continue
                 if not isinstance(_val, str) or len(_val) < 100:
                     continue
-                # 提取 OCR 原文段(--- OCR 原文开始 --- ... --- OCR 原文结束 ---)
+                # 提取 OCR/视觉工具原文段；历史版本用 OCR marker，新版统一用 Raw result marker。
                 _m = _re_p85.search(
-                    r"--- OCR 原文开始 ---\s*(.*?)\s*--- OCR 原文结束 ---",
+                    r"--- Raw result begins ---\s*(.*?)\s*--- Raw result ends ---",
                     _val, _re_p85.DOTALL,
                 )
+                if not _m:
+                    _m = _re_p85.search(
+                        r"--- OCR 原文开始 ---\s*(.*?)\s*--- OCR 原文结束 ---",
+                        _val, _re_p85.DOTALL,
+                    )
                 _ocr_body = _m.group(1) if _m else _val
                 # 提取 ≥2 字符中文 token 或 ≥3 字符英数 token
                 _tokens_zh = _re_p85.findall(r"[\u4e00-\u9fa5]{2,}", _ocr_body)
@@ -2681,14 +3186,14 @@ async def _round2(
                 # 看 plan 中至少引用了 1 个 token (3 个以上更安全)
                 _quoted = sum(1 for t in _all_tokens if t in _plan_combined)
                 if _quoted < 2:  # 少于 2 个 token 引用 → 视为未引用
-                    # 把 OCR 原文片段强行拼到 key_points 头部, 让 Round 3 必看
+                    # 把 OCR/视觉事实片段放到 key_points 头部，避免 Round 3 只能看到泛化 plan。
                     _excerpt = _ocr_body[:500]
-                    _force_kp = f"⚠️ OCR 真实内容(必须如实引用,不要编造): {_excerpt}"
+                    _force_kp = f"权威图像/文件识别文本摘录: {_excerpt}"
                     plan.key_points = [_force_kp] + (plan.key_points or [])
                     debug.log(
                         "round2.p85_force_inject",
                         f"P85 反幻觉: plan 仅引用 {_quoted}/{len(_all_tokens)} 个 OCR token, "
-                        f"强制注入 {len(_excerpt)} 字符 OCR 原文到 key_points[0]",
+                        f"注入 {len(_excerpt)} 字符识别文本事实到 key_points[0]",
                     )
                     break  # 只处理第一个 OCR 结果
             # Generic evidence guard: for data-bearing main-thread results
@@ -2759,6 +3264,14 @@ async def _round2(
             intent=plan.intent or "",
             key_points=list(plan.key_points or []),
             deliverables=list(plan.deliverables or []),
+            current_stage="round2_final_plan",
+            markers={
+                "source": "round2_final_plan",
+                "upgrade_to_hard": bool(getattr(plan, "upgrade_to_hard", False)),
+                "upgrade_to_veryhard": bool(getattr(plan, "upgrade_to_veryhard", False)),
+                "callbacks_count": len(getattr(plan, "callbacks", None) or []),
+                "avoid_count": len(getattr(plan, "avoid", None) or []),
+            },
         )
         from app.core import agent_state as _agent_state
         _agent_state.upsert_task_contract(

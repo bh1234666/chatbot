@@ -91,27 +91,31 @@ def _get_hardware_info() -> str:
 def _build_platform_hint() -> str:
     hw = _get_hardware_info()
     python_snippet_hint = (
-        "- Python snippets: use `python -c` only for short one-line expressions. "
-        "For multiline code, nested quotes, or f-strings, write a `.py` file "
-        "with workspace.write/edit_file, then run `python script.py`.\n"
+        "- Follow the Actual Tool Boundary in your system prompt. Platform facts describe the host; they do not grant unavailable tools.\n"
+        "- Python snippets: when your available tools include shell/workspace command execution, use `python -c` only for short one-line expressions. "
+        "For multiline code, nested quotes, or f-strings, write a `.py` file only if your available workspace tools allow writing scripts, then run it through the available command runner.\n"
+        "- On Windows, treat `python` as the default workspace Python launcher. "
+        "`python3` is unknown until a fresh command result in this helper workspace proves it maps to a working interpreter.\n"
         "- The `python` tool is an isolated calculation sandbox: keep file IO in "
         "workspace tools. Read/write workspace files with read_file/edit_file/"
         "workspace.write; use workspace.run for scripts that need file IO.\n"
-        "Python 简短表达式可用 `python -c`；多行脚本和文件读写放到工作区脚本或 workspace 工具中执行。\n"
+        "- For browser evidence, use non-interactive page inspection, scripted browser automation, screenshots, or HTTP fetches that match the requested evidence. "
+        "Interactive browser CLI commands may wait for user input; capability probes should be short and specific.\n"
+        "平台事实不授予不可见工具；Windows 上不要把 `python3` 当作默认事实；多行脚本和文件读写只能通过实际可见工具执行；浏览器证据优先用非交互式页面检查、脚本、截图或 HTTP 获取。\n"
     )
 
     if _sys.platform != "win32":
         return (
             "## Runtime Platform\n"
             "- You are running on a Unix-like system, as is the main process.\n"
-            "- Run compiled binaries with `bash(\"./name\")`; executables normally have no `.exe` suffix.\n"
-            "- Standard Unix shell tools are available, including grep, sed, awk, find, xargs, head, tail, and wc.\n"
+            "- When your available tools include shell execution, compiled binaries normally run as `./name`; executables normally have no `.exe` suffix.\n"
+            "- Standard Unix shell utilities such as grep, sed, awk, find, xargs, head, tail, and wc are host facts for shell-capable helpers.\n"
             f"{python_snippet_hint}"
             "\n"
             "## Hardware Evidence\n"
             "Use these local hardware facts exactly when a report, paper, or benchmark description needs environment details.\n"
             f"{hw}\n"
-            "\n平台为 Unix-like；命令和硬件信息必须按实测环境表述。\n"
+            "\n平台为 Unix-like；只有实际可见 shell/命令工具时才运行命令，硬件信息按实测环境表述。\n"
         )
     # Windows — 看 git-bash 是否检测到
     try:
@@ -124,8 +128,8 @@ def _build_platform_hint() -> str:
         return (
             "## Runtime Platform\n"
             "- You are running on Windows, as is the main process.\n"
-            "- The `bash` tool is backed by Git Bash, so Unix shell commands, pipes, and redirection work.\n"
-            "- Run compiled binaries with `bash(\"./name.exe\")` or `bash(\"name.exe\")`.\n"
+            "- When your available tools include shell execution, Git Bash backs that shell, so Unix shell commands, pipes, and redirection work.\n"
+            "- Shell-capable helpers can run compiled binaries as `./name.exe` or `name.exe`.\n"
             "- Prefer `/` as the path separator because Python and gcc both accept it on this host.\n"
             f"{python_snippet_hint}"
             "- For MinGW gcc portability: print size_t with `%lu` plus `(unsigned long)`, print int64_t with `PRId64` plus `#include <inttypes.h>`, and declare C89 loop variables at block start.\n"
@@ -134,16 +138,16 @@ def _build_platform_hint() -> str:
             "## Hardware Evidence\n"
             "Use these local hardware facts exactly when a report, paper, or benchmark description needs environment details.\n"
             f"{hw}\n"
-            "\n平台为 Windows + Git Bash；路径、编译和内存测量按 Windows 事实处理。\n"
+            "\n平台为 Windows + Git Bash；只有实际可见 shell/命令工具时才运行命令，路径、编译和内存测量按 Windows 事实处理。\n"
         )
     # Windows + 没装 git-bash:cmd.exe 实情如实告知
     return (
         "## Runtime Platform\n"
         "- You are running on Windows, as is the main process.\n"
-        "- Git Bash was not detected. The `bash` tool is effectively cmd.exe, so Unix-only shell syntax and tools are not available.\n"
-        "- Use dedicated file tools for discovery and editing: workspace locate/list, search_files, search_in_file, search_across_files, read_file, edit_file, and workspace.write. Do not use `ls`, `find`, `grep`, `head`, `tail`, `wc`, or heredocs for directory inventory unless Git Bash is explicitly available.\n"
+        "- Git Bash was not detected. If your available tools include shell execution, it is effectively cmd.exe, so Unix-only shell syntax and tools are not available.\n"
+        "- Use dedicated file tools for discovery and editing: workspace locate/list, search_files, search_in_file, search_across_files, read_file, edit_file, and workspace.write. Unix commands such as `ls`, `find`, `grep`, `head`, `tail`, `wc`, and heredocs require explicitly available Git Bash.\n"
         "- For command output redirection, use Windows forms such as `2>nul`. `/dev/null`, heredocs, command substitution, `export`, and Unix quoting patterns do not apply.\n"
-        "- Run compiled binaries with `bash(\"name.exe\")` or `bash(\"cmd /c name.exe\")`.\n"
+        "- Shell-capable helpers can run compiled binaries as `name.exe` or `cmd /c name.exe`.\n"
         "- For MinGW gcc portability: print size_t with `%lu` plus `(unsigned long)`, print int64_t with `PRId64` plus `#include <inttypes.h>`, and declare C89 loop variables at block start.\n"
         "- For process memory on Windows, use GlobalMemoryStatusEx or GetProcessMemoryInfo rather than Unix-only process files or APIs.\n"
         "- When Python reads UTF-8 or BOM-marked Chinese text on Windows, pass `encoding='utf-8-sig'` or another explicit encoding that matches the file.\n"
@@ -152,7 +156,7 @@ def _build_platform_hint() -> str:
         "## Hardware Evidence\n"
         "Use these local hardware facts exactly when a report, paper, or benchmark description needs environment details.\n"
         f"{hw}\n"
-        "\n平台为 Windows + cmd.exe；目录和文件盘点优先 workspace/search/read/edit 等专用工具，不使用 Unix-only 命令；编码和命令语法按 Windows 处理。\n"
+        "\n平台为 Windows + cmd.exe；只有实际可见 shell/命令工具时才运行命令，目录和文件盘点优先专用工具；编码和命令语法按 Windows 处理。\n"
     )
 
 

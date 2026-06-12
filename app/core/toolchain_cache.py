@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -20,10 +21,11 @@ MAX_ENTRY_CHARS = 24_000
 _LOCK = threading.RLock()
 _CONTINUED_TRACES: set[str] = set()
 _EXPANDED_SCHEMA_TOOLS: dict[str, set[str]] = {}
-_SLIM_TOOL_VIEW_CACHE: dict[int, list[dict[str, Any]]] = {}
+_SLIM_TOOL_VIEW_CACHE: dict[str, list[dict[str, Any]]] = {}
+_SLIM_SINGLE_TOOL_CACHE: dict[str, dict[str, Any]] = {}
 
-_MAX_TOOL_DESCRIPTION_CHARS = 220
-_MAX_PROPERTY_DESCRIPTION_CHARS = 120
+_MAX_TOOL_DESCRIPTION_CHARS = 120
+_MAX_PROPERTY_DESCRIPTION_CHARS = 70
 
 
 def _safe_segment(value: str) -> str:
@@ -391,6 +393,16 @@ def mark_tool_schema_retry(tool_name: str, reason: str = "", trace_id: str | Non
 
 def mark_tool_schema_success(tool_name: str, trace_id: str | None = None) -> None:
     """Remove transient full-schema expansion after a successful call."""
+    clear_tool_schema_retry(tool_name, trace_id, reason="successful call")
+
+
+def clear_tool_schema_retry(
+    tool_name: str,
+    trace_id: str | None = None,
+    *,
+    reason: str = "",
+) -> None:
+    """Remove transient full-schema expansion for a tool."""
     name = str(tool_name or "").strip()
     trace_id = trace_id or debug.current_trace_id()
     if not name or not trace_id:
@@ -404,8 +416,8 @@ def mark_tool_schema_success(tool_name: str, trace_id: str | None = None) -> Non
             _EXPANDED_SCHEMA_TOOLS.pop(trace_id, None)
     debug.log(
         "toolchain_cache.schema_expand_cleared",
-        f"cleared full schema expansion for {name!r} after successful call",
-        {"trace_id": trace_id},
+        f"cleared full schema expansion for {name!r}",
+        {"trace_id": trace_id, "reason": str(reason or "")[:200]},
     )
 
 
@@ -478,6 +490,22 @@ def _tool_name(tool: dict[str, Any]) -> str:
     return str((fn or {}).get("name") or "")
 
 
+def _tools_content_cache_key(tools: list[dict[str, Any]]) -> str:
+    try:
+        payload = json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        payload = repr(tools)
+    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _tool_content_cache_key(tool: dict[str, Any]) -> str:
+    try:
+        payload = json.dumps(tool, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        payload = repr(tool)
+    return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()
+
+
 def tool_schema_retry_guidance(
     tools: list[dict[str, Any]],
     trace_id: str | None = None,
@@ -527,10 +555,17 @@ def filter_tools_for_trace(tools: list[dict[str, Any]], trace_id: str | None = N
     """
     if not tools:
         return tools
-    key_base = id(tools)
+    key_base = _tools_content_cache_key(tools)
     cached = _SLIM_TOOL_VIEW_CACHE.get(key_base)
     if cached is not None:
         return cached
-    slim = [_slim_tool_schema(tool) for tool in tools]
+    slim: list[dict[str, Any]] = []
+    for tool in tools:
+        tool_key = _tool_content_cache_key(tool)
+        item = _SLIM_SINGLE_TOOL_CACHE.get(tool_key)
+        if item is None:
+            item = _slim_tool_schema(tool)
+            _SLIM_SINGLE_TOOL_CACHE[tool_key] = item
+        slim.append(item)
     _SLIM_TOOL_VIEW_CACHE[key_base] = slim
     return slim

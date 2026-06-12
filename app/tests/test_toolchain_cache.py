@@ -95,6 +95,72 @@ def test_filter_tools_keeps_schema_stable_after_trace_used():
     toolchain_cache.reset_trace(trace_id)
 
 
+def test_filter_tools_reuses_slim_view_for_rebuilt_same_schema():
+    trace_id = "trace_filter_rebuilt"
+    toolchain_cache.reset_trace(trace_id)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace",
+                "description": "workspace " + ("long details " * 40),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "action " + ("long details " * 20),
+                            "enum": ["read", "write"],
+                        }
+                    },
+                    "required": ["action"],
+                },
+            },
+        }
+    ]
+
+    first = toolchain_cache.filter_tools_for_trace(tools, trace_id)
+    rebuilt = json.loads(json.dumps(tools))
+    second = toolchain_cache.filter_tools_for_trace(rebuilt, trace_id)
+    changed = json.loads(json.dumps(tools))
+    changed[0]["function"]["description"] += " changed"
+    third = toolchain_cache.filter_tools_for_trace(changed, trace_id)
+
+    assert second is first
+    assert third is not first
+    assert first[0]["function"]["parameters"]["properties"]["action"]["enum"] == ["read", "write"]
+
+
+def test_filter_tools_reuses_unchanged_single_tool_when_toolset_changes():
+    trace_id = "trace_filter_single_reuse"
+    toolchain_cache.reset_trace(trace_id)
+    workspace_tool = {
+        "type": "function",
+        "function": {
+            "name": "workspace",
+            "description": "workspace " + ("long details " * 40),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    delegate_tool = {
+        "type": "function",
+        "function": {
+            "name": "delegate",
+            "description": "delegate " + ("long details " * 40),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+    changed_delegate_tool = json.loads(json.dumps(delegate_tool))
+    changed_delegate_tool["function"]["description"] += " changed"
+
+    first = toolchain_cache.filter_tools_for_trace([workspace_tool, delegate_tool], trace_id)
+    second = toolchain_cache.filter_tools_for_trace([workspace_tool, changed_delegate_tool], trace_id)
+
+    assert second is not first
+    assert second[0] is first[0]
+    assert second[1] is not first[1]
+
+
 def test_tool_schema_retry_guidance_does_not_change_tool_schema_view():
     from app.core.prompt_cache_observer import describe_prompt_cache_input
 
@@ -154,6 +220,18 @@ def test_tool_schema_retry_guidance_does_not_change_tool_schema_view():
     assert slim_again is slim
     assert "workspace" not in toolchain_cache.expanded_schema_tools(trace_id)
     assert toolchain_cache.tool_schema_retry_guidance(tools, trace_id) == ""
+
+
+def test_clear_tool_schema_retry_removes_transient_expansion():
+    trace_id = "trace_schema_clear"
+    toolchain_cache.reset_trace(trace_id)
+
+    toolchain_cache.mark_tool_schema_retry("workspace", "bad args", trace_id)
+    assert "workspace" in toolchain_cache.expanded_schema_tools(trace_id)
+
+    toolchain_cache.clear_tool_schema_retry("workspace", trace_id, reason="model changed tool")
+
+    assert "workspace" not in toolchain_cache.expanded_schema_tools(trace_id)
 
 
 def test_toolchain_summary_includes_structured_agent_state():

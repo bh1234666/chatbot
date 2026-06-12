@@ -115,3 +115,36 @@ def test_prompt_shape_metrics_record_local_cache_estimates(monkeypatch) -> None:
     rendered = metrics.render_prometheus()
     assert "llm_prompt_shape_static_bytes_total" in rendered
     assert 'tag="tools_loop.iter1.main",model="unit-model"' in rendered
+
+
+def test_prompt_shape_local_lcp_is_trace_isolated(monkeypatch) -> None:
+    from app.core import debug
+    from app.core.prompt_cache_observer import serialized_prompt_cache_input
+    from app.llm import client
+
+    logs = []
+    monkeypatch.setattr(client.debug, "log", lambda category, msg="", payload=None: logs.append((category, payload)))
+    client._last_prompt_shape_serialized.clear()
+
+    messages_a = [
+        {"role": "system", "content": "## Context And Safety Contract\nstable"},
+        {"role": "user", "content": "trace A request"},
+    ]
+    messages_b = [
+        {"role": "system", "content": "## Context And Safety Contract\nother"},
+        {"role": "user", "content": "trace B request with different prefix"},
+    ]
+
+    debug.set_trace_id("trace-a")
+    client._log_prompt_cache_shape(label="chat_stream", model="unit-model", messages=messages_a)
+    debug.set_trace_id("trace-b")
+    client._log_prompt_cache_shape(label="chat_stream", model="unit-model", messages=messages_b)
+    debug.set_trace_id("trace-a")
+    client._log_prompt_cache_shape(label="chat_stream", model="unit-model", messages=messages_a)
+
+    lcp_payloads = [payload for category, payload in logs if category == "llm.prompt_cache_lcp"]
+    assert len(lcp_payloads) == 1
+    assert lcp_payloads[0]["trace_id"] == "trace-a"
+    assert lcp_payloads[0]["common_prefix_bytes"] == len(
+        serialized_prompt_cache_input(messages=messages_a)
+    )

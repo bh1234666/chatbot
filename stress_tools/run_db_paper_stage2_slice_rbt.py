@@ -57,10 +57,18 @@ def main() -> int:
             "Stage 2: framework_contract.md is already present in the working "
             "directory. Complete ONLY slice_rbt (Red-Black Tree). Read just the "
             "slice_rbt section and the per-slice acceptance checklist; do not "
-            "re-read the entire contract. Produce src/rbtree.c (or .py if gcc is "
-            "absent), a small benchmark stub, and analysis/rbt_analysis.md with "
-            "the required sections. Create skeleton output files early, then fill "
-            "and self-check. Do not start any other slice. "
+            "re-read the entire contract. Produce the artifact paths declared by "
+            "that slice in framework_contract.md (for example, current contracts "
+            "may declare slice_rb_tree/rb_tree.c, slice_rb_tree/rb_tree.h, "
+            "slice_rb_tree/benchmark_rb.csv, and slice_rb_tree/analysis_rb.md). "
+            "This is a bounded smoke run, not a full performance study: keep the "
+            "benchmark small enough to finish within this chat turn, for example "
+            "1K/10K/100K tiers or sampled 1M data if cheap. If the framework's "
+            "full 1M acceptance benchmark is not run, state that fact explicitly "
+            "in analysis_rb.md as remaining full-scale verification, but still "
+            "produce the CSV, code, header, and analysis with the verified smoke "
+            "evidence. Create skeleton output files early, then fill and self-check. "
+            "Do not start any other slice. "
             "中文概要：仅完成红黑树 slice，先建骨架再填充，不读完整契约，不动其它切片。"
         ),
         "current_dir": str(work_dir),
@@ -82,6 +90,11 @@ def main() -> int:
     declared_outputs_seen_at: dict[str, float] = {}
 
     artifact_markers = [
+        "slice_rb_tree/",
+        "rb_tree.c",
+        "rb_tree.h",
+        "analysis_rb.md",
+        "benchmark_rb.csv",
         "src/rbtree",
         "rbtree.c",
         "rbtree.py",
@@ -137,8 +150,18 @@ def main() -> int:
         for p in work_dir.rglob("*")
         if p.is_file() and p.name != "framework_contract.md"
     ]
-    rbt_source = [p for p in produced if "rbtree" in p.lower()]
-    rbt_analysis = [p for p in produced if "rbt_analysis" in p.lower()]
+    def _is_rbt_source(rel: str) -> bool:
+        low = rel.replace("\\", "/").lower()
+        name = Path(low).name
+        return name in {"rb_tree.c", "rb_tree.h", "rbtree.c", "rbtree.h", "rbtree.py"} or "rbtree" in name
+
+    def _is_rbt_analysis(rel: str) -> bool:
+        low = rel.replace("\\", "/").lower()
+        name = Path(low).name
+        return name in {"analysis_rb.md", "rbt_analysis.md"} or "rbt_analysis" in low
+
+    rbt_source = [p for p in produced if _is_rbt_source(p)]
+    rbt_analysis = [p for p in produced if _is_rbt_analysis(p)]
     bench_csv = [p for p in produced if p.endswith(".csv")]
 
     summary_data = {
@@ -162,7 +185,7 @@ def main() -> int:
     )
     print(f"[stage2] summary written to {summary}")
     print(json.dumps(summary_data, ensure_ascii=False, indent=2))
-    return 0 if (rbt_source or rbt_analysis) else 1
+    return 0 if (rbt_source and rbt_analysis and bench_csv) else 1
 
 
 if __name__ == "__main__":

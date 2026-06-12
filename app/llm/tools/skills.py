@@ -1,7 +1,7 @@
 """Helper skill text and skill listing.
 
-Skill bodies are model-visible only when a helper explicitly calls
-`read_skill(name=...)`. Keep the main body in English and add a short Chinese
+Skill bodies are model-visible only when a helper explicitly calls the
+`read_skill` tool with a `name` argument. Keep the main body in English and add a short Chinese
 summary after each skill so prompts stay consistent with the rest of the agent.
 """
 
@@ -96,8 +96,8 @@ Use this skill when a read helper must extract evidence from source materials, v
 
 ## Large Files
 - Read document body text and image text as separate evidence streams.
-- For Word body text, use office(read) with `start_block`/`end_block`/`max_blocks` and continue from `next_start_block` when more coverage is needed.
-- For embedded images, use office(ocr_images) with `image_offset`/`max_images`/`save_to`, then read the saved OCR text with read_file line ranges.
+- For Word body text, use the `office` tool with `action="read"`, `start_block`, `end_block`, and `max_blocks`; continue from `next_start_block` when more coverage is needed.
+- For embedded images, use the `office` tool with `action="ocr_images"`, `image_offset`, `max_images`, and `save_to`; then read the saved OCR text with read_file line ranges.
 - For standalone large or long images, call ocr with `save_to` and read the saved text by ranges.
 - Treat truncation as a signal to page evidence, not to guess.
 
@@ -147,14 +147,14 @@ For crashes, inspect initialization, bounds, ownership, NUL termination, integer
 Build documents in a few substantial calls instead of one tiny section at a time.
 
 ## Preferred Flow
-1. Create the document skeleton with title, all section headings, figure/image placeholders, and a brief intro paragraph (one office.write call with 8-30 blocks).
-2. Use office.append in batches — each append call should carry content for 3-6 sections or 800-2000 words, not a single paragraph. Pack multiple heading+paragraph+image blocks into one append blocks array.
+1. Create the document structure with title, all section headings, and brief confirmed draft content in one `office` call with `action="write"` and 8-30 blocks. If acceptance checks forbid placeholders or internal markers, do not insert TODO/TKTK/INSERT/PLACEHOLDER_* tokens, bracket ellipses, lorem ipsum, or temporary image-placeholder prose that must be removed later.
+2. Use `office` calls with `action="append"` in batches; each append call should carry coherent content such as a chapter group, table set, or 3-6 sections / 800-2000 words when JSON reliability allows, not a single paragraph. Pack multiple heading+paragraph+image blocks into one append blocks array.
 3. If you must read back, read a broad range (start_block/end_block covering 15-40 blocks) rather than peeking at one section at a time.
 4. Insert final PNG/chart resources after they exist.
 5. Verify only at the end — read the heading list or a wide body excerpt, check against your source evidence, and fix discovered gaps with one more append/replace_block — not another round of per-section reads.
-6. Target 5-10 office tool calls total for a 12-section document. More calls than that and you are moving one paragraph at a time (too slow).
+6. Target 5-10 office tool calls total for a 12-section document when the evidence and payload size make that reliable. More calls than that is a factual signal that the document may be moving one paragraph at a time; compare that cost with the need for fine-grained source control.
 
-Every extra LLM iteration between office calls costs seconds. Bundle content into fewer, larger calls.
+Every extra LLM iteration between office calls costs seconds. Bundle content into fewer, larger calls when the sections are coherent and the tool limits allow it.
 
 ## Data And Evidence
 Use source CSV/JSON/stdout/OCR text as evidence. Keep numbers, labels, units, figure names, and conclusions consistent with those sources. If a required chart or source is missing, request the resource and pause rather than writing a fake final section.
@@ -236,26 +236,27 @@ Use Office tools for docx/pptx/xlsx containers. Use normal text/file tools for p
 - `extract_images`: export embedded media to workspace files.
 - `ocr_images`: recognize embedded image text; batch with `image_offset`/`max_images` and use `save_to` for large OCR output.
 - `write`/`append`: create or extend DOCX blocks, PPTX slides, or XLSX sheets.
-- `replace_section`/`replace_block`/`insert_block`/`delete_block`: targeted DOCX edits after a read gives reliable indexes.
+- `replace_section`/`replace_block`/`replace_blocks`/`insert_block`/`delete_block`: targeted DOCX edits after a read gives reliable indexes; use `replace_blocks` when several concrete block indexes need edits.
 - `replace_slide`/`insert_slide`/`delete_slide`: targeted PPTX edits.
 - `update_cells`: targeted XLSX edits.
-- `verify_numbers`/`verify_rigor`/`verify_integrity`: numeric, rigor, and workbook integrity checks.
+- `verify_numbers`/`verify_rigor`/`verify_integrity`: numeric, rigor, and workbook integrity checks. DOCX data checks need `csv_paths`; DOCX structural acceptance uses `read`; `verify_integrity` is XLSX-only and is not a DOCX validity check.
 
 ## Large Writes
 - Prefer one coherent chapter/section per call: heading, paragraphs, tables, formulas, and images that belong together.
 - The tool may return `arg_size_warning` with the active block/text limits. Use those reported limits for the next call.
 - If the same heading is repeatedly replaced without convergence, read the document structure once and rewrite the affected section from current evidence.
-- Once body text, tables, images, and acceptance checks pass, stop rereading the whole artifact unless a named gap remains.
+- Once body text, tables, images, and acceptance checks pass, stop rereading the whole artifact unless a named gap remains. A successful DOCX read already gives headings plus paragraph/block, table, and image counts; repeat reads are useful when the artifact changed or a specific block range/detail is still unchecked.
 
 ## DOCX
-- Build from confirmed evidence: create a skeleton, append bounded sections, and keep each section coherent.
-- Valid block types are `heading`, `paragraph`, `list`, `table`, `image`, `equation`, and `page_break`. Use `paragraph` for ordinary prose and `list` for bullet or numbered content.
-- Tables need non-empty two-dimensional rows. Remove empty rows before calling the tool.
+- Build from confirmed evidence: create a structure with headings and real draft content, append bounded sections, and keep each section coherent.
+- Valid block types are `heading`, `paragraph`, `list`, `table`, `image`, `equation`, and `page_break`. Use `paragraph` for ordinary prose/subtitles and `list` for bullet or numbered content.
+- Tables need non-empty two-dimensional rows such as `rows:[["A","B"],["C","D"]]`. Remove empty rows before calling the tool.
 - Keep Word tables readable: prefer 3-6 meaningful columns, short cells, and several focused tables over one wide prose-heavy table.
 - Image blocks need an existing workspace `path`; generate or fetch images first, then embed them.
-- If prose says "Figure N", "Fig. N", or "图 N", the adjacent content should include the corresponding image block or markdown image. Use office read/inspect output to confirm figure consistency.
+- If prose says "Figure N", "Fig. N", or "图 N", the adjacent content should include the corresponding image block or markdown image. Use office(action="read") or inspect output to confirm figure consistency.
 - For targeted edits, read the document first and use the exact non-negative `block_index`.
-- Verify DOCX data claims with `verify_numbers` or `verify_rigor`; use `read` or `inspect_file` for structural acceptance.
+- Verify DOCX data claims with `verify_numbers` or `verify_rigor`; use `read` or `inspect_file` for structural acceptance. Do not use `verify_integrity` as a DOCX validity check.
+- DOCX/PPTX/XLSX are structured containers, not plain text. Do not use `search_in_file` on those paths; use the `office` tool with `action="read"` for document body/structure.
 - For large DOCX reads, page body text with `start_block`/`end_block`/`max_blocks`. Read body text and embedded-image OCR as separate evidence streams.
 
 ## PPTX
@@ -280,7 +281,7 @@ Keep Chinese prose outside LaTeX formula text. Split align/cases/matrix-style co
 - `verify_rigor` adds ratio/assertion checks, pivot aliases/values, internal fact consistency, scaling observations, and optional reproducibility metadata checks for DOCX.
 - `comparison_assertions` are strongest when the document wording, CSV row filters, baseline/target pivots, claimed ratio, value column, and tolerance are all supplied.
 - `internal_facts` can check repeated facts across abstract/body/conclusion with a regex and expected value.
-- `verify_integrity` checks XLSX cross-sheet consistency and formula cached-value sanity.
+- `verify_integrity` checks XLSX cross-sheet consistency and formula cached-value sanity; it is XLSX-only.
 - If a verifier reports concrete mismatches, repair the cited section/cell and run the relevant verifier again.
 
 Office 工具用于结构化文档容器；DOCX block/action 必须匹配，大文档按工具返回限制分段，图片引用要嵌入并验收，公式和数据严谨性按证据检查，复杂计算先由 code helper 给出证据再写入文档。""",
@@ -344,7 +345,7 @@ def _build_skills_listing() -> str:
     lines = [
         "",
         "## On-Demand Skills",
-        "The following skills contain detailed guidance. Load one with `read_skill(name=...)` only when the current task or failure pattern matches it:",
+        "The following skills contain detailed guidance. Load one with the `read_skill` tool and a matching `name` only when the current task or failure pattern matches it:",
     ]
     for name in list_skills():
         desc = _SKILL_DESCRIPTIONS.get(name, "(no description)")

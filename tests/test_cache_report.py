@@ -59,6 +59,7 @@ SAMPLE_LOG = """\
 [19:10:03.001] [trace-b             ] [llm.prompt_cache_shape]       {"label": "messages", "bytes": 920, "hash": "chain-msg-b", "segment_hash": "seg-msg-b"}
 [19:10:03.001] [trace-b             ] [llm.prompt_cache_shape]     ]
 [19:10:03.001] [trace-b             ] [llm.prompt_cache_shape]   }
+[19:10:03.002] [trace-b             ] [llm.prompt_cache_lcp] tools_loop.iter1.main: model=deepseek-main local_common_prefix=99.5000% bytes=1990/2000
 [19:10:05.001] [trace-b             ] [llm.cache_stats] P49 [main]: model=deepseek-main prompt=6000 completion=350 cache_hit=5400 cache_miss=600 hit_rate=90%
 [19:10:07.001] [trace-b.read        ] [llm.cache_stats] P49 [helper.read_ielts]: model=deepseek-main prompt=3000 completion=200 cache_hit=2100 cache_miss=900 hit_rate=70%
 [19:10:12.001] [trace-b             ] [llm.cache_stats] P49 [main]: model=deepseek-main prompt=4000 completion=100 cache_hit=1600 cache_miss=2400 hit_rate=40%
@@ -89,6 +90,7 @@ def test_parse_debug_log_text_extracts_shape_and_usage() -> None:
 
     assert len(report.shapes) == 2
     assert len(report.stats) == 17
+    assert len(report.lcps) == 1
     assert report.shapes[0].label == "tools_loop.iter1.main"
     assert report.shapes[0].tag_hint == "main"
     assert report.shapes[0].cacheable_prefix_bytes == 31200
@@ -100,6 +102,7 @@ def test_parse_debug_log_text_extracts_shape_and_usage() -> None:
     assert report.stats[0].cache_hit_tokens == 4200
     assert report.stats[0].timestamp == 69002.001
     assert report.route_events[0].category == "round2.upgrade_hard"
+    assert report.lcps[0].common_prefix_percent == 99.5
 
 
 def test_render_cache_report_markdown_groups_rows() -> None:
@@ -108,6 +111,8 @@ def test_render_cache_report_markdown_groups_rows() -> None:
 
     assert "# Prompt Cache Report" in markdown
     assert "local prefix share" in markdown
+    assert "## Local Adjacent Prefix Diagnostics" in markdown
+    assert "| tools_loop.iter1.main | main | deepseek-main | 1 | 99.5% | 99.5% | 99.5% | 1990 | 2000 |" in markdown
     assert "| tools_loop.iter1.main | main | deepseek-main | 2 | 31200 | 1950 | 31200 | 94.1% | 1 | 1 |" in markdown
     assert "## Section Stability" in markdown
     assert "| tools_loop.iter1.main | deepseek-main | message | msg1.user:## Current Message To Answer | 2 | 2 | 50 |" in markdown
@@ -130,11 +135,16 @@ def test_render_cache_report_markdown_groups_rows() -> None:
     assert "| short_interval_upstream_or_ttl | main | deepseek-main | 1 | 4000 | 1600 | 2400 | 40.0% |" in markdown
     assert "| first_seen_tag_model | helper.first_seen | deepseek-flash | 1 | 2000 | 200 | 1800 | 10.0% |" in markdown
     assert "## Low-Hit Call Diagnostics" in markdown
+    assert "local LCP evidence" in markdown
     assert "| 19:10:12.001 | trace-b | main | deepseek-main | 40.0% | 1600 | 2400 | 7.0 | short_interval_upstream_or_ttl | none | shape_seen:tools_loop.iter1.main |" in markdown
+    assert "local_lcp=99.5%:tools_loop.iter1.main" in markdown
     assert "| 19:11:00.001 | trace-first | helper.first_seen | deepseek-flash | 10.0% | 200 | 1800 | n/a | first_seen_tag_model | none | shape_missing |" in markdown
+    assert "shape_missing | lcp_missing |" in markdown
     assert "| 19:17:00.001 | trace-long-b | helper.long_idle | deepseek-flash | 10.0% | 200 | 1800 | 350.0 | ttl_or_long_idle | none | shape_missing |" in markdown
     assert "| 19:17:07.001 | trace-short-b | main.short | deepseek-main | 10.0% | 200 | 1800 | 2.0 | short_interval_prefix_change | none | shape_missing |" in markdown
     assert "| 19:17:12.001 | trace-route-low | main.route_low | deepseek-pro | 10.0% | 200 | 1800 | n/a | model_switch_cold_start | model_switch | shape_missing |" in markdown
+    assert "## In-Trace Follow-Up Provider Cache Usage" in markdown
+    assert "| main | deepseek-main | 1 | 4000 | 100 | 1600 | 2400 | 40.0% |" in markdown
     assert "system/tool hash" in markdown
     assert "tag|model" in markdown
 

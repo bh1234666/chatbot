@@ -57,7 +57,6 @@ def _helper_scope_error(command: str, ws_dir: str) -> str:
 
 
 _DANGEROUS_KEYWORDS = {
-    "format",
     "diskpart",
     "regedit",
     "reg add",
@@ -77,14 +76,9 @@ _DANGEROUS_KEYWORDS = {
     "bcdedit",
     "bootcfg",
     "fsutil",
-    "label",
-    "convert",
-    "compact",
-    "cipher",
     "vssadmin",
     "wmic",
     "powershell",
-    "start",
     "taskkill",
     "tskill",
     "rundll32",
@@ -93,6 +87,7 @@ _DANGEROUS_KEYWORDS = {
     "wscript",
     "msiexec",
 }
+_DANGEROUS_EXACT_EXECUTABLES = {"format", "label", "convert", "compact", "cipher", "start"}
 
 # 2026-06-05: 关键字 → 修复路径映射。被拦时附在错误信息后面,避免 LLM 重试同一命令。
 # 与 command_risk.recovery_hints 对齐, 但 set 包含的关键字更全(如 'start' 在这里 layer 命中)。
@@ -171,6 +166,7 @@ _PATH_RE = re.compile(
     r"|'[^']*?[\\/][^']*?')"             # 含路径分隔符的单引号字符串
 )
 _REDIRECT_RE = re.compile(r'[>]{1,2}\s*([^\s&|<>;]+)')
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 # 2026-06-05: 与 command_risk._REDIRECT_OUTSIDE_MSG 对齐的恢复提示。
 _REDIRECT_OUTSIDE_MSG = (
@@ -329,9 +325,11 @@ def _diagnose_build_failure(command: str, stderr: str, stdout: str,
     if "SyntaxError:" in text:
         return (
             "Python SyntaxError. If the command uses `cmd /c python -c ...`, complex quotes, or f-strings, "
-            "stop retrying one-line `-c`. Write a .py script with workspace(action='write') and run it with "
+            "stop retrying one-line `-c`. In environment/project mode, use env_run with python_code for "
+            "inspection probes so the temporary script stays outside the project tree. In an ordinary "
+            "workspace/helper sandbox, write a small .py script with workspace(action='write') and run it with "
             "workspace(action='run', command='python script.py') so quoting is stable and line numbers are real.\n"
-            "复杂 Python 检查写成脚本再运行，避免 shell 引号破坏。"
+            "复杂 Python 检查不要重试 python -c；项目环境用 env_run python_code，普通工作区可写小脚本再运行。"
         )
     if "KeyError:" in text:
         return (
@@ -540,6 +538,9 @@ def _security_check(command: str, ws_dir: str) -> str | None:
     # Layer 2：命令类型分发
     parts = command.split()
     exe = parts[0].lower() if parts else ""
+    exact_exe = _first_effective_executable(parts)
+    if exact_exe in _DANGEROUS_EXACT_EXECUTABLES:
+        return _restricted_executable_error(exact_exe)
 
     # 2026-05-09 Patch 28(撤回 Patch 27 的硬拦截):
     # 主线程不被禁写代码的根本原因是**能力**(对长串迭代编码效率低、正确率低),
@@ -564,6 +565,44 @@ def _security_check(command: str, ws_dir: str) -> str | None:
         return _check_gcc(command, ws_dir)
 
     return None
+
+
+_CMD_SWITCHES_WITH_VALUE = {"/a", "/u", "/t"}
+_CMD_SWITCHES_WITHOUT_VALUE = {"/d", "/e:on", "/e:off", "/f:on", "/f:off", "/q", "/s", "/v:on", "/v:off"}
+
+
+def _cmd_payload_index(parts: list[str], start: int = 1) -> int:
+    index = start
+    while index < len(parts):
+        token = parts[index].lower().rstrip("/")
+        if token in ("/c", "/k"):
+            return index + 1
+        if token in _CMD_SWITCHES_WITH_VALUE:
+            index += 2
+            continue
+        if token in _CMD_SWITCHES_WITHOUT_VALUE or token.startswith(("/e:", "/f:", "/v:")):
+            index += 1
+            continue
+        return index
+    return index
+
+
+def _first_effective_executable(parts: list[str]) -> str:
+    if not parts:
+        return ""
+    exe = parts[0].lower()
+    if exe in ("cmd", "cmd.exe"):
+        index = _cmd_payload_index(parts)
+        return parts[index].lower().rstrip("/") if index < len(parts) else ""
+    return exe
+
+
+def _restricted_executable_error(exe: str) -> str:
+    _hint = _SECURITY_RECOVERY_HINTS.get(exe, "")
+    _msg = f"security blocked: command uses restricted executable '{exe}'.\n安全策略拦截该可执行程序。"
+    if _hint:
+        _msg = f"{_msg}\n{_hint}"
+    return _msg
 
 
 def _check_cmd(command: str, ws_dir: str) -> str | None:
@@ -666,9 +705,28 @@ def _extract_paths(command: str) -> list[str]:
     """从命令字符串中提取所有可能的文件路径。"""
     paths = []
     for m in _PATH_RE.finditer(command):
+        if _path_match_is_uri(command, m):
+            continue
         p = m.group(1).strip("\"'")
         paths.append(p)
     return paths
+
+
+def _path_match_is_uri(command: str, match: re.Match[str]) -> bool:
+    """Return True when a path-like regex hit is inside a URL/URI token."""
+    raw = (match.group(1) or "").strip("\"'`")
+    if re.search(r"[A-Za-z][A-Za-z0-9+.-]*://", raw):
+        return True
+    start = match.start(1)
+    end = match.end(1)
+    left = start
+    while left > 0 and command[left - 1] not in " \t\r\n\"'`<>()[]{}":
+        left -= 1
+    right = end
+    while right < len(command) and command[right] not in " \t\r\n\"'`<>()[]{}":
+        right += 1
+    token = command[left:right].strip("\"'`")
+    return bool(_URI_SCHEME_RE.match(token))
 
 
 def _is_abs_outside(path_str: str, ws_dir: str) -> bool:
@@ -690,7 +748,7 @@ def _has_redirect_to_outside(command: str, ws_dir: str) -> bool:
     m = _REDIRECT_RE.search(command)
     if not m:
         return False
-    dest = m.group(1).strip("\"'")
+    dest = m.group(1).strip("\"'").rstrip(";")
     if dest.replace("\\", "/").lower() in {"/dev/null", "nul", "null"}:
         return False
     return _is_abs_outside(dest, ws_dir)
@@ -710,6 +768,8 @@ def _touches_prev_or_outside(command: str, ws_dir: str) -> bool:
     ws = Path(ws_dir).resolve()
     # 检查命令中每一个看起来像路径的片段
     for m in _PATH_RE.finditer(command):
+        if _path_match_is_uri(command, m):
+            continue
         p_str = m.group(1).strip("\"'")
         if not p_str:
             continue

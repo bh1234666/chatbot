@@ -370,6 +370,10 @@ from app.llm.tools.delegate_quality import (  # noqa: E402,F401
 
     text_mojibake_warnings,
 
+    source_data_approximation_warnings,
+
+    document_structure_quantity_warnings,
+
     repair_common_mojibake_text,
 
     _pptx_slide_texts_for_quality_check,
@@ -486,9 +490,9 @@ def current_user_lang() -> str:
 
 # 方案:在 spawn 入口启动一个**独立 lite LLM 守卫**,与 helper **并行**判断
 
-# "这个角色是否同意做这些任务"。守卫否决 → cancel 整棵 trace 的 helper +
+# "当前派发是否应当运行"。守卫拦截 → cancel 整棵 trace 的 helper +
 
-# 返回 persona_veto 给主线程,主线程下一轮看到反馈会切到拒绝模式。
+# 返回 guard_blocked 和自由理由给主线程；主线程可重规划或用 dispatch_reason 说明后重派。
 
 #
 
@@ -588,7 +592,8 @@ def _current_task_anchor_for_guard(user_message: str, tasks: list[dict]) -> str:
         intent = str(getattr(ctx, "plan_intent", "") or "").strip()
         key_points = list(getattr(ctx, "plan_key_points", None) or [])
         deliverables = list(getattr(ctx, "plan_deliverables", None) or [])
-        if intent or key_points or deliverables:
+        markers = dict(getattr(ctx, "plan_markers", None) or {})
+        if intent or key_points or deliverables or markers:
             lines = ["Thread task contract:"]
             if intent:
                 lines.append("intent=" + intent[:500])
@@ -596,7 +601,58 @@ def _current_task_anchor_for_guard(user_message: str, tasks: list[dict]) -> str:
                 lines.append("key_points=" + json.dumps(key_points[:10], ensure_ascii=False)[:900])
             if deliverables:
                 lines.append("deliverables=" + json.dumps(deliverables[:10], ensure_ascii=False)[:500])
+            if markers:
+                lines.append("markers=" + json.dumps(markers, ensure_ascii=False, sort_keys=True)[:700])
             parts.append("\n".join(lines))
+    try:
+        from app.core import agent_state as _agent_state
+        trace_id = debug.current_trace_id() or ""
+        state = _agent_state.structured_status(trace_id) if trace_id else {}
+    except Exception:
+        state = {}
+    if isinstance(state, dict):
+        evidence_lines: list[str] = []
+        for ev in list(state.get("verified_evidence_recent") or [])[-12:]:
+            if not isinstance(ev, dict):
+                continue
+            source = str(ev.get("source") or "")
+            kind = str(ev.get("kind") or "")
+            # 2026-06-11 Round 15: include completed-helper evidence so a
+            # follow-up delegation is judged against what prior helpers already
+            # produced. Without it the guard blocked a patch helper for
+            # "missing browser tools" AFTER a browser helper had completed the
+            # Playwright evidence (20260611_162518_p16784, 2x guard_blocked,
+            # recovery 0.2).
+            if source == "helper" and kind:
+                summary = str(ev.get("summary") or "").strip()
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                line = f"- completed_helper[{kind}]: {summary[:220]}"
+                if data.get("terminal_reason"):
+                    line += f" (terminal={data.get('terminal_reason')}, ok={data.get('ok')})"
+                evidence_lines.append(line)
+                continue
+            if source != "env_read" and kind not in {"project_file_read", "exact_text_reference"}:
+                continue
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            ev_path = str(data.get("path") or "").strip()
+            summary = str(ev.get("summary") or "").strip()
+            facts = data.get("text_facts") if isinstance(data.get("text_facts"), dict) else {}
+            fact_bits = []
+            for key in ("total_lines", "line_count", "start_line", "end_line", "truncated"):
+                if facts.get(key) not in (None, "", [], {}):
+                    fact_bits.append(f"{key}={facts.get(key)}")
+            if data.get("sha256"):
+                fact_bits.append(f"sha256={str(data.get('sha256'))[:12]}...")
+            line = f"- {kind or source}: {ev_path or summary[:160]}"
+            if fact_bits:
+                line += " (" + ", ".join(fact_bits[:6]) + ")"
+            evidence_lines.append(line)
+        if evidence_lines:
+            parts.append(
+                "Recent verified main-thread and completed-helper evidence:\n"
+                + "\n".join(evidence_lines)
+                + "\nThese are facts already observed by the main workflow. A completed_helper line means that helper already produced its evidence; a follow-up delegation consuming that evidence does not need the same tools again. They do not by themselves prove that downstream synthesis is complete."
+            )
     task_goal_lines: list[str] = []
     for t in (tasks or [])[:5]:
         if not isinstance(t, dict):
@@ -626,14 +682,14 @@ def _task_quality_guard_environment_helper_text() -> tuple[str, str, str]:
     if not enabled:
         return (
             "",
-            "suggested_kind must be one of these base kinds; do not suggest final.\n",
+            "Helper-kind scope facts may reference only these base kinds; `final` is not a helper kind.\n",
             "- Broad project architecture mapping -> project_map; selected-file summaries -> file_summary; change-risk review -> impact_review.\n",
         )
     return (
         "- inventory: environment-only first-pass project inventory, file-type coverage, README/entry/config/test discovery, exact lightweight statistics, and unread source-material notes.\n",
-        "suggested_kind must be one of these base kinds, plus environment-only inventory when the task is first-pass project inventory; do not suggest final.\n",
+        "Helper-kind scope facts may reference base kinds plus environment-only inventory for first-pass project inventory; `final` is not a helper kind.\n",
         "- First-pass unfamiliar project inventory -> inventory; deeper architecture mapping -> project_map; selected-file summaries -> file_summary; change-risk review -> impact_review.\n"
-        "- Framework/contract/spec/outline tasks that must write `.txt`, `.md`, or `.json` files are artifact-producing. Suggest code when the contract controls runnable project files, benchmark execution, generated datasets, APIs, schemas consumed by code, or implementation interfaces. Suggest edit when the contract controls an article, report, paper, prose chapter plan, literature review structure, document acceptance checklist, or final-document assembly plan.\n"
+        "- Framework/contract/spec/outline tasks that must write `.txt`, `.md`, or `.json` files are artifact-producing. Code is the matching kind when the contract controls runnable project files, benchmark execution, generated datasets, APIs, schemas consumed by code, or implementation interfaces. Edit is the matching kind when the contract controls a long-form document, report structure, prose section plan, literature review structure, document acceptance checklist, or final-document assembly plan.\n"
         "- Technical subject matter alone does not make a task code. Markdown algorithm analysis, theoretical comparison tables, and proposed data-structure descriptions remain edit unless they must implement code, run experiments, or generate structured benchmark data.\n",
     )
 
@@ -672,52 +728,23 @@ async def _persona_consent_guard(
 
     persona: str, user_message: str, tasks: list[dict]
 
-) -> tuple[bool, str, list[dict], list[dict], dict]:
+) -> tuple[bool, str, list[dict], list[dict]]:
 
-    """LLM quality guard for persona fit, split needs, helper kind, and framework needs.
+    """LLM quality guard for whether this exact delegation may run as-is.
 
-    Kind reference: reading or extracting user/source materials from files -> read; summarizing selected source/config files in a code project -> file_summary; final Office/PDF delivery -> edit.
+    The runtime only executes should_act plus the free-form reason. Symbolic
+    checks are attached as guard_observations, and old structured guard fields
+    are ignored for runtime decisions.
 
-    材料读取归 read；工程源码小范围摘要归 file_summary；最终文档装配归 edit。
-
-
-
-
-    返回 (should_act, reason, split_recommendations, kind_recommendations, framework_block)
-
-    - should_act: 是否允许执行(人设否决时 false)
-
-    - reason: 总理由
-
-    - split_recommendations: 拆分建议(P19)
-
-    - kind_recommendations: kind 类型匹配建议(P21 新)
-
-    - framework_block: 同类对比缺统一框架时 {block,task_ids,reason}(2026-05-21 新),否则 {}
-
-
-
-    保守原则:不明确拒绝 → True;guard 失败/异常 → True(可用性优先)。
-
-    用 lite 模型,~2-5s 完成。
-
-
-
-    2026-05-12 P19+P21 增强:
-
-    - P19: 同时判断任务可拆分性
-
-    - P21: 同时判断 kind 类型是否匹配 (用户洞察: paper_final kind=code 导致 STUCK)
-
-    死循环防御:同一 task_id 被 split/kind block ≥ 2 次后第 3 次放行(沿用 trace 4 次上限)。
-
+    守卫只输出是否允许当前派发及自由理由；符号化检测只作为事实输入。
     """
 
     if not tasks:
 
         return True, "", [], []
 
-    # 任务摘要(每个 prompt 截 400 字 — 比之前 150 多, 让 LLM 看清拆分维度)
+    # Compact task summary for the guard. Keep full task-specific facts in the
+    # user message so the static guard system prompt stays cache-stable.
 
     _task_brief_lines = []
 
@@ -729,17 +756,61 @@ async def _persona_consent_guard(
 
         _mode = t.get("mode", "easy")
 
-        _prompt = (t.get("prompt") or "")[:400]
+        # Short head-only excerpts can hide prompt-embedded evidence, output
+        # paths, or acceptance facts from the guard. Show head and tail plus
+        # the total length fact so final-assembly prompts are judged on shape.
+        _prompt_full = t.get("prompt") or ""
+        if len(_prompt_full) > 1800:
+            _prompt = (
+                _prompt_full[:1000]
+                + "\n...[middle omitted for guard brief]...\n"
+                + _prompt_full[-800:]
+            )
+        else:
+            _prompt = _prompt_full[:1400]
 
         _eo = t.get("expected_outputs") or []
+        try:
+            from app.llm.tools.delegate_framework import normalize_string_list
+            _input_files = normalize_string_list(
+                t.get("input_files")
+                or t.get("source_files")
+                or t.get("transferred_files")
+                or t.get("files"),
+                max_items=20,
+                max_chars_each=180,
+            )
+            _acceptance_checks = normalize_string_list(
+                t.get("acceptance_checks") or t.get("checks"),
+                max_items=16,
+                max_chars_each=220,
+            )
+        except Exception:
+            _input_files = [
+                str(x)[:180]
+                for x in (t.get("input_files") or [])
+                if str(x).strip()
+            ][:20]
+            _acceptance_checks = [
+                str(x)[:220]
+                for x in (t.get("acceptance_checks") or [])
+                if str(x).strip()
+            ][:16]
  
         _task_brief_lines.append(
- 
+
             f"- task_id={_tid} kind={_kind} mode={_mode} expected_outputs={_eo}\n"
- 
-            f"  prompt first 400 chars: {_prompt}"
- 
+            f"  input_files: {_input_files or []}\n"
+            f"  acceptance_checks: {_acceptance_checks or []}\n"
+
+            f"  prompt total {len(_prompt_full)} chars; first {len(_prompt)} shown: {_prompt}"
+
         )
+        _dispatch_reason = str(t.get("dispatch_reason") or "").strip()
+        if _dispatch_reason:
+            _task_brief_lines.append(
+                f"  main dispatch reason: {_dispatch_reason[:700]}"
+            )
         _observations = t.get("guard_observations") or []
         if isinstance(_observations, list) and _observations:
             _task_brief_lines.append(
@@ -754,7 +825,7 @@ async def _persona_consent_guard(
         _task_brief += f"\n... {len(tasks) - 5} additional task(s) omitted."
 
 
-    _env_helper_kind_line, _suggested_kind_line, _project_kind_principle = _task_quality_guard_environment_helper_text()
+    _env_helper_kind_line, _helper_kind_scope_facts, _project_kind_principle = _task_quality_guard_environment_helper_text()
 
 
     # 拿当前 trace 的 split-block 计数, 写进 prompt 让 guard LLM 知道(避免一直拦)
@@ -791,7 +862,7 @@ async def _persona_consent_guard(
     _guard_runtime_facts = _aux.build_task_quality_guard_runtime_facts(
         persona=(persona or "(无人设,只判断可拆分性和类型匹配)"),
         env_helper_kind_line=_env_helper_kind_line,
-        suggested_kind_line=_suggested_kind_line,
+        helper_kind_scope_facts=_helper_kind_scope_facts,
         project_kind_principle=_project_kind_principle,
         existing_block_counts=_existing_block_counts,
         existing_kind_block_counts=_existing_kind_block_counts,
@@ -801,7 +872,7 @@ async def _persona_consent_guard(
         {"role": "system", "content": _aux.build_task_quality_guard_system(
             persona="",
             env_helper_kind_line="",
-            suggested_kind_line="",
+            helper_kind_scope_facts="",
             project_kind_principle="",
             existing_block_counts={},
             existing_kind_block_counts={},
@@ -828,257 +899,8 @@ async def _persona_consent_guard(
 
         should_act = bool(result.get("should_act", True))
 
-        reason = str(result.get("reason", ""))[:200]
-        if should_act is False and _guard_false_persona_veto_looks_like_workflow_issue(reason, result, tasks):
-            debug.log(
-                "delegate.guard_persona_veto.softened_to_workflow",
-                (
-                    "guard returned should_act=false for a workflow-scoped technical task; "
-                    f"reason={reason[:160]}"
-                ),
-            )
-            should_act = True
-
-        # split recommendations (P19)
-
-        split_recs = result.get("split_recommendations") or []
-
-        if not isinstance(split_recs, list):
-
-            split_recs = []
-
-        cleaned_splits = []
-
-        for r in split_recs[:10]:
-
-            if not isinstance(r, dict): continue
-
-            _tid = str(r.get("task_id", "")).strip()
-
-            _ss = bool(r.get("should_split", False))
-
-            if _tid and _ss:
-
-                cleaned_splits.append({
-
-                    "task_id": _tid,
-
-                    "should_split": True,
-
-                    "split_into": [str(x) for x in (r.get("split_into") or [])[:10]],
-
-                    "reason": str(r.get("reason", ""))[:200],
-
-                })
-
-        # kind recommendations (P21 新)
-
-        kind_recs = result.get("kind_recommendations") or []
-
-        if not isinstance(kind_recs, list):
-
-            kind_recs = []
-
-        cleaned_kinds = []
-
-        for r in kind_recs[:10]:
-
-            if not isinstance(r, dict): continue
-
-            _tid = str(r.get("task_id", "")).strip()
-
-            _cur = str(r.get("current_kind", "")).strip().lower()
-
-            _sug = str(r.get("suggested_kind", "")).strip().lower()
-
-            if _tid and _sug and _sug != _cur and _sug in VALID_HELPER_KINDS:
-
-                _rec = {
-                    "task_id": _tid,
-                    "current_kind": _cur,
-                    "suggested_kind": _sug,
-                    "reason": str(r.get("reason", ""))[:200],
-                }
-                _sm = str(r.get("suggested_mode", "")).strip().lower()
-                _mr = str(r.get("mode_reason", ""))[:240]
-                if _sm:
-                    _rec["suggested_mode"] = _sm
-                if _mr:
-                    _rec["mode_reason"] = _mr
-                cleaned_kinds.append(_rec)
-
-        _filtered_kinds = []
-        for rec in cleaned_kinds:
-            task = next((t for t in tasks if str(t.get("task_id", "")).strip() == rec.get("task_id")), None)
-            if task:
-                _prompt = str(task.get("prompt") or "")
-                _expected = task.get("expected_outputs") or []
-                _current = str(rec.get("current_kind") or "").strip().lower()
-                _suggested = str(rec.get("suggested_kind") or "").strip().lower()
-                # 2026-06-04 P133: 不再代 LLM 修正 "read→user-facing-text" / "code→prose" 等模糊判断;
-                # guard LLM 已自行做出建议, 启发式覆盖会引入冲突循环。物理硬约束仍由 _deterministic_kind_recommendations 兜底。
-                if (
-                    _current == "code"
-                    and _suggested == "edit"
-                    and _is_code_project_companion_output(_prompt, _expected)
-                ):
-                    debug.log(
-                        "delegate.guard_kind.ignored_code_companion_to_edit",
-                        (
-                            f"task '{rec.get('task_id')}' kind recommendation ignored: "
-                            "code-project companion artifacts remain with code helper"
-                        ),
-                    )
-                    continue
-                # 2026-06-05: guard LLM 看用户最终目标(要 word 论文)就把所有 code 任务推向 edit,
-                # 但实际产物是源代码文件 (.py / .c / .h / .js 等) — edit helper 没有合适工具。
-                # 病因(实测 14:48:58 trace 394304bbb02940e7): impl_new 任务声明产 _helpers_shared/acb_tree.py,
-                # guard LLM 因用户最终目标含 docx 论文,强制 code→edit,主线程被 hard-block,
-                # 浪费 1 轮重派,后续仍按 code 跑(重派结果还是 code helper 实现 .py)。
-                # 修法: 当主任务输出含明确源码/数据扩展时, 忽略 LLM 的 code→edit 建议;
-                # 物理硬约束 _deterministic_kind_recommendations 已经在 docx/pptx/xlsx 等 Office 主体
-                # 上独立工作,这里只阻止 LLM 因"用户最终目标"误推。
-                if (
-                    _current == "code"
-                    and _suggested == "edit"
-                    and _has_non_text_implementation_output(_expected)
-                ):
-                    debug.log(
-                        "delegate.guard_kind.ignored_code_to_edit_for_source_output",
-                        (
-                            f"task '{rec.get('task_id')}' kind recommendation ignored: "
-                            f"expected_outputs include source/data files {_expected[:3]} which need code helper tools; "
-                            "edit helper cannot run/build/test source artifacts"
-                        ),
-                    )
-                    continue
-            _filtered_kinds.append(rec)
-        cleaned_kinds = _filtered_kinds
-
-        # 单一 Office 产物由 edit helper 收敛构建，不能被拆分守卫打断成多个文本草稿。
-
-        _filtered_splits = []
-
-        for rec in cleaned_splits:
-
-            task = next((t for t in tasks if str(t.get("task_id", "")).strip() == rec.get("task_id")), None)
-
-            if task:
-                if (
-                    _split_recommendation_is_source_read(rec)
-                    and not _task_has_concrete_source_material_inputs(task)
-                ):
-                    debug.log(
-                        "delegate.guard_split.ignored_source_read_without_inputs",
-                        (
-                            f"task '{rec.get('task_id')}' source-read split ignored: "
-                            "no concrete source files, material batches, or directory-material scope"
-                        ),
-                    )
-                    continue
-
-                _kind = str(task.get("kind", "")).strip().lower()
-
-                _expected = task.get("expected_outputs") or []
-
-                if _kind == "edit" and len(_expected) == 1 and _has_office_document_output(str(task.get("prompt") or ""), _expected):
-
-                    debug.log(
-
-                        "delegate.guard_split.ignored_single_office",
-
-                        f"task '{rec.get('task_id')}' split recommendation ignored: single Office output handled by edit helper",
-
-                    )
-
-                    continue
-
-                # 2026-05-15 P63: scaffold/framework 任务豁免 — 接口耦合, 拆开后兄弟集成必崩
-
-                # 实测教训(05-15 16:26 comp_framework): 守卫 LLM 把 7-file scaffold 拆成 6 个
-
-                # 子任务, helper 被 killed, 主线程立即改派 comp_infra 单 helper 走通 → P19 此处负优化。
-
-                _scaffold_signal = _is_scaffold_task(
-
-                    str(task.get("prompt") or ""), task.get("expected_outputs") or []
-
-                )
-
-                if _scaffold_signal:
-
-                    _kind = str(task.get("kind", "")).strip().lower()
-
-                    _split_targets = [str(x).strip() for x in (rec.get("split_into") or []) if str(x).strip()]
-
-                    if _kind not in ("code", "coding") or len(_split_targets) < 2:
-
-                        debug.log(
-
-                            "delegate.guard_split.ignored_scaffold",
-
-                            f"task '{rec.get('task_id')}' split recommendation ignored: "
-
-                            f"scaffold/framework task (signals={_scaffold_signal})",
-
-                        )
-
-                        continue
-
-                    debug.log(
-
-                        "delegate.guard_split.scaffold_softened",
-
-                        f"task '{rec.get('task_id')}' is scaffold-like but code split recommendation is kept: "
-
-                        f"signals={_scaffold_signal}, split_into={_split_targets[:8]}",
-
-                    )
-
-            _filtered_splits.append(rec)
-
-        cleaned_splits = _filtered_splits
-
-        # 2026-05-21: 解析 framework_block(同类对比缺统一框架)
-
-        _fb_raw = result.get("framework_block") or {}
-
-        _framework_block = {}
-
-        if isinstance(_fb_raw, dict) and bool(_fb_raw.get("block")):
-
-            _fb_tids = [str(x).strip() for x in (_fb_raw.get("task_ids") or []) if str(x).strip()]
-
-            if _fb_tids:
-                _framework_counter_key = _framework_block_counter_key(_trace_id_for_guard, _fb_tids)
-                _trace_framework_blocks = _guard_framework_block_trace_total.get(_framework_counter_key, 0)
-                _embedded_contract = _has_embedded_peer_framework_contract(tasks, _fb_tids)
-                if _trace_framework_blocks >= 1 or _embedded_contract:
-                    debug.log(
-                        "delegate.guard_framework.ignored_redundant_block",
-                        (
-                            f"ignored framework_block for tasks={_fb_tids[:8]} "
-                            f"counter_key={_framework_counter_key} "
-                            f"trace_blocks={_trace_framework_blocks} embedded_contract={_embedded_contract}"
-                        ),
-                    )
-                else:
-                    _framework_block = {
-
-                        "block": True,
-
-                        "task_ids": _fb_tids[:20],
-
-                        "reason": str(_fb_raw.get("reason", ""))[:200],
-
-                    }
-
-        if _framework_block:
-
-            return should_act, reason, cleaned_splits, cleaned_kinds, _framework_block
-
-        return should_act, reason, cleaned_splits, cleaned_kinds
-
+        reason = str(result.get("reason", ""))[:500]
+        return should_act, reason, [], []
     except Exception as e:
 
         # 守卫失败 → 放行(保守:不耽误正常请求)
@@ -1086,87 +908,16 @@ async def _persona_consent_guard(
         return True, f"guard_error: {e}", [], []
 
 
-def _guard_false_persona_veto_looks_like_workflow_issue(
-    reason: str,
-    result: dict,
-    tasks: list[dict],
-) -> bool:
-    """Return True when should_act=false is really split/kind/framework guidance.
-
-    Persona veto is reserved for role/safety refusal. If the same guard result
-    contains actionable workflow guidance for concrete technical/document work,
-    keep that guidance but allow the main thread to re-plan from it.
-
-    人设否决只用于明确角色或安全拒绝；技术任务的拆分、类型、框架问题不应变成 persona_veto。
-    """
-    reason_l = (reason or "").lower()
-    # 2026-06-05: guard 自相矛盾 — should_act=false 但 reason 明确说允许执行。
-    # 病因(实测 trace 373640 17:07:07): guard LLM 返回 should_act=false,reason 是
-    # "Role persona allows execution. ... Framework already referenced; no further
-    # block needed.",从语义上明显是放行。旧版 _looks_like_workflow_issue 只软化
-    # 含 split/kind 建议的拒绝,本例没有 actionable_guidance → 误触发 persona_veto,
-    # 浪费 1 轮重派。修法:reason 自相矛盾时(显式说放行)直接软化为放行。
-    self_contradiction_markers = (
-        "persona allows", "role permits", "role allows", "persona permits",
-        "no persona refusal", "no further block", "no need to block",
-        "kind matches", "no split needed",
-        "角色允许", "人设允许", "无需阻断", "无需拆分", "类型匹配",
-    )
-    if any(marker in reason_l for marker in self_contradiction_markers):
-        return True
-    workflow_words = (
-        "no user request",
-        "detached",
-        "standalone",
-        "split",
-        "framework",
-        "contract",
-        "kind",
-        "not serving",
-    )
-    has_workflow_reason = any(w in reason_l for w in workflow_words)
-    has_actionable_guidance = bool(result.get("split_recommendations") or result.get("kind_recommendations"))
-    fb = result.get("framework_block") or {}
-    if isinstance(fb, dict) and fb.get("block"):
-        has_actionable_guidance = True
-    if not (has_workflow_reason and has_actionable_guidance):
-        return False
-    task_text = json.dumps(tasks or [], ensure_ascii=False).lower()
-    concrete_markers = (
-        "docx",
-        "paper",
-        "论文",
-        "报告",
-        "benchmark",
-        "算法",
-        "tree",
-        "b+",
-        "skiplist",
-        "code",
-        "read",
-        "office",
-        "pdf",
-        "csv",
-        "json",
-        "framework",
-        "contract",
-        "analysis",
-        "document",
-    )
-    return any(marker in task_text for marker in concrete_markers)
-
-
 def _deterministic_kind_recommendations(tasks: list[dict]) -> list[dict]:
-    """Return clear artifact-to-helper mismatches before any helper starts.
+    """Return clear artifact-to-helper mismatch facts before any helper starts.
 
-    This is a guard signal, not an auto-correction: the main thread still sees
-    task_kind_mismatch and must re-delegate the same logical work with the
-    matching helper kind.
+    This is a guard fact, not an auto-correction: it is attached to
+    guard_observations so the guard LLM can decide whether to allow or block.
 
-    明确产物类型和 helper 工具族不匹配时返回结构化建议；不静默改写任务。
+    明确产物类型和 helper 工具族不匹配时返回事实；不静默改写任务。
 
     2026-06-04 P133: 限制为**物理硬约束**——只在 kind 完全无法产出预期产物时
-    建议（read/draw/tts 想产 docx/pptx/xlsx 等可执行/二进制；code 想产 docx
+    暴露事实（read/draw/tts 想产 docx/pptx/xlsx 等可执行/二进制；code 想产 docx
     类 Office 主体）。模糊的"prose vs code"/"framework-contract"启发已删除，
     交给 guard LLM 与主线程基于上下文判断。
     """
@@ -1210,11 +961,67 @@ def _deterministic_kind_recommendations(tasks: list[dict]) -> list[dict]:
             rec = {
                 "task_id": tid,
                 "current_kind": kind,
-                "suggested_kind": suggested,
+                "observed_helper_kind_name": suggested,
                 "reason": reason,
             }
             recommendations.append(rec)
     return recommendations
+
+
+def _read_helper_project_visible_output_facts(
+    *,
+    task_id: str,
+    prompt: str,
+    expected_before: list[str],
+    expected_after: list[str],
+) -> list[dict]:
+    """Return neutral guard facts for read helpers with final-artifact outputs.
+
+    Read helpers can write internal evidence, but not project-visible or
+    user-facing deliverables. The sanitizer still canonicalizes internal
+    evidence names for compatibility; this function only exposes the mismatch
+    before the filtered outputs disappear from the guard's view.
+
+    read helper 只能写内部证据；项目可见或用户交付物输出在过滤前转成守卫事实。
+    """
+    kept_keys = {
+        str(x or "").replace("\\", "/").strip().strip("`\"'").lstrip("./").lower().removeprefix("_env/").rsplit("/", 1)[-1]
+        for x in (expected_after or [])
+        if str(x or "").strip()
+    }
+    facts: list[dict] = []
+    conflicts: list[str] = []
+    for raw in expected_before or []:
+        norm = str(raw or "").replace("\\", "/").strip().strip("`\"'").lstrip("./")
+        if not norm:
+            continue
+        key = norm.lower().removeprefix("_env/").rsplit("/", 1)[-1]
+        if key in kept_keys:
+            continue
+        low = norm.lower()
+        is_project_visible = low == "_env" or low.startswith("_env/")
+        is_user_facing = _looks_like_user_facing_text_artifact_output(norm)
+        if is_project_visible and is_user_facing:
+            conflicts.append(norm)
+        elif is_user_facing and not low.endswith(".txt"):
+            conflicts.append(norm)
+    if conflicts:
+        facts.append({
+            "kind": "guard_observation",
+            "issue": "read_helper_project_visible_output_conflict",
+            "needs_attention": True,
+            "task_id": task_id,
+            "current_kind": "read",
+            "expected_outputs": conflicts[:12],
+            "details": (
+                "A read helper can only write internal evidence files. These declared outputs look "
+                "project-visible or user-facing and were not kept as internal read evidence. The "
+                "guard should decide whether this exact delegation may run as read-first, or whether "
+                "another helper or main-process project apply step should own the final artifact after "
+                "evidence is collected."
+            ),
+        })
+    return facts
 
 
 def _looks_like_user_facing_text_artifact_output(path: str) -> bool:
@@ -1358,9 +1165,15 @@ def _source_material_ref_count(prompt: str) -> int:
         if m.group(1).strip()
     }
     group_markers = re.findall(
-        r"(?m)^\s*(?:\d+[.)、]|[-*])\s+[^:\n]{1,80}(?:组|folder|batch|group|目录|/)\s*[:：]?",
+        (
+            r"(?im)^\s*(?:\d+[.)、]|[-*])\s+"
+            r"(?:"
+            r"(?:batch|folder|group|目录)\s*[0-9一二三四五六七八九十百千万]*\b"
+            r"|第?\s*[0-9一二三四五六七八九十百千万]+\s*组"
+            r"|[^:\n]{1,80}(?:组|folder|batch|group|目录)"
+            r")\s*[:：]?"
+        ),
         p,
-        re.I,
     )
     explicit_count = 0
     for m in re.finditer(r"(?i)(?:共|total|all)\s*(\d+)\s*(?:份|个|files?|documents?|docs?|材料|报告)", p):
@@ -1377,6 +1190,63 @@ def _source_material_count_hint(task: dict) -> int:
     except (TypeError, ValueError):
         return 0
     return max(0, value)
+
+
+def _prompt_has_verified_or_embedded_evidence_for_final_assembly(prompt: str) -> bool:
+    """Detect prompts that already carry evidence for final artifact assembly.
+
+    This only suppresses source-read split facts for the guard. It does not
+    validate evidence quality and does not allow or block a helper.
+
+    已带证据的最终组装提示不应再被当作原始材料读取分片事实。
+    """
+    text = str(prompt or "")
+    if not text:
+        return False
+    lower = text.lower()
+    evidence_markers = (
+        "verified evidence",
+        "already verified",
+        "verified facts",
+        "classification evidence",
+        "evidence below",
+        "use these facts",
+        "confirmed facts",
+        "helper evidence",
+        "already read",
+        "already extracted",
+        "source materials already read",
+        "source files already read",
+        "已验证",
+        "验证事实",
+        "证据如下",
+        "使用这些事实",
+        "确认事实",
+        "已读取",
+        "已读完",
+        "已提取",
+    )
+    output_markers = (
+        "output file",
+        "output files",
+        "files to create",
+        "file 1:",
+        "write all",
+        "create exactly",
+        "produce exactly",
+        "write the final",
+        "create final",
+        "final report",
+        "draft",
+        "markdown",
+        "产出文件",
+        "创建文件",
+        "最终报告",
+        "草稿",
+    )
+    return any(marker in lower or marker in text for marker in evidence_markers) and any(
+        marker in lower or marker in text for marker in output_markers
+    )
 
 
 def _task_has_concrete_source_material_inputs(task: dict) -> bool:
@@ -1412,10 +1282,452 @@ def _task_has_concrete_source_material_inputs(task: dict) -> bool:
 
 
 def _split_recommendation_is_source_read(rec: dict) -> bool:
+    split_names = rec.get("observed_split_boundary_names") or rec.get("split_into") or []
     text = (
-        str(rec.get("reason") or "") + " " + " ".join(str(x) for x in (rec.get("split_into") or []))
+        str(rec.get("reason") or "") + " " + " ".join(str(x) for x in split_names)
     ).lower()
     return any(marker in text for marker in ("source material", "source-material", "read_sources", "read helper", "read helpers"))
+
+
+def _prompt_has_broad_or_heavy_source_scope(prompt: str) -> bool:
+    text = str(prompt or "")
+    lower = text.lower()
+    broad_scope = (
+        "current directory", "all files", "read all", "extract from", "transcribe",
+        "source materials", "material batch", "file batch", "office files",
+        "pdf files", "image files", "全部文件", "所有文件", "当前目录",
+        "整批", "材料批", "文档批", "提取", "转写",
+    )
+    if any(marker in lower or marker in text for marker in broad_scope):
+        return True
+    return bool(re.search(r"(?i)\.(?:docx?|pdf|pptx?|xlsx?|xls|png|jpe?g|webp|bmp|gif)\b", text))
+
+
+def _should_soften_source_read_split_for_single_text_output(task: dict, rec: dict) -> bool:
+    """Return true when a source-read split should be advice, not a hard block.
+
+    Hard split-blocks are useful for broad raw-material extraction. They are
+    counterproductive when the main process already shaped a single prose/text
+    deliverable from a small fact set: blocking the helper forces another round
+    of main-process authoring or repeated delegate attempts. Keep the guard
+    factual by letting the helper run in these small synthesis cases.
+
+    少量事实合成单个文本产物时，拆分建议不应硬拦；大批原始材料读取仍由上游规则拦截。
+    """
+    if not isinstance(task, dict) or not _split_recommendation_is_source_read(rec):
+        return False
+    expected = [
+        str(x or "").replace("\\", "/").strip().lower()
+        for x in (task.get("expected_outputs") or [])
+        if str(x or "").strip()
+    ]
+    if len(expected) != 1:
+        return False
+    text_exts = (".md", ".markdown", ".txt", ".rst", ".html", ".htm", ".json", ".yaml", ".yml")
+    if not expected[0].endswith(text_exts):
+        return False
+    explicit_input_count = 0
+    for field in ("input_files", "source_files", "transferred_files", "files"):
+        value = task.get(field)
+        if isinstance(value, str):
+            items = [
+                item.strip()
+                for item in re.split(r"[\n,;]+", value)
+                if item.strip()
+            ]
+            explicit_input_count += len(items) if items else 1 if value.strip() else 0
+        elif isinstance(value, (list, tuple, set)):
+            explicit_input_count += sum(1 for x in value if str(x or "").strip())
+    prompt = str(task.get("prompt") or "")
+    source_count = max(
+        explicit_input_count,
+        _source_material_ref_count(prompt),
+        _source_material_count_hint(task),
+    )
+    if source_count >= 6:
+        return source_count <= 8 and not _prompt_has_broad_or_heavy_source_scope(prompt)
+    return True
+
+
+_COMPACT_TEXT_MATERIAL_EXTS = (
+    ".txt", ".md", ".markdown", ".rst", ".json", ".yaml", ".yml",
+    ".csv", ".tsv", ".xml", ".html", ".htm", ".ini", ".toml",
+)
+_HEAVY_SOURCE_MATERIAL_EXTS = (
+    ".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsx",
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".zip",
+    ".tar", ".gz", ".7z", ".rar", ".mp3", ".wav", ".mp4", ".mov",
+)
+_FINAL_TEXT_ARTIFACT_EXTS = (
+    ".txt", ".md", ".markdown", ".rst", ".json", ".yaml", ".yml",
+    ".csv", ".html", ".htm",
+)
+
+
+def _normalise_delegate_path(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().strip("`\"'").lstrip("./")
+
+
+def _split_delegate_list_field(value) -> list[str]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[\n,;]+", value)
+    elif isinstance(value, dict):
+        raw_items = [str(k) for k in value.keys()]
+    elif isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        raw_items = [value]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        norm = _normalise_delegate_path(item)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
+def _delegate_path_suffix(path: str) -> str:
+    name = _normalise_delegate_path(path).lower()
+    if "." not in name.rsplit("/", 1)[-1]:
+        return ""
+    return "." + name.rsplit(".", 1)[-1]
+
+
+def _looks_like_compact_text_input(path: str) -> bool:
+    suffix = _delegate_path_suffix(path)
+    if not suffix:
+        return False
+    return suffix in _COMPACT_TEXT_MATERIAL_EXTS
+
+
+def _looks_like_heavy_or_visual_input(path: str) -> bool:
+    suffix = _delegate_path_suffix(path)
+    return bool(suffix and suffix in _HEAVY_SOURCE_MATERIAL_EXTS)
+
+
+def _looks_like_final_text_artifact(path: str) -> bool:
+    suffix = _delegate_path_suffix(path)
+    return bool(suffix and suffix in _FINAL_TEXT_ARTIFACT_EXTS)
+
+
+def _task_explicit_input_files(task: dict) -> list[str]:
+    if not isinstance(task, dict):
+        return []
+    for field in ("input_files", "source_files", "transferred_files", "files"):
+        values = _split_delegate_list_field(task.get(field))
+        if values:
+            return values
+    return []
+
+
+def _task_expected_outputs(task: dict) -> list[str]:
+    if not isinstance(task, dict):
+        return []
+    return _split_delegate_list_field(task.get("expected_outputs"))
+
+
+def _looks_like_compact_text_material_bundle_task(task: dict) -> bool:
+    """Detect bounded text-material synthesis tasks for guard attention only.
+
+    This does not allow or block anything. It exposes a task-shape fact to the
+    LLM guard when the main process appears to split a small text bundle into
+    read slices instead of giving one owner helper the bounded inputs.
+
+    紧凑文本材料包只作为守卫事实，不由程序决定是否拆分。
+    """
+    if not isinstance(task, dict):
+        return False
+    inputs = _task_explicit_input_files(task)
+    if not (2 <= len(inputs) <= 20):
+        return False
+    if any(_looks_like_heavy_or_visual_input(path) for path in inputs):
+        return False
+    compact_count = sum(1 for path in inputs if _looks_like_compact_text_input(path))
+    if compact_count < max(2, len(inputs) - 2):
+        return False
+    outputs = _task_expected_outputs(task)
+    if outputs and not all(_looks_like_final_text_artifact(path) for path in outputs):
+        return False
+    prompt = str(task.get("prompt") or "")
+    if _prompt_has_broad_or_heavy_source_scope(prompt):
+        return False
+    return True
+
+
+def _deterministic_compact_text_bundle_split_observations(tasks: list[dict]) -> list[dict]:
+    """Return neutral facts for compact text bundles split into read slices.
+
+    A compact group of ordinary text/config/data files often converges faster
+    when one owner helper reads the bounded inputs and writes the final artifact
+    set. Read-slice fan-out remains useful for broad, heavy, visual, Office,
+    uncertain, or reusable-evidence work; this function only reports the batch
+    shape to the guard.
+
+    小型文本材料包拆成 read 批次时仅提示守卫注意，由守卫判断是否放行。
+    """
+    if not tasks:
+        return []
+    read_bundle_tasks: list[dict] = []
+    final_owner_present = False
+    all_inputs: list[str] = []
+    all_outputs: list[str] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        kind = str(task.get("kind") or "").strip().lower()
+        inputs = _task_explicit_input_files(task)
+        outputs = _task_expected_outputs(task)
+        if kind in {"code", "edit"} and _looks_like_compact_text_material_bundle_task(task):
+            final_owner_present = True
+        if kind == "read" and inputs:
+            pseudo = dict(task)
+            pseudo["expected_outputs"] = outputs or ["read_evidence.txt"]
+            if _looks_like_compact_text_material_bundle_task(pseudo):
+                read_bundle_tasks.append(task)
+                all_inputs.extend(inputs)
+                all_outputs.extend(outputs)
+    if len(read_bundle_tasks) < 2 or final_owner_present:
+        return []
+    unique_inputs = []
+    seen_inputs: set[str] = set()
+    for path in all_inputs:
+        norm = _normalise_delegate_path(path)
+        if norm and norm not in seen_inputs:
+            seen_inputs.add(norm)
+            unique_inputs.append(norm)
+    if not (2 <= len(unique_inputs) <= 24):
+        return []
+    if any(_looks_like_heavy_or_visual_input(path) for path in unique_inputs):
+        return []
+    compact_count = sum(1 for path in unique_inputs if _looks_like_compact_text_input(path))
+    if compact_count < max(2, len(unique_inputs) - 2):
+        return []
+    task_ids = [str(task.get("task_id") or "").strip() for task in read_bundle_tasks if str(task.get("task_id") or "").strip()]
+    return [{
+        "task_id": task_ids[0] if task_ids else "",
+        "issue": "compact_text_material_bundle_split",
+        "observed_split_boundary_names": task_ids[:12],
+        "expected_outputs": all_outputs[:20],
+        "details": (
+            f"The current helper batch splits {len(unique_inputs)} bounded text-like input files across "
+            f"{len(read_bundle_tasks)} read helpers, and no code/edit owner helper for the final artifact "
+            "set is present in this batch. This is a task-shape fact for guard judgment: one owner helper "
+            "can often read compact text inputs and produce cohesive text artifacts, while split read "
+            "helpers remain appropriate for broad, large, visual, Office/OCR, uncertain, or reusable "
+            "evidence extraction."
+        ),
+    }]
+
+
+def _deterministic_compact_text_owner_observations(tasks: list[dict]) -> list[dict]:
+    """Return neutral facts when one helper owns a compact text artifact set.
+
+    The guard receives this as positive task-shape context. Runtime still uses
+    only the guard LLM verdict.
+
+    给守卫提供小型文本 owner 形状事实；不由程序判定放行。
+    """
+    observations: list[dict] = []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        tid = str(task.get("task_id") or "").strip()
+        kind = str(task.get("kind") or "").strip().lower()
+        if not tid or kind not in {"read", "edit", "code"}:
+            continue
+        inputs = _task_explicit_input_files(task)
+        outputs = _task_expected_outputs(task)
+        prompt = str(task.get("prompt") or "")
+        compact_inputs = bool(inputs) and _looks_like_compact_text_material_bundle_task(task)
+        embedded_final_assembly = (
+            kind in {"edit", "code"}
+            and _prompt_has_verified_or_embedded_evidence_for_final_assembly(prompt)
+        )
+        if not compact_inputs and not embedded_final_assembly:
+            continue
+        observations.append({
+            "task_id": tid,
+            "issue": "compact_text_owner_shape",
+            "current_kind": kind,
+            "expected_outputs": outputs[:20],
+            "input_file_count": len(inputs),
+            "details": (
+                "This helper appears shaped as one owner for a compact text-material or embedded-evidence "
+                "artifact set. This is a task-shape fact for guard judgment: one owner helper may read "
+                "bounded text inputs or use verified embedded evidence to produce cohesive final text "
+                "artifacts when fresh raw-source extraction is not required."
+            ),
+        })
+    return observations[:8]
+
+
+def _delegate_output_key(value: object) -> str:
+    text = _normalise_delegate_path(value).lower()
+    if text.startswith("_env/"):
+        text = text[5:]
+    if text.startswith("_helpers_shared/"):
+        text = text[len("_helpers_shared/"):]
+    return text
+
+
+def _deterministic_same_batch_output_overlap_observations(tasks: list[dict]) -> list[dict]:
+    """Return facts when helper tasks in one batch own overlapping outputs."""
+    owners: dict[str, list[str]] = {}
+    raw_by_key: dict[str, list[str]] = {}
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        tid = str(task.get("task_id") or "").strip()
+        if not tid:
+            continue
+        for output in _task_expected_outputs(task):
+            key = _delegate_output_key(output)
+            if not key:
+                continue
+            owners.setdefault(key, []).append(tid)
+            raw_by_key.setdefault(key, []).append(output)
+    overlaps = {
+        key: tids
+        for key, tids in owners.items()
+        if len(set(tids)) >= 2
+    }
+    if not overlaps:
+        return []
+    output_names = sorted(overlaps)[:12]
+    first_tid = sorted(set(tid for tids in overlaps.values() for tid in tids))[0]
+    return [{
+        "task_id": first_tid,
+        "issue": "same_batch_expected_output_overlap",
+        "expected_outputs": output_names,
+        "details": (
+            "Multiple helpers in the current delegation declare overlapping expected_outputs. "
+            "This may be an intentional hard/easy backup race, a replacement attempt, or duplicate "
+            "same-goal work. The guard should decide from dispatch_reason, mode, and task boundary "
+            "whether the exact batch should run as-is."
+        ),
+        "signals": [
+            {"output": key, "task_ids": sorted(set(tids))[:8], "raw_paths": raw_by_key.get(key, [])[:8]}
+            for key, tids in list(overlaps.items())[:8]
+        ],
+    }]
+
+
+def _deterministic_recent_output_overlap_observations(
+    tasks: list[dict],
+    *,
+    recent_records: list[dict] | None = None,
+) -> list[dict]:
+    """Return facts when recent helper records overlap current expected outputs."""
+    if not tasks or not recent_records:
+        return []
+    observations: list[dict] = []
+    recent_by_output: dict[str, list[dict]] = {}
+    for record in recent_records or []:
+        if not isinstance(record, dict):
+            continue
+        task_id = str(record.get("task_id") or "").strip()
+        delivered = _split_delegate_list_field(record.get("delivered_files") or record.get("expected_outputs"))
+        for path in delivered:
+            key = _delegate_output_key(path)
+            if not key:
+                continue
+            recent_by_output.setdefault(key, []).append({
+                "task_id": task_id,
+                "ok": record.get("ok"),
+                "outputs_complete": record.get("outputs_complete"),
+                "terminal_reason": record.get("terminal_reason"),
+                "path": path,
+            })
+    if not recent_by_output:
+        return []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if bool(task.get("resume")):
+            continue
+        tid = str(task.get("task_id") or "").strip()
+        outputs = _task_expected_outputs(task)
+        if not tid or not outputs:
+            continue
+        overlaps: list[dict] = []
+        for output in outputs:
+            key = _delegate_output_key(output)
+            for record in recent_by_output.get(key, []):
+                if record.get("task_id") == tid:
+                    continue
+                overlaps.append({"output": key, "current_path": output, **record})
+        if overlaps:
+            observations.append({
+                "task_id": tid,
+                "issue": "recent_helper_expected_output_overlap",
+                "expected_outputs": sorted({item["output"] for item in overlaps})[:12],
+                "details": (
+                    "Recent helper ledger records include delivered or declared outputs overlapping this "
+                    "new helper's expected_outputs. This is a fact for guard judgment: the current task may "
+                    "be a retry, replacement, resume-like continuation, backup race, or duplicate same-goal work."
+                ),
+                "signals": overlaps[:12],
+            })
+    return observations
+
+
+def _deterministic_ready_artifact_overlap_observations(
+    tasks: list[dict],
+    *,
+    ready_artifacts: list[dict] | None = None,
+) -> list[dict]:
+    """Return facts when ready main-thread artifacts overlap helper outputs."""
+    if not tasks or not ready_artifacts:
+        return []
+    ready_by_output: dict[str, list[dict]] = {}
+    for artifact in ready_artifacts or []:
+        if not isinstance(artifact, dict):
+            continue
+        path = str(artifact.get("path") or "").strip()
+        key = _delegate_output_key(path)
+        if not key:
+            continue
+        ready_by_output.setdefault(key, []).append({
+            "path": path,
+            "created_by": artifact.get("created_by"),
+            "verified_by": artifact.get("verified_by"),
+            "type": artifact.get("type"),
+            "status": artifact.get("status"),
+        })
+    if not ready_by_output:
+        return []
+    observations: list[dict] = []
+    for task in tasks or []:
+        if not isinstance(task, dict):
+            continue
+        if bool(task.get("resume")):
+            continue
+        tid = str(task.get("task_id") or "").strip()
+        outputs = _task_expected_outputs(task)
+        if not tid or not outputs:
+            continue
+        overlaps: list[dict] = []
+        for output in outputs:
+            key = _delegate_output_key(output)
+            for artifact in ready_by_output.get(key, []):
+                overlaps.append({"output": key, "current_path": output, **artifact})
+        if overlaps:
+            observations.append({
+                "task_id": tid,
+                "issue": "ready_artifact_expected_output_overlap",
+                "expected_outputs": sorted({item["output"] for item in overlaps})[:12],
+                "details": (
+                    "Agent state already records ready artifacts overlapping this new helper's "
+                    "expected_outputs. This is a fact for guard judgment: the helper may be useful "
+                    "for revision or verification, or it may duplicate an already completed artifact."
+                ),
+                "signals": overlaps[:12],
+            })
+    return observations
 
 
 # 2026-06-04 P131: dispatch-time guard for read helpers receiving helper-produced inputs.
@@ -1476,6 +1788,8 @@ def _deterministic_source_read_split_recommendations(tasks: list[dict]) -> list[
         ):
             continue
         prompt = str(task.get("prompt") or "")
+        if _prompt_has_verified_or_embedded_evidence_for_final_assembly(prompt):
+            continue
         if not _task_has_concrete_source_material_inputs(task):
             continue
         if not _looks_like_source_material_reading(prompt):
@@ -1486,11 +1800,11 @@ def _deterministic_source_read_split_recommendations(tasks: list[dict]) -> list[
         batch_count = min(8, max(2, (source_count + 5) // 6))
         recommendations.append({
             "task_id": tid,
-            "should_split": True,
-            "split_into": [f"read_sources_batch_{i}" for i in range(1, batch_count + 1)],
+            "observed_split_boundary_names": [f"read_sources_batch_{i}" for i in range(1, batch_count + 1)],
             "reason": (
-                f"{source_count} source material items/groups should be read by parallel read helpers "
-                "before downstream code/edit synthesis consumes evidence."
+                f"Detected {source_count} source material items/groups in this code/edit helper request. "
+                "Candidate source-reading boundaries are available as read_sources_batch_*; downstream code/edit "
+                "synthesis can consume compact evidence if the guard and main thread choose that workflow."
             ),
         })
     return recommendations
@@ -1723,16 +2037,6 @@ _HELPER_LONG_RUN_OBSERVE = settings.helper_long_run_observe_sec   # 默认 30 �
 # 这是"硬护栏",不是"积极调度":只在异常长时(典型 helper 应该 < 10 min)兜底。
 
 _HELPER_HARD_KILL_THRESHOLD = settings.helper_hard_kill_sec  # 默认 45 分钟,observer 强制 abort,helper 走 forced finalize
-
-
-
-# 2026-05-09 Patch 40: historical paired hard helper design notes
-
-# 旧设计曾尝试在长跑 code helper 旁路派高资源 paired helper,后来删除自动触发。
-
-# 现在主线程可见协议只推荐 base kind + mode;历史 auto_final 参数仅兼容旧调用。
-
-# 2026-05-10 Patch 60: 已删除 _HELPER_AUTO_FINAL_THRESHOLD 常量(P40 自动派 paired helper 删除)
 
 
 
@@ -2775,7 +3079,11 @@ async def _run_managed_helper_once(
 
     helper_think: bool,
 
+    input_files: list[str] | None,
+
     expected_outputs: list[str] | None,
+
+    acceptance_checks: list[str] | None = None,
 
     batch_sibling_outputs: set[str] | None,
 
@@ -2821,7 +3129,11 @@ async def _run_managed_helper_once(
 
         helper_think=helper_think,
 
+        input_files=input_files or [],
+
         expected_outputs=expected_outputs or [],
+
+        acceptance_checks=acceptance_checks or [],
 
         batch_sibling_outputs=batch_sibling_outputs,
 
@@ -3589,9 +3901,9 @@ def _detect_missing_unified_framework(cleaned: list[dict]) -> dict | None:
 
                     f"计时精度/内存口径/CSV 格式不一致 → 对比数据失真(如把对手低效实现说成自己快上千倍)。"
 
-                    f"建议:先派 1 个 infra helper 建统一框架(高精度计时器+统一内存口径+统一 CSV schema),"
+                    f"可恢复的框架事实:需要一个统一计时器、统一内存口径、统一 CSV schema,并让各 peer "
 
-                    f"各算法 helper 引用它,而非各自实现 benchmark。"
+                    f"引用同一框架后再产生可比较结果。"
 
                 ),
 
@@ -4323,9 +4635,92 @@ def _detect_broad_code_task_warning(cleaned: list[dict]) -> str | None:
 
     Broad-task signals are now passed as neutral guard observations through
     `_detect_broad_code_task_warning_v2`. This helper must not return a
-    deterministic hard-block payload.
+    deterministic planning decision.
     """
     return None
+
+def _framework_split_exemption(
+    task: dict,
+    *,
+    total_task_count: int,
+    outputs: list[str],
+    prompt_l: str,
+    enum_signals: list[str],
+    comparison_pipeline: bool,
+) -> str | None:
+    """Single entry for "is this framework-style task exempt from the broad-code
+    split warning". Returns the exemption reason or None.
+
+    2026-06-11 Round 17 (#3): merges three historically separate predicates
+    (compact contract / scoped fanout / bounded scaffold) that accumulated as
+    patches. Shared preconditions are checked once; variant-specific shape
+    checks follow. Behavior is the union of the former three.
+
+    framework 拆分豁免单入口；返回豁免原因枚举(compact_contract/scoped_fanout/
+    bounded_scaffold)或 None。
+    """
+    # Variant 1: compact framework/spec contract — delegated to the dedicated
+    # module check; has its own preconditions and does not require framework=.
+    if _is_single_compact_framework_contract_task_for_guard(task):
+        return "compact_contract"
+
+    # Shared preconditions for the fanout/scaffold variants.
+    if not str(task.get("framework") or "").strip():
+        return None
+    if comparison_pipeline or enum_signals:
+        return None
+    if not outputs or len(outputs) > 8:
+        return None
+    if not (task.get("acceptance_checks") or []):
+        return None
+    normalized = [output.replace("\\", "/").lstrip("./").strip() for output in outputs]
+    if not all(path == "_env" or path.startswith("_env/") for path in normalized):
+        return None
+
+    task_id_l = str(task.get("task_id") or "").lower()
+
+    # Variant 2: bounded component inside an already split fanout batch.
+    if total_task_count >= 2 and len(prompt_l) <= 2400:
+        if not any(
+            marker in prompt_l
+            for marker in (
+                "benchmark all", "final paper", "generate final docx",
+                "assemble final report", "implement all algorithms", "compare all algorithms",
+            )
+        ):
+            component_groups = (
+                ("core", "_env/core/", "_env/run.py", "_env/requirements.txt"),
+                ("ui", "_env/ui/"),
+                ("native", "_env/native/"),
+                ("test", "_env/tests/", "_env/fixtures/"),
+                ("fixture", "_env/tests/", "_env/fixtures/"),
+                ("doc", "_env/docs/", "_env/readme.md"),
+                ("script", "_env/scripts/"),
+            )
+            for group in component_groups:
+                name, *prefixes = group
+                if name not in task_id_l:
+                    continue
+                if all(any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in prefixes) for path in normalized):
+                    return "scoped_fanout"
+            first_dirs = {
+                parts[1]
+                for path in normalized
+                if (parts := path.split("/")) and len(parts) >= 3 and parts[0] == "_env"
+            }
+            if len(first_dirs) == 1:
+                return "scoped_fanout"
+            if len(normalized) <= 5 and any(k in task_id_l for k in ("readme", "docs", "script", "fixture")):
+                return "scoped_fanout"
+
+    # Variant 3: one compact technical scaffold defining shared interfaces.
+    role_text = f"{task_id_l} {prompt_l}"
+    if any(marker in role_text for marker in ("framework", "scaffold", "infra", "contract", "harness", "spec")):
+        if not any(marker in prompt_l for marker in ("implement all algorithms", "benchmark all", "final paper", "generate final docx")):
+            return "bounded_scaffold"
+
+    return None
+
 
 def _is_single_compact_framework_contract_task_for_guard(task: dict) -> bool:
     """Return True for a compact framework/spec helper that should not be split."""
@@ -4334,100 +4729,6 @@ def _is_single_compact_framework_contract_task_for_guard(task: dict) -> bool:
         return is_compact_framework_contract_task(task)
     except Exception:
         return False
-
-
-def _is_scoped_framework_fanout_task_for_guard(
-    task: dict,
-    *,
-    total_task_count: int,
-    outputs: list[str],
-    prompt_l: str,
-    enum_signals: list[str],
-    comparison_pipeline: bool,
-) -> bool:
-    """Allow a bounded component helper inside an already split fanout batch."""
-    if total_task_count < 2:
-        return False
-    if not str(task.get("framework") or "").strip():
-        return False
-    if comparison_pipeline or enum_signals:
-        return False
-    if not outputs or len(outputs) > 8:
-        return False
-    checks = task.get("acceptance_checks") or []
-    if not checks:
-        return False
-    if len(prompt_l) > 2400:
-        return False
-    normalized = [output.replace("\\", "/").lstrip("./").strip() for output in outputs]
-    if not all(path == "_env" or path.startswith("_env/") for path in normalized):
-        return False
-    lowered = " ".join(normalized).lower()
-    if any(
-        marker in prompt_l
-        for marker in (
-            "benchmark all",
-            "final paper",
-            "generate final docx",
-            "assemble final report",
-            "implement all algorithms",
-            "compare all algorithms",
-        )
-    ):
-        return False
-    component_groups = (
-        ("core", "_env/core/", "_env/run.py", "_env/requirements.txt"),
-        ("ui", "_env/ui/"),
-        ("native", "_env/native/"),
-        ("test", "_env/tests/", "_env/fixtures/"),
-        ("fixture", "_env/tests/", "_env/fixtures/"),
-        ("doc", "_env/docs/", "_env/readme.md"),
-        ("script", "_env/scripts/"),
-    )
-    task_id_l = str(task.get("task_id") or "").lower()
-    for group in component_groups:
-        name, *prefixes = group
-        if name not in task_id_l:
-            continue
-        if all(any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in prefixes) for path in normalized):
-            return True
-    first_dirs = {
-        parts[1]
-        for path in normalized
-        if (parts := path.split("/")) and len(parts) >= 3 and parts[0] == "_env"
-    }
-    if len(first_dirs) == 1:
-        return True
-    return bool(lowered and len(normalized) <= 5 and any(k in task_id_l for k in ("readme", "docs", "script", "fixture")))
-
-
-def _is_bounded_framework_scaffold_task_for_guard(
-    task: dict,
-    *,
-    outputs: list[str],
-    prompt_l: str,
-    enum_signals: list[str],
-    comparison_pipeline: bool,
-) -> bool:
-    """Allow one compact technical scaffold that defines shared project interfaces."""
-    if not str(task.get("framework") or "").strip():
-        return False
-    if comparison_pipeline or enum_signals:
-        return False
-    if not outputs or len(outputs) > 8:
-        return False
-    if not (task.get("acceptance_checks") or []):
-        return False
-    task_id_l = str(task.get("task_id") or "").lower()
-    role_text = f"{task_id_l} {prompt_l}"
-    if not any(marker in role_text for marker in ("framework", "scaffold", "infra", "contract", "harness", "spec")):
-        return False
-    if any(marker in prompt_l for marker in ("implement all algorithms", "benchmark all", "final paper", "generate final docx")):
-        return False
-    normalized = [output.replace("\\", "/").lstrip("./").strip() for output in outputs]
-    if not all(path == "_env" or path.startswith("_env/") for path in normalized):
-        return False
-    return True
 
 
 def _detect_broad_code_task_warning_v2(cleaned: list[dict]) -> list[dict] | None:
@@ -4476,7 +4777,16 @@ def _detect_broad_code_task_warning_v2(cleaned: list[dict]) -> list[dict] | None
         ]
 
         prompt_l = prompt.lower()
-        if _is_single_compact_framework_contract_task_for_guard(task):
+        # Round 17 (#3): unified framework-exemption check, first variant
+        # (compact contract) short-circuits the whole warning like before.
+        if _framework_split_exemption(
+            task,
+            total_task_count=total_task_count,
+            outputs=outputs,
+            prompt_l=prompt_l,
+            enum_signals=[],
+            comparison_pipeline=False,
+        ) == "compact_contract":
             continue
 
 
@@ -4709,7 +5019,7 @@ def _detect_broad_code_task_warning_v2(cleaned: list[dict]) -> list[dict] | None
 
 
 
-        scoped_framework_fanout = _is_scoped_framework_fanout_task_for_guard(
+        _framework_exemption = _framework_split_exemption(
             task,
             total_task_count=total_task_count,
             outputs=outputs,
@@ -4717,13 +5027,8 @@ def _detect_broad_code_task_warning_v2(cleaned: list[dict]) -> list[dict] | None
             enum_signals=enum_signals,
             comparison_pipeline=comparison_pipeline,
         )
-        bounded_framework_scaffold = _is_bounded_framework_scaffold_task_for_guard(
-            task,
-            outputs=outputs,
-            prompt_l=prompt_l,
-            enum_signals=enum_signals,
-            comparison_pipeline=comparison_pipeline,
-        )
+        scoped_framework_fanout = _framework_exemption == "scoped_fanout"
+        bounded_framework_scaffold = _framework_exemption == "bounded_scaffold"
 
         many_expected = (
             len(expected_outputs) >= 5
@@ -4760,167 +5065,6 @@ def _detect_broad_code_task_warning_v2(cleaned: list[dict]) -> list[dict] | None
     if not warnings:
         return None
     return [_guard_observation_from_payload(w) for w in warnings]
-
-
-def _should_pair_code_hard_backup(task: dict, *, auto_final: bool, environment_mode: bool) -> bool:
-
-    """Decide whether an easy code task deserves a hard paired race backup.
-
-    Keep ordinary small code tasks single. Use easy/hard pairing when the task
-    has enough independent project breadth that a race backup is likely to
-    improve quality rather than duplicate a small implementation.
-
-    普通小任务单跑；项目级、多文件、长链路任务才自动配 hard 竞速备份。
-    """
-
-    if auto_final:
-
-        return True
-
-    if not environment_mode:
-
-        return False
-
-    if task.get("kind") not in ("code", "coding"):
-
-        return False
-
-    if task.get("mode") == "hard" or task.get("resume"):
-
-        return False
-
-    prompt = str(task.get("prompt") or "").replace("\\", "/")
-
-    expected_outputs = [
-
-        str(output).replace("\\", "/").lstrip("./").strip()
-
-        for output in (task.get("expected_outputs") or [])
-
-        if str(output).strip()
-
-    ]
-
-    task_id_l = str(task.get("task_id") or "").lower()
-    prompt_l = prompt.lower()
-    if any(marker in f"{task_id_l} {prompt_l}" for marker in (
-        "framework", "contract", "benchmark_spec", "schema", "outline", "inventory",
-        "框架", "契约", "规格", "大纲", "清单",
-    )):
-        implementation_outputs = [
-            path for path in expected_outputs
-            if re.search(r"\.(py|js|ts|tsx|jsx|c|cc|cpp|h|hpp|rs|go|java)$", path, re.I)
-        ]
-        if len(implementation_outputs) <= 2:
-            return False
-
-    env_scoped = (
-
-        "_env/" in prompt
-
-        or (
-
-            bool(expected_outputs)
-
-            and len(expected_outputs) <= 40
-
-            and all(path == "_env" or path.startswith("_env/") for path in expected_outputs)
-
-        )
-
-    )
-
-    if not env_scoped:
-
-        return False
-
-    broad_signals = 0
-    strong_breadth = False
-
-    if len(expected_outputs) >= 5:
-
-        strong_breadth = True
-        broad_signals += 2
-
-    env_paths = set(re.findall(r"_env/[A-Za-z0-9_./\\-]+", prompt))
-
-    env_source_paths = {
-        path for path in env_paths
-        if re.search(r"\.(py|js|ts|tsx|jsx|c|cc|cpp|h|hpp|rs|go|java|kt|cs|php|rb|swift)$", path)
-    }
-
-    non_doc_expected = [
-        path for path in expected_outputs
-        if not re.search(r"(^|/)(readme|docs?)(/|$)|\.(md|txt|rst)$", path, re.I)
-    ]
-
-    if len(env_paths) >= 5:
-
-        broad_signals += 1
-
-    if len(env_source_paths) >= 3 or len(non_doc_expected) >= 4:
-
-        broad_signals += 1
-
-    if len(re.findall(r"^\s*\d+[.)]\s+\S{2,40}", prompt, re.MULTILINE)) >= 4:
-
-        broad_signals += 1
-
-    if len(prompt) >= 900:
-
-        broad_signals += 1
-
-    named_algorithms = {
-        item.lower()
-        for item in re.findall(
-            r"\b(Dijkstra|A\*|Floyd[- ]Warshall|Bellman[- ]Ford|Huffman|LZ77|LZW|BWT|RLE)\b",
-            prompt,
-            re.I,
-        )
-    }
-    counted_work_units = 0
-    for match in re.finditer(
-        r"\b(\d+)\s+(?:algorithms|modules|experiments|benchmarks|subsystems)\b",
-        prompt,
-        re.I,
-    ):
-        try:
-            counted_work_units = max(counted_work_units, int(match.group(1)))
-        except ValueError:
-            pass
-    independent_work_units = max(len(named_algorithms), counted_work_units)
-
-    if independent_work_units >= 3:
-
-        broad_signals += 1
-
-    project_words = (
-
-        "project", "工程", "multi-file", "多文件", "scaffold", "架构",
-
-        "refactor", "重构", "migration", "迁移", "文档", "README",
-
-        "package", "module set", "subsystems", "子系统",
-
-    )
-
-    if any(word in prompt for word in project_words):
-
-        broad_signals += 1
-
-    # A long prompt that edits one source file plus tests/docs is usually still
-    # a single implementation loop. Pair only when there is independent breadth.
-    has_independent_breadth = (
-        strong_breadth
-        or len(env_source_paths) >= 3
-        or len(non_doc_expected) >= 4
-        or independent_work_units >= 3
-    )
-
-    return has_independent_breadth and broad_signals >= 3
-
-
-
 
 
 def _expand_environment_expected_outputs(prompt: str, expected_outputs: list[str]) -> list[str]:
@@ -5016,6 +5160,327 @@ def _derive_environment_write_scopes(expected_outputs: list[str]) -> list[str]:
     return sorted(scopes)
 
 
+_SOURCE_EDIT_OUTPUT_SUFFIXES = (
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".c", ".cc", ".cpp",
+    ".h", ".hpp", ".cs", ".php", ".rb", ".swift", ".kt", ".scala",
+)
+
+
+def _augment_code_repair_expected_outputs(
+    *,
+    kind: str,
+    prompt: str,
+    input_files: list[str],
+    expected_outputs: list[str],
+) -> list[str]:
+    """Add missing staged source outputs for explicit code repair ownership."""
+    if kind not in {"code", "coding"}:
+        return expected_outputs
+    prompt_text = str(prompt or "")
+    if not prompt_text or not input_files:
+        return expected_outputs
+    prompt_l = prompt_text.lower()
+    if not re.search(r"\b(fix|repair|patch|modify|edit|update|implement|debug)\b|修复|修改|实现|调试", prompt_l):
+        return expected_outputs
+    existing_keys = {
+        str(path).replace("\\", "/").lstrip("./").removeprefix("_env/").lower()
+        for path in expected_outputs or []
+    }
+
+    def _input_path_is_removed_or_renamed(norm_path: str, base_name: str) -> bool:
+        """Return true when the prompt describes the input path as removed/renamed.
+
+        Input-files are often read-side context. For code repair we normally add
+        edited source inputs to expected_outputs so helper copyback keeps the
+        modified project slices. Do not do that for a source path that the task
+        explicitly renames or deletes; the replacement target should be the
+        declared output instead.
+
+        输入文件通常是读取上下文；显式重命名/删除的旧路径不应被自动变成输出契约。
+        """
+        path = re.escape(norm_path.lower())
+        base = re.escape(base_name.lower())
+        rename_words = r"(?:rename|move|replace\s+file|renamed|moved|重命名|改名|移动|迁移)"
+        delete_words = r"(?:delete|remove|drop|deprecate|deleted|removed|删除|移除|废弃)"
+        arrow = r"(?:->|→|=>|to\b|as\b|为|成|到)"
+        file_target = r"[`\"']?[\w./\\-]+\.[a-z0-9]{1,12}[`\"']?"
+        return bool(
+            re.search(rf"{rename_words}[^\n.;。；]{{0,180}}(?:{path}|{base})[^\n.;。；]{{0,80}}{arrow}[^\n.;。；]{{0,40}}{file_target}", prompt_l)
+            or re.search(rf"(?:{path}|{base})[^\n.;。；]{{0,80}}{arrow}[^\n.;。；]{{0,40}}{file_target}", prompt_l)
+            and re.search(rf"{rename_words}[^\n.;。；]{{0,220}}(?:{path}|{base})", prompt_l)
+            or re.search(rf"{delete_words}[^\n.;。；]{{0,180}}(?:{path}|{base})", prompt_l)
+            or re.search(rf"(?:{path}|{base})[^\n.;。；]{{0,180}}{delete_words}", prompt_l)
+        )
+
+    edit_words = r"(?:fix|repair|patch|modify|edit|update|implement|debug|change|修复|修改|实现|调试|更新|变更)"
+
+    def _target_pattern(norm_path: str, base_name: str) -> str:
+        path_l = norm_path.lower()
+        base_l2 = base_name.lower()
+        path_pat = rf"(?<![\w/.-]){re.escape(path_l)}(?![\w/.-])"
+        base_pat = rf"(?<![\w/.-]){re.escape(base_l2)}(?![\w/.-])"
+        return rf"(?:{path_pat}|{base_pat})"
+
+    def _path_windows(norm_path: str, base_name: str) -> list[str]:
+        pattern = re.compile(_target_pattern(norm_path, base_name))
+        windows: list[str] = []
+        for match in pattern.finditer(prompt_l):
+            start = max(0, match.start() - 220)
+            end = min(len(prompt_l), match.end() + 220)
+            windows.append(prompt_l[start:end])
+        return windows
+
+    def _input_path_is_context_only(norm_path: str, base_name: str, windows: list[str]) -> bool:
+        target = _target_pattern(norm_path, base_name)
+        same_clause = r"[^\n.;。；]"
+        context_patterns = (
+            rf"\b(?:read|inspect|review|reference|refer\s+to|use|using)\b{same_clause}{{0,100}}{target}",
+            rf"{target}{same_clause}{{0,100}}\b(?:as\s+context|for\s+context|context\s+only|read[-\s]?only|reference\s+only)\b",
+            rf"(?:不要|不应|不可|别){same_clause}{{0,100}}(?:修改|编辑|改动){same_clause}{{0,100}}{target}",
+            rf"{target}{same_clause}{{0,100}}(?:不要|不应|不可|别){same_clause}{{0,100}}(?:修改|编辑|改动)",
+        )
+        return any(
+            re.search(pattern, window, re.IGNORECASE)
+            for window in windows
+            for pattern in context_patterns
+        )
+
+    def _input_path_has_edit_signal(norm_path: str, base_name: str, windows: list[str]) -> bool:
+        target = _target_pattern(norm_path, base_name)
+        return any(
+            re.search(rf"{edit_words}[\s\S]{{0,220}}{target}", window, re.IGNORECASE)
+            or re.search(rf"{target}[\s\S]{{0,220}}{edit_words}", window, re.IGNORECASE)
+            for window in windows
+        )
+
+    augmented = list(expected_outputs or [])
+    for raw in input_files:
+        norm = str(raw or "").replace("\\", "/").strip().strip("`\"'").lstrip("./")
+        if not norm:
+            continue
+        base = norm.rsplit("/", 1)[-1]
+        base_l = base.lower()
+        if "/test" in f"/{norm.lower()}" or base_l.startswith("test_"):
+            continue
+        if not base_l.endswith(_SOURCE_EDIT_OUTPUT_SUFFIXES):
+            continue
+        if base_l not in prompt_l:
+            continue
+        if _input_path_is_removed_or_renamed(norm, base):
+            continue
+        windows = _path_windows(norm, base)
+        if _input_path_is_context_only(norm, base, windows):
+            continue
+        if not _input_path_has_edit_signal(norm, base, windows):
+            continue
+        staged = norm if norm.startswith("_env/") else f"_env/{norm}"
+        staged_key = staged.removeprefix("_env/").lower()
+        if norm.lower() in existing_keys or staged_key in existing_keys:
+            continue
+        augmented.append(staged)
+        existing_keys.add(staged_key)
+    return augmented[:20]
+
+
+def _strip_redundant_input_file_source_blocks(prompt: str, input_files: list[str]) -> tuple[str, list[dict]]:
+    """Omit source-code blocks that duplicate named input files in helper prompts.
+
+    The helper can read `input_files` from its staged workspace. This keeps the
+    helper contract compact without changing paths, goals, or acceptance checks.
+    """
+    text = str(prompt or "")
+    if not text or not input_files or "```" not in text:
+        return text, []
+    markers: set[str] = set()
+    for raw in input_files:
+        norm = str(raw or "").replace("\\", "/").strip().strip("`\"'").lstrip("./")
+        if not norm:
+            continue
+        markers.add(norm.lower())
+        if norm.startswith("_env/"):
+            markers.add(norm[len("_env/"):].lower())
+        base = os.path.basename(norm)
+        if base and "." in base:
+            markers.add(base.lower())
+    if not markers:
+        return text, []
+
+    omitted: list[dict] = []
+
+    def _replace(match: re.Match) -> str:
+        block = match.group(0)
+        body = match.group("body") or ""
+        if len(body.strip()) < 80:
+            return block
+        start, end = match.span()
+        window = (text[max(0, start - 360):start] + text[end:min(len(text), end + 120)]).lower()
+        matched = sorted(marker for marker in markers if marker and marker in window)
+        if not matched:
+            return block
+        path_fact = matched[0]
+        omitted.append({
+            "path_marker": path_fact,
+            "chars": len(body),
+            "lines": body.count("\n") + (1 if body else 0),
+        })
+        return (
+            "```text\n"
+            f"[source body omitted; read the current file from input_files for path marker: {path_fact}]\n"
+            "```"
+        )
+
+    compacted = re.sub(
+        r"```(?P<lang>[A-Za-z0-9_+.-]*)\r?\n(?P<body>.*?)\r?\n```",
+        _replace,
+        text,
+        flags=re.DOTALL,
+    )
+    return compacted, omitted
+
+
+_HELPER_COMMAND_RECIPE_RE = re.compile(
+    r"(?im)^\s*(?:steps?|commands?|workflow|procedure|approach)\s*:|"
+    r"`\s*(?:python3|python|py|node|npm|pnpm|yarn|pytest|bash|sh|cmd|powershell)\b|"
+    r"\b(?:run|execute|use)\s+`?(?:python3|python|py|node|npm|pnpm|yarn|pytest|bash|sh|cmd|powershell)\b"
+)
+
+_PYTHON3_ASSERTION_RE = re.compile(
+    r"(?im)^\s*(?:use\s+)?`?python3`?\s+command[^\n]*(?:shim|maps?|mapped|alias|launcher|cmd)[^\n]*(?:\n|$)"
+)
+
+_EXHAUSTIVE_SCOPE_EXPANSION_RE = re.compile(
+    r"(?is)\b(?:dump\s+all|full\s+data\s+dump|report\s+everything|complete\s+evidence\s+report|"
+    r"list\s+all\s+tables|all\s+row\s+counts|all\s+rows|全量|全部数据|完整证据|报告所有)\b"
+)
+
+_QUOTED_USER_SCOPE_RE = re.compile(
+    r"(?is)(?:the\s+user\s+(?:now\s+)?says|user\s+said|current\s+user|用户(?:现在)?(?:说|要求))\s*[:：]"
+)
+
+_STRUCTURED_SOURCE_INTERPRETATION_RE = re.compile(
+    # Require digit-bearing structured signals. The old bare word
+    # list (cost|count|hours?|...) fired on ordinary prose such as "respond
+    # within the hour" and prepended a read-the-raw-fields directive to edit
+    # helpers whose prompts only narrate text facts, pushing them into full
+    # input re-reads.
+    r"(?is)"
+    r"(?:\$\s*\d|\d[\d,.]*\s*(?:nights?|days?|hours?|minutes?|seats?|users?|晚|天|小时|分钟|人)\b|"
+    r"(?:\b(?:cost|price|budget|amount|fee|total|subtotal|unit|quantity|count|duration)\b|"
+    r"费用|价格|预算|金额|合计|小计|单位|数量|时长)[^\n]{0,16}\d)"
+)
+
+
+def _mark_unverified_helper_source_interpretations(
+    prompt: str,
+    *,
+    input_files: list[str],
+) -> tuple[str, list[dict]]:
+    """Mark main-thread interpretations of structured source fields as evidence to verify.
+
+    Helper prompts often contain compact main-thread summaries plus concrete
+    `input_files`. If the summary includes numeric fields, source labels, or
+    unit/duration language, the helper should treat that summary as routing
+    context and verify the raw source fields before computing final claims.
+    """
+    text = str(prompt or "")
+    if not text or not input_files:
+        return text, []
+    if "## Source Field Provenance" in text:
+        return text, []
+    if not _STRUCTURED_SOURCE_INTERPRETATION_RE.search(text):
+        return text, []
+    block = (
+        "## Source Field Provenance\n"
+        "The task below may summarize structured source fields from the main process. Treat those summaries as routing context until the staged input files confirm them. "
+        "For costs, prices, counts, quantities, durations, units, booleans, labels, or risk flags, read the raw field names/values/notes from input_files and compute or state ambiguity from that evidence. "
+        "A total, package, included, safe, friendly, or fully satisfied interpretation needs explicit source wording or verification evidence.\n\n"
+        "结构化源字段以 input_files 原文为准；金额、数量、时长、单位、布尔和风险含义需基于原字段计算或说明歧义。\n\n"
+    )
+    return block + text, [{
+        "kind": "source_field_provenance_added",
+        "input_files": len(input_files or []),
+    }]
+
+
+def _mark_unverified_helper_command_recipes(
+    prompt: str,
+    *,
+    kind: str,
+    input_files: list[str],
+    acceptance_checks: list[str],
+) -> tuple[str, list[dict]]:
+    """Mark main-generated command recipes as non-authoritative helper evidence.
+
+    The main process often delegates from compact path facts and a guessed plan.
+    Concrete shell snippets in that plan can be useful, but they are not runtime
+    evidence until the helper verifies them in its own staged workspace.
+    """
+    text = str(prompt or "")
+    if kind not in {"code", "coding"} or not text or not input_files:
+        return text, []
+    if "## Command Recipe Provenance" in text:
+        return text, []
+    if not _HELPER_COMMAND_RECIPE_RE.search(text):
+        return text, []
+
+    observations: list[dict] = []
+    rewritten = text
+    if _PYTHON3_ASSERTION_RE.search(rewritten):
+        rewritten, n = _PYTHON3_ASSERTION_RE.subn(
+            "Launcher fact: the main-thread prompt mentioned a `python3`/shim launcher assumption. "
+            "Treat it as unverified until a command result in this helper workspace proves it; use a proven launcher for local checks.\n",
+            rewritten,
+            count=4,
+        )
+        observations.append({"kind": "python3_launcher_assertion_softened", "count": n})
+
+    block = (
+        "## Command Recipe Provenance\n"
+        "The task below may include concrete shell snippets, numbered steps, or launcher names generated by the main process from partial facts. "
+        "Treat those snippets as non-authoritative examples unless they are explicit user text, explicit acceptance checks, or freshly verified in this helper workspace. "
+        "Preserve the goal, input_files, expected_outputs, and acceptance_checks; choose commands from current platform evidence and stop repeating a command once its failure facts explain the blocker.\n\n"
+        "命令片段属于主进程参考计划；除用户/验收项明确要求或本 helper 已验证外，不把具体 launcher/步骤当作事实。\n\n"
+    )
+    observations.append({
+        "kind": "command_recipe_provenance_added",
+        "acceptance_checks": len(acceptance_checks or []),
+    })
+    return block + rewritten, observations
+
+
+def _mark_unverified_helper_scope_expansion(
+    prompt: str,
+    *,
+    kind: str,
+    input_files: list[str],
+    expected_outputs: list[str],
+    acceptance_checks: list[str],
+) -> tuple[str, list[dict]]:
+    """Mark exhaustive main-thread expansions as scope provenance facts."""
+    text = str(prompt or "")
+    if kind not in {"code", "coding"} or not text or not input_files:
+        return text, []
+    if "## Scope Provenance" in text:
+        return text, []
+    if not _EXHAUSTIVE_SCOPE_EXPANSION_RE.search(text):
+        return text, []
+    if not (_QUOTED_USER_SCOPE_RE.search(text) or acceptance_checks or expected_outputs):
+        return text, []
+
+    block = (
+        "## Scope Provenance\n"
+        "The task below may contain an exhaustive audit or reporting expansion written by the main process after quoting or summarizing the user request. "
+        "Treat quoted user text, explicit expected_outputs, and acceptance_checks as scope facts. Treat broad phrases such as full dump, report everything, or complete evidence report as coverage requirements: preserve the relevant facts, but use the smallest sufficient structured probe/report and stop when the requested checks are covered. "
+        "Do not reread generated facts files or repeat scans solely to restate evidence already captured; inspect a named missing detail only if one remains.\n\n"
+        "范围来源事实：主进程可能把用户请求扩展成全量审计计划；保留验收覆盖，但用足够小的结构化证据完成，不为复述已覆盖事实反复读取。\n\n"
+    )
+    return block + text, [{
+        "kind": "exhaustive_scope_provenance_added",
+        "expected_outputs": len(expected_outputs or []),
+        "acceptance_checks": len(acceptance_checks or []),
+    }]
+
+
 # 2026-06-04 P131: dispatch-time guard for read helpers — patterns defined earlier
 # (see _deterministic_source_read_split_recommendations exemption).
 
@@ -5026,16 +5491,30 @@ def _detect_helper_produced_inputs(prompt: str, input_files: list, expected_outp
     Examines explicit input_files plus path-like tokens in the prompt body. Excludes
     expected_outputs (the helper is supposed to produce those).
     """
-    expected_set = {str(e or "").strip().lower() for e in (expected_outputs or [])}
+    def _path_keys(value: object) -> set[str]:
+        text = str(value or "").replace("\\", "/").strip().strip("`\"'").lstrip("./").lower()
+        if not text:
+            return set()
+        keys = {text}
+        if text.startswith("_env/"):
+            keys.add(text[5:])
+        basename = text.rsplit("/", 1)[-1]
+        if basename:
+            keys.add(basename)
+        return keys
+
+    expected_set: set[str] = set()
+    for expected in expected_outputs or []:
+        expected_set.update(_path_keys(expected))
     candidates: list[str] = []
     for f in input_files or []:
         s = str(f or "").strip()
-        if s and s.lower() not in expected_set:
+        if s and not (_path_keys(s) & expected_set):
             candidates.append(s)
     # extract path-like tokens from prompt
     for m in _re_p131.finditer(r"[A-Za-z0-9_\-./]+\.(?:md|markdown|txt|csv)", str(prompt or "")):
         tok = m.group(0)
-        if tok.lower() not in expected_set and tok not in candidates:
+        if not (_path_keys(tok) & expected_set) and tok not in candidates:
             candidates.append(tok)
     matched: list[str] = []
     for c in candidates:
@@ -5055,6 +5534,55 @@ def _detect_helper_produced_inputs(prompt: str, input_files: list, expected_outp
             seen.add(m)
             out.append(m)
     return out
+
+
+_EXPLICIT_READ_ONLY_ANALYSIS_RE = re.compile(
+    r"(read[-\s]?only\s+analysis|analysis\s+only|do\s+not\s+modify\s+files|"
+    r"no\s+file\s+modifications|no\s+code\s+changes|只读分析|仅分析|"
+    r"不要(?:自行)?修改(?:任何)?文件|不要(?:自行)?改(?:任何)?文件|"
+    r"不要(?:自行)?改(?=$|[\s，。,.；;])|不要(?:自行)?修改(?=$|[\s，。,.；;])|"
+    r"不改代码|不要改代码)",
+    re.IGNORECASE,
+)
+
+
+def _read_only_analysis_output_conflict(prompt: str, expected_outputs: list[str]) -> bool:
+    """Return true when a helper task asks for files while declaring no file changes."""
+    if not expected_outputs:
+        return False
+    return bool(_EXPLICIT_READ_ONLY_ANALYSIS_RE.search(str(prompt or "")))
+
+
+def _read_only_analysis_output_fact(
+    *,
+    task_id: str,
+    kind: str,
+    prompt: str,
+    expected_outputs: list[str],
+) -> dict:
+    """Return a neutral guard fact for read-only wording plus declared outputs.
+
+    Some tasks genuinely need internal evidence files even when the user asked
+    for no user-facing file changes. The dispatcher should expose the conflict
+    to the guard instead of deciding the task boundary by regex.
+
+    只读措辞和声明产物冲突时只提供事实；是否拦截交给守卫。
+    """
+    return {
+        "kind": "guard_observation",
+        "issue": "read_only_analysis_output_conflict",
+        "needs_attention": True,
+        "task_id": task_id,
+        "current_kind": kind,
+        "expected_outputs": expected_outputs[:20],
+        "prompt_excerpt": str(prompt or "")[:500],
+        "details": (
+            "The helper prompt contains read-only / analysis-only / no-modification wording while also declaring "
+            "output files. This may be valid for internal evidence only when the current task needs it, but it may "
+            "also violate the user's no-file-change boundary. The guard should decide whether this exact delegation "
+            "may run as-is."
+        ),
+    }
 
 
 async def _sanitize_and_validate_tasks(
@@ -5177,11 +5705,28 @@ async def _sanitize_and_validate_tasks(
         raw_tid = str(t.get("task_id", "")).strip()
 
         prompt = str(t.get("prompt", "")).strip()
+        if not prompt:
+            # Recover a common partial-field spelling seen in streamed tool calls
+            # ("prom" instead of "prompt"). This preserves the model's intended
+            # worker request while still exposing ordinary malformed JSON as an error.
+            prompt_alias = str(t.get("prom", "")).strip()
+            if prompt_alias:
+                prompt = prompt_alias
+                debug.log(
+                    "delegate.task.prompt_alias_recovered",
+                    f"task '{raw_tid or f'task{idx}'}' used `prom`; recovered it as `prompt`",
+                )
         try:
             from app.llm.tools.delegate_framework import normalize_framework_contract
             framework = normalize_framework_contract(t.get("framework"))
         except Exception:
             framework = str(t.get("framework") or "").strip()[:1800]
+        dispatch_reason = str(
+            t.get("dispatch_reason")
+            or t.get("routing_reason")
+            or t.get("delegation_reason")
+            or ""
+        ).strip()[:1200]
 
         resume = bool(t.get("resume", False))
 
@@ -5243,6 +5788,65 @@ async def _sanitize_and_validate_tasks(
                     "note": (
                         "Choose a supported concrete kind from the work product. Preserve the same logical task, "
                         "framework, input_files, expected_outputs, and acceptance_checks; only split if the task is broad."
+                    ),
+                },
+            }, ensure_ascii=False)
+        if raw_kind_value and raw_kind_value not in VALID_HELPER_KINDS:
+            _retry_expected_outputs = [
+                str(x).strip()
+                for x in (t.get("expected_outputs") or [])
+                if str(x).strip()
+            ][:20]
+            _retry_input_files = [
+                str(x).strip()
+                for x in (
+                    t.get("input_files")
+                    or t.get("source_files")
+                    or t.get("transferred_files")
+                    or t.get("files")
+                    or []
+                )
+                if str(x).strip()
+            ][:60]
+            _retry_acceptance_checks = [
+                str(x).strip()
+                for x in (t.get("acceptance_checks") or t.get("checks") or [])
+                if str(x).strip()
+            ][:20]
+            return json.dumps({
+                "ok": False,
+                "error": "unsupported_helper_kind",
+                "error_kind": "unsupported_helper_kind",
+                "task_id": raw_tid or f"task{idx}",
+                "requested_kind": raw_kind_value,
+                "allowed_kinds": list(MODEL_VISIBLE_HELPER_KINDS),
+                "fact": (
+                    "The delegate call requested a helper kind that is not exposed in the current helper-kind "
+                    "schema. No helper was started. Choose one supported kind from the work product and reissue "
+                    "the same task envelope; OCR and Office are helper tools/capabilities, not public helper kinds."
+                ),
+                "事实": (
+                    "本次 delegate 请求了当前 schema 未公开的 helper kind；没有启动 helper。请按任务产物选择一个公开 kind 后重发；"
+                    "OCR 和 Office 是 helper 内工具/能力，不是公开 helper kind。"
+                ),
+                "original_prompt": prompt[:1200],
+                "expected_outputs": _retry_expected_outputs,
+                "next_delegate_shape": {
+                    "action": "spawn",
+                    "tasks": [{
+                        "task_id": raw_tid or f"task{idx}",
+                        "kind": "<choose code/read/edit/verify/draw/tts/project_map/file_summary/impact_review/inventory>",
+                        "mode": str(t.get("mode") or "easy").strip().lower() or "easy",
+                        "resume": False,
+                        "framework": str(t.get("framework") or "").strip()[:1800],
+                        "input_files": _retry_input_files,
+                        "prompt": prompt,
+                        "expected_outputs": _retry_expected_outputs,
+                        "acceptance_checks": _retry_acceptance_checks,
+                    }],
+                    "note": (
+                        "Choose a supported concrete kind from the work product. Preserve the same logical task, "
+                        "framework, input_files, expected_outputs, and acceptance_checks."
                     ),
                 },
             }, ensure_ascii=False)
@@ -5324,6 +5928,7 @@ async def _sanitize_and_validate_tasks(
         else:
 
             expected_outputs = []
+        task_guard_observations: list[dict] = []
         _raw_write_scopes = t.get("write_scopes") or t.get("output_scopes") or t.get("ownership_scopes")
         if isinstance(_raw_write_scopes, str):
             write_scopes = [x.strip(" -\t") for x in _raw_write_scopes.splitlines() if x.strip(" -\t")][:20]
@@ -5378,45 +5983,90 @@ async def _sanitize_and_validate_tasks(
             )
 
         if kind in {"project_map", "file_summary", "impact_review", "inventory", "summarize"} and expected_outputs:
-            debug.log(
-                "delegate.expected_outputs.readonly_cleared",
-                (
-                    f"task '{raw_tid or f'task{idx}'}' kind={kind!r} is read-only; "
-                    f"clearing expected_outputs={expected_outputs}"
+            task_guard_observations.append({
+                "kind": "guard_observation",
+                "issue": "read_only_project_analysis_output_conflict",
+                "needs_attention": True,
+                "task_id": raw_tid or f"task{idx}",
+                "current_kind": kind,
+                "expected_outputs": expected_outputs[:20],
+                "prompt_excerpt": prompt[:500],
+                "details": (
+                    "This project-analysis helper kind is normally read-only but the task declares output files. "
+                    "The guard should decide whether this exact delegation may run as-is, should use another helper "
+                    "kind, or should report text-only evidence."
                 ),
-            )
-            expected_outputs = []
+            })
 
-        # 2026-05-12 P17: 主线程没传 expected_outputs 时, 系统自动从 prompt 推断
-
-        # 病因(实测 23:46 trace): 主线程 23 个 helper 全无 expected_outputs,
-
-        # → Tier 1.C 验收 + quality_warnings + P14.G/K + workflow_incomplete 全失效。
-
-        # 修法: prompt 含明显的"产出动词 + 文件名"模式时, 系统自动提取作为默认值。
-
-        # 主线程仍可显式覆盖(自己传 expected_outputs 优先)。
+        # If the main process omitted expected_outputs, keep regex extraction as
+        # evidence only. Do not convert candidates into the helper contract:
+        # output ownership is model-planned or helper-reported, while disk
+        # recovery still has the helper's final Output files JSON.
 
         if not expected_outputs and kind not in {"ocr", "project_map", "file_summary", "impact_review", "inventory", "summarize"}:
 
-            expected_outputs = _infer_expected_outputs_from_prompt(prompt)
+            _candidate_outputs = _infer_expected_outputs_from_prompt(prompt)
 
-            if expected_outputs:
+            if _candidate_outputs:
 
                 debug.log(
 
-                    "delegate.expected_outputs.auto_inferred",
+                    "delegate.expected_outputs.candidate_fact",
 
                     f"task '{raw_tid}' 主线程没传 expected_outputs, "
 
-                    f"系统从 prompt 推断: {expected_outputs}",
+                    f"仅记录候选产物事实: {_candidate_outputs}",
 
                 )
+                task_guard_observations.append({
+                    "kind": "guard_observation",
+                    "issue": "undeclared_output_candidates",
+                    "needs_attention": True,
+                    "task_id": raw_tid or f"task{idx}",
+                    "candidate_outputs": _candidate_outputs[:20],
+                    "fact": (
+                        "The helper prompt mentions output-like filenames, but the main process did not declare "
+                        "expected_outputs. These names are candidates from text extraction, not a system-owned "
+                        "output contract."
+                    ),
+                })
+                _candidate_lines = "\n".join(f"- {x}" for x in _candidate_outputs[:12])
+                prompt += (
+                    "\n\n## Candidate Output Facts\n"
+                    "The main process did not declare `expected_outputs`. The prompt text mentions these output-like filenames:\n"
+                    f"{_candidate_lines}\n"
+                    "These are facts from prompt text, not a declared output contract. If you create files, finish by reporting exact existing paths in the required Output files JSON block; if the candidates are merely inputs, old files, or downstream outputs, say so in your report.\n"
+                    "候选文件名只来自提示词文本，不是系统声明产物；创建文件后按实际存在路径自报，若只是输入/旧文件/下游产物则说明。"
+                )
+
+        if _read_only_analysis_output_conflict(prompt, expected_outputs):
+            task_guard_observations.append(_read_only_analysis_output_fact(
+                task_id=raw_tid or f"task{idx}",
+                kind=kind,
+                prompt=prompt,
+                expected_outputs=expected_outputs,
+            ))
+
+        def _read_output_key(value: object) -> str:
+            text = str(value or "").replace("\\", "/").strip().strip("`\"'").lstrip("./").lower()
+            if text.startswith("_env/"):
+                text = text[5:]
+            return text.rsplit("/", 1)[-1]
 
         if kind == "read" and expected_outputs:
             _read_expected_before = list(expected_outputs)
             expected_outputs = _filter_read_helper_expected_outputs(prompt, expected_outputs)
-            _read_dropped = [x for x in _read_expected_before if x not in expected_outputs]
+            task_guard_observations.extend(_read_helper_project_visible_output_facts(
+                task_id=raw_tid or f"task{idx}",
+                prompt=prompt,
+                expected_before=_read_expected_before,
+                expected_after=expected_outputs,
+            ))
+            _read_kept_keys = {_read_output_key(x) for x in expected_outputs}
+            _read_dropped = [
+                x for x in _read_expected_before
+                if _read_output_key(x) not in _read_kept_keys
+            ]
             if expected_outputs != _read_expected_before:
                 debug.log(
                     "delegate.expected_outputs.read_evidence_filtered",
@@ -5504,6 +6154,86 @@ async def _sanitize_and_validate_tasks(
             "acceptance_checks", "checks",
             max_items=20,
         )
+        if input_files:
+            _prompt_before_source_mark = prompt
+            prompt, _source_field_observations = _mark_unverified_helper_source_interpretations(
+                prompt,
+                input_files=input_files,
+            )
+            if _source_field_observations and prompt != _prompt_before_source_mark:
+                debug.log(
+                    "delegate.prompt.source_field_provenance_added",
+                    (
+                        f"task '{raw_tid or f'task{idx}'}' marked structured source summaries "
+                        f"as unverified until input_files are read: {_source_field_observations[:6]}"
+                    ),
+                )
+        if kind in {"code", "coding"} and input_files:
+            _prompt_before_recipe_mark = prompt
+            prompt, _command_recipe_observations = _mark_unverified_helper_command_recipes(
+                prompt,
+                kind=kind,
+                input_files=input_files,
+                acceptance_checks=acceptance_checks,
+            )
+            if _command_recipe_observations and prompt != _prompt_before_recipe_mark:
+                debug.log(
+                    "delegate.prompt.command_recipe_provenance_added",
+                    (
+                        f"task '{raw_tid or f'task{idx}'}' marked main-thread command recipes "
+                        f"as unverified helper evidence: {_command_recipe_observations[:6]}"
+                    ),
+                )
+            _prompt_before_scope_mark = prompt
+            prompt, _scope_observations = _mark_unverified_helper_scope_expansion(
+                prompt,
+                kind=kind,
+                input_files=input_files,
+                expected_outputs=expected_outputs,
+                acceptance_checks=acceptance_checks,
+            )
+            if _scope_observations and prompt != _prompt_before_scope_mark:
+                debug.log(
+                    "delegate.prompt.scope_provenance_added",
+                    (
+                        f"task '{raw_tid or f'task{idx}'}' marked exhaustive helper scope "
+                        f"as main-thread expansion evidence: {_scope_observations[:6]}"
+                    ),
+                )
+        if kind in {"code", "coding"} and input_files:
+            _prompt_before_strip = prompt
+            prompt, _omitted_source_blocks = _strip_redundant_input_file_source_blocks(prompt, input_files)
+            if _omitted_source_blocks and prompt != _prompt_before_strip:
+                debug.log(
+                    "delegate.prompt.input_file_source_blocks_omitted",
+                    (
+                        f"task '{raw_tid or f'task{idx}'}' omitted "
+                        f"{len(_omitted_source_blocks)} embedded source block(s) already covered by input_files: "
+                        f"{_omitted_source_blocks[:6]}"
+                    ),
+                )
+        if kind in {"code", "coding"} and input_files:
+            _expected_before_code_ownership = list(expected_outputs)
+            expected_outputs = _augment_code_repair_expected_outputs(
+                kind=kind,
+                prompt=prompt,
+                input_files=input_files,
+                expected_outputs=expected_outputs,
+            )
+            if expected_outputs != _expected_before_code_ownership:
+                if not write_scopes:
+                    write_scopes = _derive_environment_write_scopes(expected_outputs)
+                else:
+                    _derived_scopes = set(_derive_environment_write_scopes(expected_outputs))
+                    if _derived_scopes:
+                        write_scopes = sorted(set(write_scopes) | _derived_scopes)
+                debug.log(
+                    "delegate.expected_outputs.code_repair_augmented",
+                    (
+                        f"task '{raw_tid or f'task{idx}'}' added source ownership outputs "
+                        f"from input_files: before={_expected_before_code_ownership}, after={expected_outputs}"
+                    ),
+                )
         if kind == "read" and acceptance_checks:
             acceptance_checks = [
                 _rewrite_staged_read_evidence_mentions(check)
@@ -5540,6 +6270,27 @@ async def _sanitize_and_validate_tasks(
                 f"## Main Thread Task\n{prompt}"
 
             )
+        else:
+            try:
+                from app.core.runtime_mode import is_environment_mode as _is_environment_mode
+                _env_mode_for_helper_prompt = bool(_is_environment_mode())
+            except Exception:
+                _env_mode_for_helper_prompt = False
+            if _env_mode_for_helper_prompt:
+                prompt = (
+                    "## Environment Project Facts\n"
+                    "- The helper sandbox and `_env/...` paths are staged handoff copies. Editing `_env/...` changes that staged copy; it does not by itself prove the real project path or a running service changed.\n"
+                    "- For an existing running project URL/service, helper `_env/...` edits do not affect that service until the main process applies the staged change. A helper can report pre-apply live evidence and staged/local evidence; final live URL success after apply is main-process evidence unless a tool explicitly wrote the real project path.\n"
+                    "- Explicit `input_files` are normally staged into the helper as `_env/<project-relative-path>` copies. Helper tools work on local workspace paths such as `_env/app.py`; env_* project tools are main-process tools, not helper tools.\n"
+                    "- When an input file is listed as a bare project path such as `app.py`, first try the staged local path `_env/app.py`. A same-named bare path may be absent or unrelated helper-local scratch; use the `_env/...` copy or the resource manifest path facts as truth.\n"
+                    "- For a staged Python project, `_env` is the project root for imports. Running pytest against `_env/tests/...` from the outer helper workspace can leave sibling modules outside `sys.path`; run from `_env` or set an equivalent project-root import path when validating staged Python files.\n"
+                    "- If a needed project file is not staged, report the exact project-relative path needed so the main process can fetch it and resume the helper.\n"
+                    "- A project-source change is ready for main acceptance only when the changed staged path is copied back/applied, or a tool explicitly writes the real project path. State which path changed and what evidence proves it.\n"
+                    "- If your available tools cannot apply a staged source change to the real project, report the staged path, intended project-relative path, diff/evidence, and verification blocker so the main process can apply and verify.\n"
+                    "- Run checks against the path/service that the acceptance condition uses; if staged and real-project results differ, treat that difference as evidence to resolve before claiming completion.\n\n"
+                    "项目 helper 摘要：显式 input_files 通常已暂存到 `_env`；裸项目路径先查 `_env/<路径>` 或资源清单；Python 项目测试以 `_env` 为导入根；helper 用本地路径，env_* 由主进程执行；报告改动是否已应用和验证证据。\n\n"
+                    f"## Main Thread Task\n{prompt}"
+                )
 
         tid = _sanitize_task_id(raw_tid or f"task{idx}", idx)
 
@@ -5589,40 +6340,30 @@ async def _sanitize_and_validate_tasks(
                     ),
                 )
 
-        # 2026-06-04 P131: dispatch-time guard — read helper must not target helper-produced artifacts.
-        # The producer of those artifacts already owns a report. If content seems missing, resume the
-        # producer with a focused follow-up rather than spawning a read helper to read its output.
+        # 2026-06-04 P131: dispatch-time fact — read helper is usually for
+        # user/source material, while helper-produced artifacts often belong to
+        # consumer edit/code/verify work. This is not a program decision; attach
+        # the observation so the preflight guard can allow or block the exact
+        # delegation after reading dispatch_reason and current task facts.
         if kind in ("read", "ocr") and not resume:
             offending = _detect_helper_produced_inputs(prompt, input_files, expected_outputs)
             if offending:
-                shown = ", ".join(offending[:6])
-                more = f", ... total {len(offending)}" if len(offending) > 6 else ""
-                return json.dumps({
-                    "ok": False,
-                    "error": "read_helper_targets_helper_produced_artifacts",
-                    "blocked_inputs": offending[:12],
-                    "hint": (
-                        f"task '{tid}' uses kind='read' but its inputs include helper-produced artifacts "
-                        f"({shown}{more}). Read helpers are for user-provided source material (uploaded "
-                        f"documents, project files, scans, PDFs, audio, large reference data), not for "
-                        f"re-reading what an earlier helper just wrote. The producer of those artifacts "
-                        f"already returned a report.\n"
-                        f"Correct routing:\n"
-                        f"  1) If you need their content for the next deliverable (e.g. assembling a docx "
-                        f"from analyses+csv), pass them as inputs to the consumer helper directly — usually "
-                        f"`kind='edit'` for documents, `kind='code'` for further computation. The consumer "
-                        f"reads them itself.\n"
-                        f"  2) If a producer's short report is too thin and you genuinely need more detail, "
-                        f"resume the producer with `resume=true` and a focused follow-up prompt asking it to "
-                        f"expand its report or produce a `*_evidence.txt`. Do not spawn a read helper for the "
-                        f"same artifact.\n"
-                        f"  3) The exception is an explicit AUDIT/QA of a helper's output — in that case, use "
-                        f"`kind='verify'` (read-only review), not `kind='read'`.\n"
-                        f"read helper 不读 helper 已产出的产物：要消费就直接交给 edit/code 等消费 helper；要更多内容就 resume 生产者扩报告；要审核就用 verify。"
+                task_guard_observations.append({
+                    "kind": "guard_observation",
+                    "issue": "read_helper_targets_helper_produced_artifacts",
+                    "needs_attention": True,
+                    "task_id": tid,
+                    "current_kind": kind,
+                    "inputs": offending[:12],
+                    "details": (
+                        "This read helper references files that look helper-produced rather than original user/source "
+                        "materials. Depending on the current task, consuming those artifacts may belong to edit/code, "
+                        "expanding the producer, or verify. The guard should decide whether this exact read delegation "
+                        "may run as-is."
                     ),
-                }, ensure_ascii=False)
+                })
 
-        cleaned.append({
+        cleaned_task = {
 
             "task_id": tid, "prompt": prompt,
 
@@ -5637,14 +6378,16 @@ async def _sanitize_and_validate_tasks(
             "write_scopes": write_scopes,
 
             "framework": framework,
+            "dispatch_reason": dispatch_reason,
 
             "input_files": input_files,
 
             "acceptance_checks": acceptance_checks,
 
-        })
-
-
+        }
+        if task_guard_observations:
+            cleaned_task["guard_observations"] = list(task_guard_observations)
+        cleaned.append(cleaned_task)
 
     if not cleaned:
 
@@ -5682,11 +6425,11 @@ async def _sanitize_and_validate_tasks(
 
 
 
-    # 2026-05-21: 确定性框架兜底(不依赖守卫 LLM / 提示词部署)。
-    # 2026-05-27: 从“spawn 后警告”改为“spawn 前返回 framework_first_required”。
-    # 实测直接压测中,主线程先拉起 sort_quick/sort_merge/sort_heap 三个 helper,
-    # 随后才收到 framework_first_required,已经浪费了 helper 启动和早期推理成本。
-    # 这里在任何 helper 创建前返回结构化修正建议,让主线程先建统一框架。
+    # Framework concentration facts are attached before the preflight guard.
+    # The symbolic detector must not decide the boundary by itself; the guard
+    # LLM sees these facts and is the component that may return a hard block.
+    #
+    # 框架集中度检测只注入事实；是否硬拦截由启动前守卫 LLM 判断。
 
     _fw_warning = _detect_missing_unified_framework(cleaned)
 
@@ -5746,208 +6489,49 @@ async def _sanitize_and_validate_tasks(
 
 
 
-    # Code hard backup race:
-    # - auto_final keeps the historical hard twin as a final-quality safeguard.
-    # - isolated environment project tasks may also get an easy/hard race when
-    #   they are broad enough to benefit from a backup.
-    # - ordinary small code helpers stay single to avoid waste.
+    # Explicit code easy/hard backup race:
+    # - The runtime no longer synthesizes hard backup helpers from heuristics.
+    # - When the LLM explicitly submits `task` and `task_hard`, record the pair
+    #   so the first successful helper can stop the loser.
 
     _twin_map: dict[str, str] = {}
 
-    _auto_final = args.get("auto_final", False)
-
-    from app.core.runtime_mode import is_environment_mode as _is_environment_mode
-
-    _environment_mode_for_pairing = bool(_is_environment_mode())
-
-    _should_pair_code_hard = bool(_auto_final) or any(
-        _should_pair_code_hard_backup(
-            c,
-            auto_final=False,
-            environment_mode=_environment_mode_for_pairing,
-        )
+    _explicit_hard_by_base = {
+        str(c.get("task_id", "")).rsplit("_hard", 1)[0]: c
         for c in cleaned
-    )
-
-    if _should_pair_code_hard:
-
-        _base_task_count = len(cleaned)
-
-        _available_twin_slots = max(0, _MAX_DELEGATE_TASKS_PER_CALL - _base_task_count)
-
-        _existing_tids = {c["task_id"] for c in cleaned}
-
-        _twins: list[dict] = []
-
-        _paired_primary_tids: list[str] = []
-
-        _skipped_pair_primary_tids: list[str] = []
-
-        _explicit_hard_by_base = {
-            str(c.get("task_id", "")).rsplit("_hard", 1)[0]: c
-            for c in cleaned
-            if c.get("kind") in ("code", "coding")
-            and c.get("mode") == "hard"
-            and str(c.get("task_id", "")).endswith("_hard")
-        }
-
-        for c in list(cleaned):
-
-            if c.get("kind") not in ("code", "coding"):
-
-                continue
-
-            if c.get("mode") == "hard" or c.get("resume"):
-
-                continue
-
-            if not _should_pair_code_hard_backup(
-                c,
-                auto_final=bool(_auto_final),
-                environment_mode=_environment_mode_for_pairing,
-            ):
-
-                continue
-
-            if _is_legacy_paired_hard_task(c):
-
-                continue
-
-            _orig_tid = c["task_id"]
-
-            if _is_legacy_paired_task_id(_orig_tid):
-
-                continue
-
-            if _orig_tid in _explicit_hard_by_base:
-
-                _hard_task = _explicit_hard_by_base[_orig_tid]
-
-                _hard_tid = _hard_task["task_id"]
-
-                c["paired_with"] = _hard_tid
-
-                _hard_task["paired_with"] = _orig_tid
-
-                _twin_map[_orig_tid] = _hard_tid
-
-                _twin_map[_hard_tid] = _orig_tid
-
-                continue
-
-            if len(_twins) >= _available_twin_slots:
-
-                _skipped_pair_primary_tids.append(_orig_tid)
-
-                continue
-
-            _twin_tid = f"{_orig_tid}_hard"
-
-            _suffix_n = 2
-
-            while _twin_tid in _existing_tids:
-
-                _twin_tid = f"{_orig_tid}_hard_{_suffix_n}"
-
-                _suffix_n += 1
-
-            _existing_tids.add(_twin_tid)
-
-            _twins.append({
-
-                "task_id": _twin_tid,
-
-                "prompt": c["prompt"],
-
-                "resume": False,
-
-                "fork_from": "",
-
-                "kind": "code",
-
-                "mode": "hard",
-
-                "expected_outputs": list(c.get("expected_outputs") or []),
-
-                "framework": c.get("framework", ""),
-
-                "input_files": list(c.get("input_files") or []),
-
-                "acceptance_checks": list(c.get("acceptance_checks") or []),
-
-                "paired_with": _orig_tid,
-
-            })
-
-            c["paired_with"] = _twin_tid
-
-            _twin_map[_orig_tid] = _twin_tid
-
-            _twin_map[_twin_tid] = _orig_tid
-
-            _paired_primary_tids.append(_orig_tid)
-
-        if _twins:
-
-            cleaned.extend(_twins)
-
-            if len(cleaned) > _MAX_DELEGATE_TASKS_PER_CALL:
-                overflow = len(cleaned) - _MAX_DELEGATE_TASKS_PER_CALL
-                removed = cleaned[-overflow:]
-                cleaned = cleaned[:-overflow]
-                removed_tids = [str(t.get("task_id", "")) for t in removed]
-                removed_set = set(removed_tids)
-                _paired_primary_tids = [
-                    tid for tid in _paired_primary_tids
-                    if _twin_map.get(tid) not in removed_set
-                ]
-                for tid in list(_twin_map):
-                    if tid in removed_set or _twin_map.get(tid) in removed_set:
-                        _twin_map.pop(tid, None)
-                for c2 in cleaned:
-                    if c2.get("paired_with") in removed_set:
-                        c2.pop("paired_with", None)
-                debug.log(
-                    "delegate.code_hard_pairing_trimmed",
-                    "trimmed surplus generated hard backup helper(s) to preserve the primary batch: "
-                    f"{removed_tids}",
-                )
-
-            debug.log(
-
-                "delegate.code_hard_paired",
-
-                f"paired {len(_twins)} hard code backup helper(s) with primaries: "
-
-                f"{_paired_primary_tids}",
-
-            )
-
-            if _auto_final:
-
-                debug.log(
-
-                    "delegate.auto_final_paired",
-
-                    f"paired {len(_twins)} hard helper(s) with primaries: "
-
-                    f"{_paired_primary_tids}",
-
-                )
-
-            args["_paired_task_map"] = dict(_twin_map)
-
-        if _skipped_pair_primary_tids:
-
-            debug.log(
-
-                "delegate.code_hard_pairing_capped",
-
-                f"skipped hard backup helper(s) for primaries due to delegate limit: "
-
-                f"{_skipped_pair_primary_tids}",
-
-            )
+        if c.get("kind") in ("code", "coding")
+        and c.get("mode") == "hard"
+        and str(c.get("task_id", "")).endswith("_hard")
+    }
+
+    _paired_primary_tids: list[str] = []
+
+    for c in list(cleaned):
+        if c.get("kind") not in ("code", "coding"):
+            continue
+        if c.get("mode") == "hard" or c.get("resume"):
+            continue
+
+        _orig_tid = c["task_id"]
+        if _is_legacy_paired_task_id(_orig_tid):
+            continue
+        _hard_task = _explicit_hard_by_base.get(_orig_tid)
+        if not _hard_task:
+            continue
+
+        _hard_tid = _hard_task["task_id"]
+        c["paired_with"] = _hard_tid
+        _hard_task["paired_with"] = _orig_tid
+        _twin_map[_orig_tid] = _hard_tid
+        _twin_map[_hard_tid] = _orig_tid
+        _paired_primary_tids.append(_orig_tid)
+
+    if _paired_primary_tids:
+        debug.log(
+            "delegate.code_hard_explicit_paired",
+            f"recorded explicit easy/hard code race pair(s): {_paired_primary_tids}",
+        )
+        args["_paired_task_map"] = dict(_twin_map)
 
 
 
@@ -6253,4 +6837,5 @@ WAIT_HELPER_TOOL_SCHEMA = {
 # spawn_helper/wait_helper intentionally stay unexposed: all helper spawning and
 
 # activation is controlled by the main process through delegate().
+
 

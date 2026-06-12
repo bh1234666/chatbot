@@ -55,16 +55,22 @@ def build_recall_hint(tendency: TendencyAnalysis, *, user_message: str = "") -> 
 
     if not topics:
         return (
-            "Round 1 marked `needs_recall=true`. Within the first three tool calls, use expand_warm or expand_cold "
-            "to inspect relevant historical conversations or old task experience. Use key nouns from the user's question "
-            "as the query when possible.\n\n"
-            "需要召回历史时，前几个工具调用内先展开相关记忆。"
+            "The entry routing snapshot has `needs_recall=true`. This is a coarse fact that the current request may depend "
+            "on earlier conversation, stored preferences, shared-file history, or unresolved prior work. Compare that fact "
+            "with the active task contract, current environment/project evidence, visible recent plan snapshots, and concrete "
+            "tool results before choosing recall tools. Topic-like memory guesses are not evidence; use expand/search only "
+            "when historical evidence would change the next decision or when concrete memory IDs/keywords are visible.\n\n"
+            "需要召回是粗路由事实；结合当前任务、项目证据和可见历史快照决定是否展开记忆，主题猜测本身不是证据。"
         )
 
     queries = ", ".join(f"{topic!r}" for topic in topics[:3])
     suggested = "expand_warm" if "warm" in layers else "expand_cold"
     return (
-        f"Round 1 marked `needs_recall=true`. Relevant keywords: {queries}.\n"
-        f"Within the first three tool calls, use {suggested} to inspect related history.\n\n"
-        "用户问题关联历史经验，前几个工具调用内先展开相关记忆。"
+        f"The entry routing snapshot has `needs_recall=true`. Visible recall keywords: {queries}. "
+        f"Available suggested layer fact: {suggested} from recall_layers={list(layers)!r}.\n"
+        "Treat these as search facts, not a required route. Use recall tools when historical evidence would affect the "
+        "active task decision, or when current wording explicitly refers back to prior work and current project/tool facts "
+        "do not already resolve the reference. Concrete environment files, verifier scripts, and project paths remain "
+        "tool evidence rather than memory evidence.\n\n"
+        "召回关键词和层级只是事实；由模型结合当前任务和项目/工具证据决定是否展开。"
     )

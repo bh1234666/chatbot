@@ -71,17 +71,18 @@ def _internal_read_evidence_name_from_staged_path(path: str) -> str:
     base = norm.rsplit("/", 1)[-1]
     base_low = base.lower()
     evidence_markers = (
-        "read_evidence",
-        "ocr_evidence",
-        "source_evidence",
-        "material_evidence",
-        "materials_evidence",
-        "extraction_evidence",
-        "extract_evidence",
-        "evidence_",
-        "_evidence",
-        "visible_text",
+        "evidence",
+        "extract",
+        "extracted",
+        "ocr",
+        "read",
+        "source",
+        "coverage",
+        "material",
+        "materials",
         "transcript",
+        "notes",
+        "visible_text",
         "docx_content",
         "analysis",
         "audit",
@@ -89,6 +90,12 @@ def _internal_read_evidence_name_from_staged_path(path: str) -> str:
         "inspection",
         "findings",
         "summary",
+        "classification",
+        "classify",
+        "triage",
+        "labels",
+        "labeling",
+        "priorities",
     )
     if any(marker in base_low for marker in evidence_markers):
         return base
@@ -348,7 +355,7 @@ def _derive_permanent_root(main_ws: str) -> str | None:
     _parent = os.path.dirname(_norm)
     if not _parent or not os.path.isdir(_parent):
         return None
-    return _parent
+    return _parent
 
 
 def _extract_reported_output_files(report: str) -> list[str]:
@@ -356,9 +363,10 @@ def _extract_reported_output_files(report: str) -> list[str]:
 
     Helpers are instructed to report a JSON block such as
     `{"files": ["_env/out.md"]}` under an `Output files` report section. Disk
-    recovery must not repair malformed helper reports by scraping arbitrary
-    text; malformed format is evidence for retrying the helper/report, not
-    evidence of success.
+    recovery accepts fenced JSON or a bare JSON block on the next line, but it
+    must not repair malformed inline helper reports by scraping arbitrary text;
+    malformed format is evidence for retrying the helper/report, not evidence
+    of success.
 
     磁盘恢复只信任规范输出区块；格式错误交给 LLM 续作修正。
     """
@@ -367,6 +375,14 @@ def _extract_reported_output_files(report: str) -> list[str]:
         r"(?is)(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:##\s*)?Output files(?:\*\*)?.{0,3000}?```(?:json)?\s*(\{.*?\"files\"\s*:\s*\[.*?\].*?\})\s*```",
         text,
     )
+    if not section_match:
+        # Inline form `Output files: {"files": [...]}` (same line) is an
+        # explicit machine-readable declaration too; requiring a newline made
+        # the runner burn a full repair LLM turn on an already-valid report.
+        section_match = re.search(
+            r"(?is)(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:##\s*)?Output files(?:\*\*)?\s*[:：]?\s*(?:\n|\r\n)?\s*(\{[^\n\r]*?\"files\"\s*:\s*\[[^\n\r]*?\][^\n\r]*?\})",
+            text,
+        )
     if not section_match:
         return []
     raw = section_match.group(1)
@@ -510,7 +526,7 @@ def _dir_size(path: str) -> int:
                     pass
     except OSError:
         pass
-    return total
+    return total
 
 
 def _validate_shared_scaffold(helper_workspace: str) -> str:
@@ -578,7 +594,7 @@ def _workspace_has_basename(*roots: str | None) -> set[str]:
                         existing.add(rel_posix[len("_helpers_shared/"):].lower())
         except OSError:
             pass
-    return existing
+    return existing
 
 
 def _list_workspace_files(ws_dir: str) -> list[str]:
@@ -596,13 +612,13 @@ def _list_workspace_files(ws_dir: str) -> list[str]:
                     result.append(os.path.relpath(full, ws_dir))
     except OSError:
         pass
-    return result
+    return result
 
 
 def _match_path_pattern(rel_path: str, pattern: str) -> bool:
     """Simple glob match for path patterns. Uses fnmatch for wildcard matching."""
     import fnmatch
-    return fnmatch.fnmatch(rel_path, pattern)
+    return fnmatch.fnmatch(rel_path, pattern)
 
 
 def _extract_declared_files(report: str) -> set[str]:
@@ -621,24 +637,20 @@ def _extract_declared_files(report: str) -> set[str]:
         fname = str(raw or "").strip()
         if not fname:
             return None
-        norm = fname.replace("\\", "/")
-        if norm.startswith('_helpers_shared/'):
-            norm = norm[len('_helpers_shared/'):]
+        norm = fname.replace("\\", "/").strip().strip("`\"'").lstrip("./")
+        if not norm or os.path.isabs(norm) or ".." in Path(norm).parts:
+            return None
+        if any(ch in norm for ch in ('\n', '\r', '\t', ':', '：', '，', '。', '；')):
+            return None
+        if ' ' in norm:
+            return None
         if '/' in norm:
             base = os.path.basename(norm)
-            if not base or base.startswith('_'):
+            if not base or base.startswith('.'):
                 return None
-            if any(ch in base for ch in ('\n', '\r', '\t', ':', '：', '，', '。', '；')):
-                return None
-            if ' ' in base:
-                return None
-            return base
+            return norm
         fname = norm
         if fname.startswith('_'):
-            return None
-        if any(ch in fname for ch in ('\n', '\r', '\t', ':', '：', '，', '。', '；')):
-            return None
-        if ' ' in fname:
             return None
         return fname or None
 
@@ -692,7 +704,7 @@ def _extract_declared_files(report: str) -> set[str]:
             fname = _normalize_declared_name(fm.group(1))
             if fname:
                 declared.add(fname)
-    return declared
+    return declared
 
 
 def _is_internal_helper_artifact(path: str) -> bool:
@@ -714,7 +726,7 @@ def _is_internal_helper_artifact(path: str) -> bool:
             return True
         if "/" not in rel and os.path.splitext(base)[1].lower() in {".py", ".pyw", ".pyc", ".pyo"}:
             return True
-    return False
+    return False
 
 
 def _is_shared_support_artifact(path: str) -> bool:
@@ -725,7 +737,7 @@ def _is_shared_support_artifact(path: str) -> bool:
         return True
     base = os.path.basename(norm).lower()
     ext = os.path.splitext(base)[1]
-    return ext in {".csv", ".tsv", ".json", ".yaml", ".yml", ".xml", ".txt"}
+    return ext in {".csv", ".tsv", ".json", ".yaml", ".yml", ".xml", ".txt"}
 
 
 def _matches_declared_output_via_mapping(path: str, declared_set: set[str], file_map: list[dict]) -> bool:
@@ -733,11 +745,28 @@ def _matches_declared_output_via_mapping(path: str, declared_set: set[str], file
     if not norm:
         return False
     base = os.path.basename(norm)
+
+    def _aliases(value: str) -> set[str]:
+        value_norm = str(value or "").replace("\\", "/").strip().lstrip("./")
+        if not value_norm:
+            return set()
+        aliases = {value_norm}
+        if value_norm.startswith("_env/"):
+            aliases.add(value_norm[len("_env/"):])
+        else:
+            aliases.add(f"_env/{value_norm}")
+        aliases.add(os.path.basename(value_norm))
+        return {x for x in aliases if x}
+
+    norm_aliases = _aliases(norm)
     for declared in declared_set or set():
         declared_norm = str(declared or "").replace("\\", "/").strip()
         if not declared_norm:
             continue
+        declared_aliases = _aliases(declared_norm)
         declared_base = os.path.basename(declared_norm)
+        if norm_aliases & declared_aliases:
+            return True
         if norm == declared_norm or base == declared_base or norm.endswith("_" + declared_norm):
             return True
     for entry in file_map or []:
@@ -749,14 +778,20 @@ def _matches_declared_output_via_mapping(path: str, declared_set: set[str], file
         mapped_names = {name for name in (helper_name, main_name, shared_name) if name}
         if not mapped_names:
             continue
+        mapped_aliases = set()
+        for name in mapped_names:
+            mapped_aliases.update(_aliases(name))
         mapped_bases = {os.path.basename(name) for name in mapped_names}
-        if norm not in mapped_names and base not in mapped_bases:
+        if not (norm_aliases & mapped_aliases) and norm not in mapped_names and base not in mapped_bases:
             continue
         for declared in declared_set or set():
             declared_norm = str(declared or "").replace("\\", "/").strip()
             if not declared_norm:
                 continue
+            declared_aliases = _aliases(declared_norm)
             declared_base = os.path.basename(declared_norm)
+            if declared_aliases & mapped_aliases:
+                return True
             if declared_norm in mapped_names or declared_base in mapped_bases:
                 return True
             if any(name.endswith("_" + declared_norm) for name in mapped_names):
@@ -765,7 +800,7 @@ def _matches_declared_output_via_mapping(path: str, declared_set: set[str], file
                 return True
             if helper_name and declared_base == os.path.basename(helper_name):
                 return True
-    return False
+    return False
 
 
 # 2026-05-15 P115: helper spawn 时注入工作区清单
@@ -827,7 +862,7 @@ def _list_helper_workspace_for_prompt(ws_dir: str, max_files: int = 30) -> str:
             "已在沙箱的文件直接使用；缺主区文件时 fetch_to_temp。"
         )
     except Exception:
-        return ""
+        return ""
 
 
 def take_workspace_snapshot(ws_dir: str) -> dict[str, tuple[float, int]]:

@@ -51,17 +51,32 @@ def _structured_read_file_rejection(path: str) -> dict | None:
     executable_exts = {".exe", ".dll", ".so", ".dylib", ".bin"}
 
     if ext in office_exts:
+        office_kind = {
+            ".docx": "DOCX",
+            ".pptx": "PPTX",
+            ".xlsx": "XLSX",
+            ".xlsm": "XLSX",
+        }.get(ext, "Office")
         return {
             "ok": False,
             "error": "binary_or_structured_file_not_readable_as_text",
             "path": path,
             "file_category": "document" if ext in {".docx", ".pptx"} else "spreadsheet",
             "message": (
-                "Office files are structured documents, not plain text. Inspect the file structure first. "
-                "Use office(action='read') for body text, and office append/replace/update actions for edits.\n"
+                f"{office_kind} files are structured containers, not plain text. This search/read_file result is only "
+                "a format fact; it does not say the file is bad or missing. Use office(action='read', path=...) "
+                "for body text/structure, and use targeted office actions such as append or replace_block for changes. For DOCX acceptance checks, "
+                "one office(action='read') call normally gives headings, paragraph/table/image counts, and block indexes. Repeating "
+                "plain-text search on the same Office path is expected to return the same format fact unless the "
+                "question is specifically about container bytes rather than document content.\n"
                 "Office 文件需用 inspect_file/office 工具读取或编辑。"
             ),
-            "suggested_tools": ["inspect_file", "office read", "office append", "office replace/update"],
+            "suggested_tools": [
+                "office(action='read')",
+                "inspect_file",
+                "office(action='append'/'replace_block'/'update_cells')",
+            ],
+            "next_call_fact": {"tool": "office", "action": "read", "path": path},
         }
     if ext == ".pdf":
         return {

@@ -47,6 +47,16 @@ _RESULT_COPY_BACK_MAX_SIZE = 50 * 1024 * 1024  # 50MB
 _RESULT_COPY_BACK_MAX_FILES = 50
 _TEXT_REPAIR_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml", ".xml"}
 _TEXT_REPAIR_MAX_SIZE = 2 * 1024 * 1024
+_ENV_TRANSIENT_DIRS = {
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".hypothesis",
+    ".tox",
+    ".nox",
+    "node_modules",
+}
 
 
 def _copyback_registry(main_ws: str) -> FileRegistry | None:
@@ -194,6 +204,7 @@ def _copy_results_to_main(
         "capped": False,
         "shared_merge_allowed": allow_shared_merge,
         "text_mojibake_repaired": [],
+        "env_skipped_unchanged_files": [],
     }
     if not helper_ws or not main_ws or not os.path.isdir(helper_ws):
         return [], stats, []
@@ -346,7 +357,9 @@ def _copy_results_to_main(
         env_dst = os.path.join(main_ws, "_env")
         env_copied: list[str] = []
         env_skipped_unchanged = 0
+        env_skipped_unchanged_files: list[str] = []
         env_skipped_unexpected_new: list[str] = []
+        env_skipped_unowned: list[str] = []
         env_skipped_read_evidence: list[str] = []
         _declared_env_outputs: set[str] = set()
         for _raw in list(declared_files or set()) + list(expected_outputs or []):
@@ -359,10 +372,23 @@ def _copy_results_to_main(
                 _declared_env_outputs.add("")
             elif _norm and not _norm.startswith(("_helpers_shared/", "_shared/")):
                 _declared_env_outputs.add(_norm)
+        _declared_env_dirs = {
+            item.rstrip("/") + "/"
+            for item in _declared_env_outputs
+            if item and (item.endswith("/") or not os.path.splitext(os.path.basename(item))[1])
+        }
+
+        def _owns_env_path(rel_posix: str) -> bool:
+            if not _declared_env_outputs:
+                return True
+            if "" in _declared_env_outputs or rel_posix in _declared_env_outputs:
+                return True
+            return any(rel_posix.startswith(prefix) for prefix in _declared_env_dirs)
+
         try:
             os.makedirs(env_dst, exist_ok=True)
             for root, dirs, files in os.walk(env_src):
-                dirs[:] = [d for d in dirs if d not in {"__pycache__"}]
+                dirs[:] = [d for d in dirs if d not in _ENV_TRANSIENT_DIRS]
                 rel_root = os.path.relpath(root, env_src)
                 for fname in files:
                     if fname.startswith(".") and fname != ".manifest.json":
@@ -372,6 +398,16 @@ def _copy_results_to_main(
                     rel_posix = rel_name.replace(os.sep, "/")
                     if helper_kind_norm in {"read", "ocr"}:
                         env_skipped_read_evidence.append(f"_env/{rel_posix}")
+                        continue
+                    if not copy_unexpected_env_files and not _owns_env_path(rel_posix):
+                        _prev_for_unowned = (
+                            fork_snapshot.get(f"_env/{rel_posix}")
+                            if fork_snapshot is not None else None
+                        )
+                        if _prev_for_unowned is None:
+                            env_skipped_unexpected_new.append(f"_env/{rel_posix}")
+                        else:
+                            env_skipped_unowned.append(f"_env/{rel_posix}")
                         continue
                     try:
                         cur_st = os.stat(src_path)
@@ -389,6 +425,7 @@ def _copy_results_to_main(
                                 try:
                                     if os.path.isfile(dst_path) and open(src_path, "rb").read() == open(dst_path, "rb").read():
                                         env_skipped_unchanged += 1
+                                        env_skipped_unchanged_files.append(f"_env/{rel_posix}")
                                         continue
                                 except OSError:
                                     pass
@@ -427,7 +464,9 @@ def _copy_results_to_main(
             if copy_unexpected_env_files:
                 stats["env_internal_evidence_files"] = env_copied
             stats["env_skipped_unchanged"] = env_skipped_unchanged
+            stats["env_skipped_unchanged_files"] = env_skipped_unchanged_files[:100]
             stats["env_skipped_unexpected_new"] = env_skipped_unexpected_new[:50]
+            stats["env_skipped_unowned"] = env_skipped_unowned[:100]
             stats["env_skipped_read_evidence"] = env_skipped_read_evidence[:50]
             if env_skipped_read_evidence:
                 debug.log(
@@ -442,6 +481,13 @@ def _copy_results_to_main(
                     "skipped new _env/ files not declared in expected_outputs: "
                     f"{env_skipped_unexpected_new[:20]}"
                     + (f" and {len(env_skipped_unexpected_new)} files total" if len(env_skipped_unexpected_new) > 20 else ""),
+                )
+            if env_skipped_unowned:
+                debug.log(
+                    f"delegate.{task_id}.env_copy_ownership_guard",
+                    "skipped _env/ files outside this helper's declared outputs: "
+                    f"{env_skipped_unowned[:20]}"
+                    + (f" and {len(env_skipped_unowned)} files total" if len(env_skipped_unowned) > 20 else ""),
                 )
         except OSError:
             log.exception("failed to merge _env back to main")
@@ -462,6 +508,7 @@ def _copy_results_to_main(
     if declared_project_paths:
         staged_copied: list[str] = []
         staged_skipped_unchanged = 0
+        staged_skipped_unchanged_files: list[str] = []
         try:
             env_dst = os.path.join(main_ws, "_env")
             os.makedirs(env_dst, exist_ok=True)
@@ -491,6 +538,7 @@ def _copy_results_to_main(
                         prev_mtime, prev_size = prev
                         if prev_size == cur_st.st_size and abs(cur_st.st_mtime - prev_mtime) < 1.0:
                             staged_skipped_unchanged += 1
+                            staged_skipped_unchanged_files.append(f"_env/{rel_posix}")
                             continue
                 os.makedirs(os.path.dirname(dst_path), exist_ok=True)
                 _copy2_with_text_repair(src_path, dst_path, stats, f"_env/{rel_posix}")
@@ -523,6 +571,9 @@ def _copy_results_to_main(
                 stats["env_copied_files"] = existing_env_files
             if staged_skipped_unchanged:
                 stats["env_skipped_unchanged"] = int(stats.get("env_skipped_unchanged") or 0) + staged_skipped_unchanged
+                existing_skipped_files = list(stats.get("env_skipped_unchanged_files") or [])
+                existing_skipped_files.extend(staged_skipped_unchanged_files)
+                stats["env_skipped_unchanged_files"] = existing_skipped_files[:100]
         except OSError:
             log.exception("failed to stage declared project-relative helper outputs")
 
@@ -577,11 +628,40 @@ def _copy_results_to_main(
             for x in declared_files
             if str(x).strip()
         }
+        _already_copied_names = {
+            str(x or "").replace("\\", "/").strip().lstrip("./")
+            for x in copied
+            if str(x or "").strip()
+        }
+        for _mapping in file_map:
+            if not isinstance(_mapping, dict):
+                continue
+            for _key in ("helper_name", "main_name", "shared_name"):
+                _value = str(_mapping.get(_key) or "").replace("\\", "/").strip().lstrip("./")
+                if _value:
+                    _already_copied_names.add(_value)
+
+        def _declared_output_satisfied_by_existing_copy(raw: object) -> bool:
+            norm = str(raw or "").replace("\\", "/").strip().lstrip("./")
+            if not norm:
+                return False
+            equivalent = {norm}
+            if norm.startswith("_env/"):
+                equivalent.add(norm[len("_env/"):])
+            elif not norm.startswith(("_helpers_shared/", "_shared/")):
+                equivalent.add(f"_env/{norm}")
+            return any(item in _already_copied_names for item in equivalent)
+
         declared_candidates = [
             (n, s, sz, iss) for n, s, sz, iss in candidates
             if n in declared_files or os.path.basename(n).lower() in _declared_bases
         ]
-        missing = declared_files - {n for n, _, _, _ in declared_candidates}
+        env_satisfied_declared = {
+            n for n in declared_files if _declared_output_satisfied_by_existing_copy(n)
+        }
+        if env_satisfied_declared:
+            stats["declared_satisfied_by_existing_copy"] = sorted(env_satisfied_declared)
+        missing = declared_files - {n for n, _, _, _ in declared_candidates} - env_satisfied_declared
         if missing:
             remapped_candidates: list[tuple[str, str, int, bool]] = []
             remaining_missing = set(missing)
@@ -790,27 +870,22 @@ def _copy_results_to_main(
                 "framework and split outputs by coherent directories or modules before copy-back.\n\n"
                 "helper 产物过多且未声明交付文件；继续同一 task_id，清理噪声并声明真实项目产物。"
             )
-            stats["suggested_next_action"] = {
-                "tool": "delegate",
-                "action": "spawn",
-                "task_template": {
-                    "task_id": task_id,
-                    "resume": True,
-                    "kind": helper_kind_norm or "code",
-                    "mode": "hard",
-                    "framework": "<existing framework plus the copy-back cap evidence>",
-                    "prompt": (
-                        "Continue the same helper. Inventory the current helper workspace, identify intended project "
-                        "outputs, delete or ignore scratch files, and finish by reporting concrete expected outputs "
-                        "or by narrowing the output set while preserving existing work."
-                    ),
-                    "expected_outputs": ["<concrete project files or _env/... paths>"],
-                    "acceptance_checks": [
-                        "intended output file list is explicit",
-                        "scratch/generated noise is excluded",
-                        "outputs can be copied back without the undeclared-file cap",
-                    ],
-                },
+            stats["recovery_facts"] = {
+                "same_task_id": task_id,
+                "matching_helper_kind": helper_kind_norm or "code",
+                "copyback_boundary_fact": "many loose helper files exceeded the undeclared output copy-back cap",
+                "preserved_work_fact": "the helper workspace still contains the produced files; the main workspace was not changed",
+                "available_recovery_shapes": [
+                    "collect or resume the same helper to inventory intended outputs",
+                    "narrow the declared expected_outputs to concrete project files",
+                    "exclude scratch/generated noise before copy-back",
+                    "split a genuine large project by coherent directories or modules",
+                ],
+                "acceptance_facts": [
+                    "intended output file list is explicit",
+                    "scratch/generated noise is excluded",
+                    "outputs can be copied back without the undeclared-file cap",
+                ],
             }
             return copied, stats, file_map
 

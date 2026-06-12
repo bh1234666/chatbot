@@ -273,8 +273,8 @@ def _classify_latex_complexity(latex: str) -> tuple[str, str]:
             env_name = env[7:-1]  # "begin{align}" → "align"
             return "unsupported", (
                 f"\\begin{{{env_name}}} 环境本工具不支持。"
-                f"建议: 拆成多个 equation block (每个独立的 $...$); "
-                f"或者把对齐用 prose 句子表达。"
+                f"可恢复格式事实: 多个独立 $...$ equation block 可分别处理；"
+                f"对齐关系也可放在公式外的 prose 句子中。"
             )
     # \\text{中文} — mathtext 不会渲染中文, 直接报错避免乱码
     if "\\text{" in s:
@@ -284,8 +284,8 @@ def _classify_latex_complexity(latex: str) -> tuple[str, str]:
             return "unsupported", (
                 "\\text{...} 含非 ASCII 字符。mathtext 无法渲染中文公式标注, "
                 "Word OMML 也不支持 \\text。"
-                "建议: 把文本注释挪到公式外的 paragraph 文字里, "
-                "公式只放数学符号。"
+                "可恢复格式事实: 文本注释可放到公式外的 paragraph 文字里, "
+                "公式中只保留数学符号。"
             )
     # 自定义命令 / 环境扩展
     if "\\newcommand" in s or "\\renewcommand" in s or "\\def\\" in s:

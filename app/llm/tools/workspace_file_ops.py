@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
+import hashlib
 
-from app.core.filesystem import PathZone, classify_path
+from app.core.filesystem import FileKind, FileRegistry, FileStatus, PathZone, classify_path
+from app.llm.tools.output_spill import write_tool_output_spill
 
 
 def _sync_workspace_globals() -> None:
@@ -27,6 +30,50 @@ def _sync_workspace_globals() -> None:
             "handle_search_in_file",
         }
     })
+
+
+def _range_is_covered_by_previous_reads(
+    start_line: int,
+    end_line: int,
+    *,
+    total_lines: int,
+    already_read_full: bool,
+    fragments: list,
+) -> tuple[bool, str, list[list[int]]]:
+    """Return whether a requested read range is duplicate evidence.
+
+    This is a context-budget guard, not a task decision. It only fires when the
+    exact requested lines were already exposed by earlier read_file results.
+    """
+    if start_line < 1 or end_line < start_line:
+        return False, "", []
+    normalized: list[list[int]] = []
+    if already_read_full:
+        normalized.append([1, total_lines])
+    for item in fragments or []:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            continue
+        try:
+            a = max(1, int(item[0]))
+            b = min(total_lines, int(item[1]))
+        except (TypeError, ValueError):
+            continue
+        if b >= a:
+            normalized.append([a, b])
+    if not normalized:
+        return False, "", []
+    normalized.sort()
+    merged: list[list[int]] = []
+    for a, b in normalized:
+        if not merged or a > merged[-1][1] + 1:
+            merged.append([a, b])
+        else:
+            merged[-1][1] = max(merged[-1][1], b)
+    for a, b in merged:
+        if a <= start_line and end_line <= b:
+            reason = "covered_by_prior_full_read" if a == 1 and b >= total_lines else "covered_by_prior_fragment_read"
+            return True, reason, merged[-8:]
+    return False, "", merged[-8:]
 
 
 def _helper_env_write_contract_error(path: str) -> dict | None:
@@ -74,14 +121,21 @@ def _helper_env_write_contract_error(path: str) -> dict | None:
         "ok": False,
         "error": (
             f"helper kind={helper_kind!r} cannot write project copy {target!r} because it is not in this "
-            "helper's declared expected_outputs. Ask the main thread to assign this file to the right helper, "
-            "or request a new/expanded helper contract before editing it. Keep working on files you do own; "
+            "helper's declared expected_outputs. The matching recovery facts are an expanded helper contract or "
+            "a matching helper assignment before editing it. Files already declared in expected_outputs remain owned; "
             "do not write a same-named scratch file at the sandbox root as a substitute for this project path.\n\n"
-            "当前 helper 只能修改自己 expected_outputs 声明的 _env 项目文件；其它项目文件请请求主线程重新分配。"
+            "当前 helper 只能修改自己 expected_outputs 声明的 _env 项目文件；其它项目文件需要匹配的归属事实。"
         ),
         "blocked_reason": "helper_env_write_outside_expected_outputs",
         "blocked_path": target,
         "expected_outputs": sorted(allowed),
+        "matching_helper_kind": "code",
+        "observed_recovery_tool": "request_resource",
+        "observed_recovery_shape": {
+            "resource_kind": "code",
+            "reason": "need ownership for additional project file",
+            "needed_outputs": [target],
+        },
         "suggested_tool": "request_resource",
         "suggested_request": (
             "request_resource(kind='code', reason='need ownership for additional project file', "
@@ -90,8 +144,8 @@ def _helper_env_write_contract_error(path: str) -> dict | None:
     }
 
 
-def _existing_env_project_copy_write_error(ws_dir: str, path: str) -> dict | None:
-    """Block whole-file overwrite of existing staged environment project files."""
+def _existing_env_project_copy_write_fact(ws_dir: str, path: str) -> dict | None:
+    """Return facts for whole-file overwrites of existing staged project copies."""
     classification = classify_path(path)
     norm = classification.normalized
     if classification.zone != PathZone.STAGED_FILE:
@@ -109,27 +163,34 @@ def _existing_env_project_copy_write_error(ws_dir: str, path: str) -> dict | Non
     if not os.path.exists(target):
         return None
     return {
-        "ok": False,
-        "error": (
-            f"workspace.write cannot overwrite existing staged project file {norm!r}. "
-            "This protects the project copy from accidental truncation. Continue on the same _env file: "
-            "read it with read_file, modify it with edit_file/multi_edit/insert_in_file, then use "
-            "env_diff followed by env_apply_replace. If a whole-file rewrite is intended, still edit the same "
-            "_env path through replace-style editing rather than workspace.write. Keep edits on the same staged file "
-            "file just to bypass this guard. If the staged copy is stale or wrong, call env_fetch for the source path again.\n\n"
-            "已存在的 _env 项目副本不能用 workspace.write 整文件覆盖；请在同一个 _env 文件上局部编辑，再 env_diff/env_apply_replace。"
+        "staged_project_copy": True,
+        "staged_project_path": norm,
+        "staged_overwrite_fact": (
+            f"Fact: workspace.write replaced the staged project copy {norm!r}, not the real project file. "
+            "Use env_diff to inspect the staged change and env_apply_replace to apply it to the project when appropriate. "
+            "A renamed_previous backup, when present, is only the previous staged copy."
         ),
-        "blocked_reason": "env_project_copy_write_overwrite_forbidden",
-        "blocked_path": norm,
-        "suggested_next_actions": [
-            "read_file",
-            "edit_file",
-            "multi_edit",
-            "insert_in_file",
-            "env_diff",
-            "env_apply_replace",
-            "env_fetch",
-        ],
+        "pending_project_apply_fact": (
+            f"The real project file for {norm!r} is unchanged until env_apply_replace applies this staged copy."
+        ),
+        "suggested_next_tools": ["env_diff", "env_apply_replace"],
+    }
+
+
+def _existing_env_project_copy_edit_fact(ws_dir: str, path: str, operation: str) -> dict | None:
+    fact = _existing_env_project_copy_write_fact(ws_dir, path)
+    if fact is None:
+        return None
+    norm = fact.get("staged_project_path") or path
+    return {
+        **fact,
+        "staged_edit_fact": (
+            f"Fact: {operation} modified the staged project copy {norm!r}, not the real project file. "
+            "Use env_diff to inspect the staged change and env_apply_replace to apply it to the real project when appropriate."
+        ),
+        "pending_project_apply_fact": (
+            f"The real project file for {norm!r} is unchanged until env_apply_replace applies this staged copy."
+        ),
     }
 
 
@@ -180,33 +241,259 @@ def _main_env_new_project_artifact_write_error(path: str, content: str) -> dict 
             f"Main workflow cannot stage a substantial new project artifact directly at {norm!r}. "
             "A staged `_env/...` file can later be applied to the real project, so substantial source, reports, "
             "contracts, data, and framework documents need helper ownership and a ready provenance record. "
-            "Spawn a focused helper with a complete request envelope, declared expected_outputs, and acceptance "
-            "checks; then inspect or test the staged output before env_apply_create.\n\n"
-            "主流程不能直接写入可应用到项目的新 `_env` 大文件；应由 helper 产出并验收。"
+            "No file was written. The response reports the path, artifact type, expected output, and acceptance "
+            "facts so the model can decide whether to delegate, reduce the write to a compact coordination note, "
+            "or state that no project artifact is needed.\n\n"
+            "事实：主流程未直接写入可应用到项目的新 `_env` 大文件；返回恢复事实，由模型决定后续动作。"
         ),
         "blocked_reason": "main_thread_env_project_artifact_should_delegate",
         "blocked_path": norm,
         "delegate_required": True,
-        "suggested_next_action": {
-            "tool": "delegate",
-            "action": "spawn",
-            "task_template": {
-                "kind": "code" if is_source else "edit",
+        "recovery_facts": {
+            "matching_helper_kind": "code" if is_source else "edit",
+            "mode": "easy",
+            "framework_fact": "<shared framework, file ownership, inputs, and acceptance checks>",
+            "input_files": [],
+            "helper_prompt_fact": (
+                f"Create this focused project artifact as a helper-owned staged output: {project_rel}. "
+                "If this is a shared contract or outline for later helpers, keep it compact and declare whether "
+                "it is only an internal handoff or should later be applied as a project file. Keep the helper scope "
+                "limited to this artifact and the current framework."
+            ),
+            "expected_outputs": [norm],
+            "acceptance_checks": [
+                "outputs_complete is true",
+                "the staged file is inspected or locally checked before apply",
+                "scope matches only this artifact and the current shared framework",
+            ],
+        },
+    }
+
+
+_PROJECT_TEXT_ARTIFACT_EXTS = {
+    ".md", ".markdown", ".txt", ".json", ".jsonl", ".yaml", ".yml",
+    ".toml", ".ini", ".cfg", ".csv", ".tsv", ".xml",
+}
+
+
+def _looks_like_main_project_text_artifact(path: str, content: str) -> bool:
+    """Mirror env_apply_create's direct-content delegation shape for hints."""
+    if not path or not content:
+        return False
+    suffix = Path(path).suffix.lower()
+    if suffix not in _PROJECT_TEXT_ARTIFACT_EXTS:
+        return False
+    norm = path.replace("\\", "/").lower()
+    basename = Path(norm).name
+    if basename in {"notes.txt", "note.txt"} and len(content) <= 600:
+        return False
+    project_tokens = (
+        "api", "architecture", "benchmark", "changelog", "change",
+        "contract", "design", "doc", "docs", "framework", "guide",
+        "instructions", "manual", "migration", "notes", "outline",
+        "overview", "paper", "plan", "readme", "reference", "report",
+        "requirements", "results", "schema", "spec", "tutorial", "usage",
+    )
+    if any(token in basename for token in project_tokens):
+        return True
+    if any(part in norm for part in ("/docs/", "/reports/", "/paper/", "/benchmark/", "/_shared/")):
+        return True
+    if len(content) >= 1800:
+        return True
+    nonempty_lines = [line for line in content.splitlines() if line.strip()]
+    return len(nonempty_lines) >= 45
+
+
+def _preserve_blocked_workspace_project_candidate(ws_dir: str, *, target_rel: str, content: str) -> dict:
+    """Save blocked main-authored workspace.write content for helper handoff."""
+    if not ws_dir or not content:
+        return {}
+    try:
+        root = Path(ws_dir).resolve()
+        safe_rel = target_rel.replace("\\", "/").lstrip("/").replace("..", "__")
+        candidate = root / "_env" / ".blocked_creates" / safe_rel
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text(content, encoding="utf-8")
+        rel = str(candidate.relative_to(root)).replace("\\", "/")
+        try:
+            import hashlib
+            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        except OSError:
+            digest = ""
+        return {
+            "candidate_preserved": True,
+            "candidate_workspace_path": rel,
+            "candidate_sha256": digest,
+            "candidate_size": candidate.stat().st_size,
+            "candidate_preservation_fact": (
+                f"Fact: this blocked workspace.write did not create project file {target_rel!r}; "
+                f"the already-supplied candidate content was preserved at `{rel}` for helper review or apply evidence. "
+                "Avoid pasting the same long body into another tool call."
+            ),
+            "summary_zh": "被拦截的写入内容已保存为工作区候选文件；真实项目未改变，可交给 helper 修订或产出。",
+        }
+    except OSError:
+        return {}
+
+
+def _main_env_existing_project_copy_edit_error(path: str, operation: str) -> dict | None:
+    """Keep real-project staged edits helper-owned in environment mode."""
+    classification = classify_path(path)
+    norm = classification.normalized
+    if classification.zone != PathZone.STAGED_FILE:
+        return None
+    try:
+        from app.core.core_processes import current_helper_kind
+        from app.core.runtime_mode import is_environment_mode
+
+        if current_helper_kind() or not is_environment_mode():
+            return None
+    except Exception:
+        return None
+    project_rel = norm[len("_env/"):]
+    if not project_rel:
+        return None
+    return {
+        "ok": False,
+        "error": (
+            f"Fact: {operation} would modify staged project copy {norm!r} in the main workflow. "
+            "The real project is unchanged until env_apply_*. For source/project edits, delegate the staged output "
+            "to a helper with expected_outputs and acceptance checks, then inspect/diff/apply in the main thread.\n\n"
+            "事实：主流程本次不会直接编辑 _env 项目副本；项目源码/产物修改应由 helper 产出并自验，主流程负责 diff/apply、交付映射和验收记账。"
+        ),
+        "blocked_reason": "main_thread_env_project_edit_should_delegate",
+        "blocked_path": norm,
+        "delegate_required": True,
+        "recovery_facts": {
+            "matching_helper_kind": "code",
+            "input_files": [norm],
+            "expected_outputs": [norm],
+            "acceptance_checks": [
+                "staged output contains the intended project edit",
+                "main thread inspects env_diff before env_apply_*",
+            ],
+            "project_truth_fact": "the real project is unchanged until env_apply_* succeeds",
+        },
+    }
+
+
+def _main_environment_workspace_write_error(ws_dir: str, path: str, content: str) -> dict | None:
+    try:
+        from app.core.core_processes import current_helper_kind
+        from app.core.runtime_mode import is_environment_mode
+
+        if current_helper_kind() or not is_environment_mode():
+            return None
+    except Exception:
+        return None
+    classification = classify_path(path)
+    norm = classification.normalized
+    if not norm:
+        return None
+    internal_prefixes = (
+        ".temp/",
+        ".prev/",
+        "_helpers_shared/",
+        "_shared/",
+        "_downloaded_media/",
+    )
+    if (
+        classification.zone in {PathZone.STAGED_FILE, PathZone.STAGED_ROOT, PathZone.HELPER_SHARED}
+        or norm.startswith(internal_prefixes)
+    ):
+        return None
+    try:
+        if os.path.isdir(_safe_resolve(ws_dir, norm)):
+            return None
+    except Exception:
+        pass
+    if classification.zone not in {PathZone.WORKSPACE, PathZone.DELIVERABLE}:
+        return None
+    content_text = content if isinstance(content, str) else str(content)
+    content_chars = len(content_text)
+    content_lines = content_text.count("\n") + (1 if content_text else 0)
+    project_text_should_delegate = _looks_like_main_project_text_artifact(norm, content_text)
+    candidate = (
+        _preserve_blocked_workspace_project_candidate(ws_dir, target_rel=norm, content=content_text)
+        if project_text_should_delegate
+        else {}
+    )
+    if project_text_should_delegate:
+        input_files = [candidate["candidate_workspace_path"]] if candidate.get("candidate_workspace_path") else []
+        result = {
+            "ok": False,
+            "error": (
+                f"workspace.write would create {norm!r} only in the chat workspace, not in the real environment project. "
+                "The attempted content looks like a substantial project-facing text artifact. Keep project authoring "
+                "helper-owned when durable project state is still required. The response preserves candidate content "
+                "when possible and reports the normal helper-owned output shape as facts.\n\n"
+                "事实：workspace.write 未创建真实项目文件；候选内容如有保存可作为证据，是否派发或应用由模型决定。"
+            ),
+            "blocked_reason": "environment_workspace_write_not_project_file",
+            "blocked_path": norm,
+            "content_chars": content_chars,
+            "content_lines": content_lines,
+            "content_omitted_from_suggestion": True,
+            "chat_workspace_only": True,
+            "project_file_created": False,
+            "delegate_required": True,
+            "next_action_instruction": (
+                f"Fact: this workspace.write call did not create project file {norm!r}. "
+                "The supplied content was preserved as a candidate file when possible. If it is still the desired "
+                "project deliverable, one recoverable shape is a helper with that candidate in input_files and target "
+                "`_env/...` in expected_outputs; avoid calling env_apply_create(content=...) with the same long body.\n\n"
+                "事实：本次 workspace.write 未创建项目文件；候选文件路径可作为 helper 输入证据，避免重复粘贴正文。"
+            ),
+            "recovery_facts": {
+                "matching_helper_kind": "edit",
                 "mode": "easy",
-                "framework": "<shared framework, file ownership, inputs, and acceptance checks>",
-                "input_files": [],
-                "prompt": (
-                    f"Create this focused project artifact as a helper-owned staged output: {project_rel}. "
-                    "If this is a shared contract or outline for later helpers, keep it compact and declare whether "
-                    "it is only an internal handoff or should later be applied as a project file. Keep the helper scope "
-                    "limited to this artifact and the current framework."
+                "framework_fact": "<purpose, source evidence, target path, and acceptance checks>",
+                "input_files": input_files,
+                "helper_prompt_fact": (
+                    f"Create the project-visible text artifact {norm}. "
+                    "If a candidate input file is listed, inspect and revise it instead of asking the main process "
+                    "to paste the body again."
                 ),
-                "expected_outputs": [norm],
-                "acceptance_checks": [
-                    "outputs_complete is true",
-                    "the staged file is inspected or locally checked before apply",
-                    "scope matches only this artifact and the current shared framework",
-                ],
+                "expected_outputs": [f"_env/{norm}"],
+                "acceptance_checks": ["inspect the produced file", "verify requested coverage and format"],
+            },
+        }
+        result.update(candidate)
+        return result
+    content_for_suggestion = content_text
+    omitted_large_content = content_chars > 4000
+    if omitted_large_content:
+        content_for_suggestion = (
+            f"[content omitted after blocked environment workspace.write; "
+            f"original_chars={content_chars}, original_lines={content_lines}]"
+        )
+    return {
+        "ok": False,
+        "error": (
+            f"workspace.write would create {norm!r} in the chat workspace, not in the real environment project. "
+            "For a project file or task deliverable in environment mode, create the real project file with env_apply_create "
+            "after confirming the target path. Use workspace.write only for internal chat-workspace scratch files.\n\n"
+            "workspace.write 写入聊天工作区，不写真实项目；环境项目交付文件请用 env_apply_create。"
+        ),
+        "blocked_reason": "environment_workspace_write_not_project_file",
+        "blocked_path": norm,
+        "content_chars": content_chars,
+        "content_lines": content_lines,
+        "content_omitted_from_suggestion": omitted_large_content,
+        "chat_workspace_only": True,
+        "project_file_created": False,
+        "next_action_instruction": (
+            f"Fact: this workspace.write call did not create project file {norm!r}. "
+            "If the attempted content is the desired project deliverable, `env_apply_create` with the reported path/content "
+            "shape is one equivalent real-project create operation. A separate write-access probe creates a different "
+            "file and is not evidence that blocked_path was created.\n\n"
+            "事实：本次 workspace.write 未创建项目文件；若该内容就是目标交付物，可用 env_apply_create 按返回的路径/内容形状创建真实项目文件。"
+        ),
+        "recovery_facts": {
+            "matching_tool_shape": "env_apply_create",
+            "arguments": {
+                "path": norm,
+                "content": content_for_suggestion,
             },
         },
     }
@@ -278,6 +565,313 @@ def _path_access_error(path: str, *, operation: str) -> dict | None:
     return None
 
 
+def _ready_helper_output_read_fact(
+    ws_dir: str,
+    path: str,
+    *,
+    caller_kind: str,
+    force: bool,
+    unbounded_full_read: bool,
+    computed_full_read: bool = False,
+) -> dict | None:
+    """Return a compact provenance fact for clean helper-owned artifacts.
+
+    This protects the main coordinator context from rereading content that a
+    successful helper already owns. It is a provenance boundary, not a task
+    classifier: explicit force, fragment reads, and helper callers still pass.
+    """
+    if force:
+        return None
+    if str(caller_kind or "").strip().lower() != "main":
+        return None
+    if not (unbounded_full_read or computed_full_read):
+        return None
+    norm = str(path or "").replace("\\", "/").strip().lstrip("./")
+    if not norm:
+        return None
+    try:
+        registry = FileRegistry.load(
+            scope_id=f"workspace:{os.path.abspath(ws_dir)}",
+            workspace_root=ws_dir,
+        )
+        record = registry.find_by_workspace_path(norm)
+    except Exception:
+        return None
+    if record is None or record.kind != FileKind.HELPER_OUTPUT:
+        return None
+    ready_statuses = {
+        FileStatus.READY,
+        FileStatus.VERIFIED,
+        FileStatus.PROMOTED,
+        FileStatus.APPLIED,
+        FileStatus.DELIVERED,
+    }
+    if record.status not in ready_statuses and not record.verified:
+        return None
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    outputs_complete = metadata.get("outputs_complete")
+    producer_self_verified = metadata.get("producer_self_verified") is True
+    if outputs_complete is False or not producer_self_verified:
+        return {
+            "ok": True,
+            "action": "read_file",
+            "path": norm,
+            "content": "",
+            "content_omitted": True,
+            "content_omitted_reason": "helper_owned_unverified_artifact",
+            "helper_owned_artifact_fact": (
+                f"`{norm}` is a helper-owned artifact, but its producer completion facts are not clean "
+                "producer-self-verified evidence. The main process should not absorb the artifact body to "
+                "repair or judge helper-owned content quality. Treat this as a recovery boundary: resume the "
+                "producer helper, use a verify helper, or consume existing helper-run evidence. Use force=true "
+                "only for an explicit quote/display request or a narrow main-owned file-management fact that "
+                "requires exact local text."
+            ),
+            "事实": (
+                f"`{norm}` 是 helper 产物，但当前没有干净的生产者自验证完成事实；主进程不通过阅读全文来接管质量判断。"
+                "应恢复生产 helper、派 verify helper 或使用已有 helper 验证证据；仅显式展示/引用或窄文件管理事实才 force 读取。"
+            ),
+            "artifact_status": str(record.status),
+            "artifact_verified": bool(record.verified),
+            "owner_task_id": record.owner_task_id,
+            "helper_kind": record.helper_kind,
+            "visibility": str(record.visibility),
+            "size_bytes": record.size,
+            "sha256": record.sha256,
+            "metadata": {
+                key: metadata.get(key)
+                for key in (
+                    "source",
+                    "terminal_reason",
+                    "outputs_complete",
+                    "producer_self_verified",
+                    "quality_warning_count",
+                )
+                if key in metadata
+            },
+            "_next_action_instruction": (
+                "Do not read this helper-owned artifact body in the main thread to perform content QA. "
+                "Use the helper completion facts as recovery evidence, then resume the producer helper or "
+                "delegate a verify helper if the active task still needs content validation. force=true is "
+                "reserved for explicit quote/display or narrow main-owned file-management needs.\n\n"
+                "主进程不接管 helper 产物正文质检；需要验证时恢复生产 helper 或派 verify helper。"
+            ),
+        }
+    return {
+        "ok": True,
+        "action": "read_file",
+        "path": norm,
+        "content": "",
+        "content_omitted": True,
+        "content_omitted_reason": "helper_owned_verified_artifact",
+        "helper_owned_artifact_fact": (
+            f"`{norm}` is a ready helper-owned artifact. The main process should trust the successful "
+            "helper's content judgment and should not re-read this artifact merely to verify content. "
+            "Use helper reports, output maps, and verifier/apply facts as the acceptance evidence. "
+            "If the user explicitly asks to display or quote exact text, retry with force=true or read the "
+            "smallest relevant fragment. If a separate warning, contradiction, or verifier gap appears, route "
+            "that boundary to the producer helper or a verify helper instead of main-thread content QA."
+        ),
+        "事实": (
+            f"`{norm}` 是已就绪的 helper 产物；主进程信任成功 helper 的内容判断，不为复核内容而重读。"
+            "如用户明确要求展示/引用原文，再 force=true 或读取最小片段；警告/矛盾交回生产 helper 或 verify helper。"
+        ),
+        "artifact_status": str(record.status),
+        "artifact_verified": bool(record.verified),
+        "owner_task_id": record.owner_task_id,
+        "helper_kind": record.helper_kind,
+        "visibility": str(record.visibility),
+        "size_bytes": record.size,
+        "sha256": record.sha256,
+        "metadata": {
+            key: metadata.get(key)
+            for key in ("source", "terminal_reason", "outputs_complete", "producer_self_verified")
+            if key in metadata
+        },
+        "_next_action_instruction": (
+            "Continue from the helper completion facts. Do not inspect this helper-owned artifact for content "
+            "verification. Use force=true only for an explicit display/quote request or a narrow main-owned "
+            "file-management/runtime fact that requires exact text. Route warnings, contradictions, verifier "
+            "gaps, build/test gaps, or quality concerns to the producer helper or a verify helper. A clean transfer/apply "
+            "of helper-owned content is not itself a reason to re-read the artifact.\n\n"
+            "继续使用 helper 完成事实；转移/应用 helper 产物本身不要求复读正文，警告/矛盾/外部验收缺口交回生产 helper 或 verify helper。"
+        ),
+    }
+
+
+def _main_thread_staged_source_read_fact(
+    ws_dir: str,
+    path: str,
+    *,
+    caller_kind: str,
+    force: bool,
+    unbounded_full_read: bool,
+    computed_full_read: bool = False,
+) -> dict | None:
+    """Compact main-thread full reads of staged project source/test copies.
+
+    Helpers still receive exact text. The coordinator receives path/hash/line
+    facts unless it explicitly asks for force or a narrow line range.
+    """
+    if force:
+        return None
+    if str(caller_kind or "").strip().lower() != "main":
+        return None
+    if not (unbounded_full_read or computed_full_read):
+        return None
+    norm = str(path or "").replace("\\", "/").strip().lstrip("./")
+    if not norm.lower().startswith("_env/"):
+        return None
+    project_rel = norm[5:].lstrip("/")
+    if not project_rel:
+        return None
+    try:
+        from app.llm.tools.environment import _env_read_looks_source_or_test
+        if not _env_read_looks_source_or_test(project_rel):
+            return None
+    except Exception:
+        low = project_rel.lower()
+        if not (
+            low.endswith((".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".c", ".cc", ".cpp", ".h", ".hpp"))
+            or "/test" in low
+            or low.startswith("test")
+            or "/tests/" in low
+            or low.startswith("tests/")
+        ):
+            return None
+    try:
+        target = _safe_resolve(ws_dir, norm)
+        if not os.path.isfile(target):
+            return None
+        with open(target, "rb") as fh:
+            raw = fh.read()
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+    lines = text.splitlines()
+    sha256 = hashlib.sha256(raw).hexdigest()
+    return {
+        "ok": True,
+        "action": "read_file",
+        "path": norm,
+        "project_path": project_rel,
+        "content": "",
+        "content_compacted": True,
+        "content_omitted": True,
+        "content_omitted_reason": "main_thread_staged_source_body_compacted",
+        "total_lines": len(lines),
+        "size_bytes": len(raw),
+        "sha256": sha256,
+        "staged_source_handoff_fact": (
+            f"Fact: `{norm}` is a staged project source/test copy for `{project_rel}`. The main-thread read_file "
+            "returned compact path/hash/line facts instead of source body content. Helpers can read the exact staged "
+            "copy and own diagnosis, edits, and producer validation. If the main process intentionally needs exact "
+            "local text, read only the smallest relevant line range or use force=true for an explicit quote/display need."
+        ),
+        "事实": (
+            f"`{norm}` 是项目源码/测试的暂存副本；主进程默认不吸收正文。"
+            "源码诊断、编辑和自验证交给 helper；主进程确需精确文本时读取最小行范围或显式 force。"
+        ),
+        "_next_action_instruction": (
+            "Use these path/hash facts for coordination and delegate source/test body work to a helper with input_files. "
+            "Do not full-read staged source/test copies in the main thread merely to verify helper content. "
+            "A narrow line-range read remains available for a named main-owned fact.\n\n"
+            "主进程使用路径/hash 事实调度；源码/测试正文交给 helper。需要主进程精确事实时只读最小行范围。"
+        ),
+    }
+
+
+def _recovery_artifact_read_provenance(path: str) -> dict | None:
+    """Return provenance facts for reads of recovery-storage files.
+
+    `_tool_results/...` spill files and `_env/.blocked_creates/...` preserved
+    candidates exist for recovery, not as ordinary task material. Reading them
+    stays allowed, but the result carries a provenance fact so the caller does
+    not treat them as fresh source evidence (handoff 2026-06-10: spill files
+    and blocked-create candidates entered the t3-msg-inbox-triage trajectory
+    as task material).
+
+    spill 与被拦截候选是恢复性存储；读取时附 provenance 事实，不当成新的源材料证据。
+    """
+    norm = str(path or "").replace("\\", "/").strip().lstrip("./")
+    low = norm.lower()
+    if not low:
+        return None
+    if low.startswith("_tool_results/") or "/_tool_results/" in low:
+        return {
+            "provenance": "tool_result_spill",
+            "provenance_fact": (
+                f"`{norm}` is recovery storage for an earlier oversized tool result, not independent "
+                "source material. The original tool call already produced this content; use it only to "
+                "recover details that were truncated or folded out of context, and cite the original "
+                "tool/file as the evidence source.\n"
+                "该文件是此前超长工具结果的溢出存档，不是新的源材料；仅用于恢复被截断的细节，证据请引用原始来源。"
+            ),
+        }
+    if low.startswith("_env/.blocked_creates/") or low.startswith(".blocked_creates/") or "/.blocked_creates/" in low:
+        return {
+            "provenance": "blocked_create_candidate",
+            "provenance_fact": (
+                f"`{norm}` is a preserved candidate from a blocked direct create, authored earlier in this "
+                "workflow. It is not independent source material. If current evidence says it is the desired "
+                "final content, pass it by path to an edit helper via input_files or apply it with the compact "
+                "create shape; do not re-derive its facts from raw sources unless a contradiction exists.\n"
+                "该文件是被拦截创建时保留的候选正文，由本工作流早先生成；可按路径交给 edit helper 或直接套用，无矛盾时不必重新派生其事实。"
+            ),
+        }
+    return None
+
+
+async def _active_helper_owns_path_fact(path: str) -> str | None:
+    """Return a soft fact when a live helper's expected_outputs covers `path`.
+
+    Main-thread co-authoring of a helper-owned deliverable produces duplicate,
+    potentially conflicting artifacts (20260610_163156). The write is not
+    blocked; the model decides what to do with the fact.
+    """
+    try:
+        from app.core import debug as _debug
+        from app.core.core_processes import registry as _proc_registry
+        from app.llm.tools.delegate_state import _get_task_contract
+
+        trace_id = _debug.current_trace_id() or ""
+        if not trace_id:
+            return None
+        norm = str(path or "").replace("\\", "/").strip().lstrip("./")
+        base = norm.rsplit("/", 1)[-1]
+        if not base:
+            return None
+        reg = _proc_registry()
+        async with reg._lock:
+            live_task_ids = [
+                h.helper_task_id for h in reg._procs.values()
+                if getattr(h, "proc_type", "") == "helper"
+                and getattr(h, "helper_task_id", "")
+                # owner is normally a proc_id mapped to a trace; direct
+                # trace-id owners (tests, legacy paths) match by equality.
+                and (reg.trace_id_of(h.owner) == trace_id or h.owner == trace_id)
+            ]
+        for task_id in live_task_ids:
+            contract = _get_task_contract(trace_id, task_id)
+            if not contract:
+                continue
+            for declared in contract.get("expected_outputs") or []:
+                declared_norm = str(declared).replace("\\", "/").strip().lstrip("./")
+                if not declared_norm:
+                    continue
+                if declared_norm == norm or declared_norm.rsplit("/", 1)[-1] == base:
+                    return (
+                        f"A still-running helper `{task_id}` declared `{declared}` in its expected_outputs. "
+                        "Writing the same deliverable from the main thread creates duplicate authorship and "
+                        "potentially conflicting artifacts. If the helper result is wanted, wait/collect it; "
+                        "if the helper approach is abandoned, cooperatively kill it before continuing here.\n"
+                        "同名交付物已由运行中的 helper 拥有；主线程重复撰写会产生冲突产物，先收结果或先终止 helper。"
+                    )
+        return None
+    except Exception:
+        return None
+
+
 async def handle_write(ws_dir: str, path: str, content: str) -> dict:
     _sync_workspace_globals()
 
@@ -287,12 +881,10 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
     _contract_error = _helper_env_write_contract_error(path)
     if _contract_error is not None:
         return _contract_error
-    _env_overwrite_error = _existing_env_project_copy_write_error(ws_dir, path)
-    if _env_overwrite_error is not None:
-        return _env_overwrite_error
-    _env_new_artifact_error = _main_env_new_project_artifact_write_error(path, content)
-    if _env_new_artifact_error is not None:
-        return _env_new_artifact_error
+    _env_overwrite_fact = _existing_env_project_copy_write_fact(ws_dir, path)
+    _env_workspace_write_error = _main_environment_workspace_write_error(ws_dir, path, content)
+    if _env_workspace_write_error is not None:
+        return _env_workspace_write_error
     # ── 2026-05-04 修复:_shared/ 写保护(Razor 教训) ──
     if _is_shared_readonly_path(path):
         return {
@@ -372,13 +964,19 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
                 "ok": False,
                 "error": (
                     f"read helper can write only internal `.txt` evidence files, not {path!r}. "
-                    "Use read, office, OCR, inspect, or request_resource to gather evidence; ask the main thread "
-                    "or a matching helper to create user-facing artifacts, code, charts, or Office documents.\n"
+                    "Available evidence-gathering shapes include read, office, OCR, inspect, or request_resource. "
+                    "User-facing artifacts, code, charts, or Office documents need a matching owner outside this read helper.\n"
                     "read helper 只写内部 txt 证据；交付物、代码、图表和 Office 文档交给对应流程。"
                 ),
                 "blocked_reason": "read_helper_non_txt_write_forbidden",
                 "blocked_path": path,
                 "blocked_kind": _kind,
+                "matching_helper_kind": "read",
+                "observed_recovery_tool": "request_resource",
+                "observed_recovery_shape": {
+                    "resource_kind": "read",
+                    "allowed_output_shape": "internal .txt evidence",
+                },
                 "suggested_tool": "request_resource",
             }
         if _kind == "edit" and _is_compiled_lang_ext:
@@ -386,13 +984,20 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
                 "ok": False,
                 "error": (
                     f"edit helper cannot write compiled/source implementation files ({path}, kind=edit). "
-                    "This task needs implementation, compilation, or benchmark ownership. Request a code helper "
-                    "resource with the required source/data outputs instead of editing this file here.\n"
+                    "This task has implementation, compilation, or benchmark ownership facts. A code helper "
+                    "resource shape can own the required source/data outputs; this edit helper cannot own them here.\n"
                     "edit helper 负责文档；实现/编译/benchmark 需请求 code helper。"
                 ),
                 "blocked_reason": "edit_helper_writing_compiled_source",
                 "blocked_path": path,
                 "blocked_kind": _kind,
+                "matching_helper_kind": "code",
+                "observed_recovery_tool": "request_resource",
+                "observed_recovery_shape": {
+                    "resource_kind": "code",
+                    "reason": "need implementation/benchmark resource",
+                    "needed_outputs": ["<source_or_data_file>"],
+                },
                 "suggested_helper_kind": "code",
                 "suggested_tool": "request_resource",
                 "suggested_request": (
@@ -403,12 +1008,33 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
             }
         if _kind == "edit" and _is_py:
             _lower_content = content.lower()
+            _looks_like_docx_script = (
+                ("from docx import" in _lower_content or "import docx" in _lower_content)
+                and ".docx" in _lower_content
+                and any(s in _lower_content for s in (
+                    "document(", "paragraphs", "tables", "style.name", "heading",
+                    "save(", "doc.save", "python-docx",
+                ))
+            )
             _looks_like_plotting = any(s in _lower_content for s in (
                 "matplotlib", "pyplot", "plt.", "savefig", "seaborn",
             ))
             _looks_like_benchmark = any(s in _lower_content for s in (
-                "subprocess", "gcc", "g++", "clang", "benchmark", "timeit",
+                "subprocess", "gcc", "g++", "clang", "timeit",
             ))
+            _looks_like_verifier_wrapper = (
+                "subprocess" in _lower_content
+                and any(s in _lower_content for s in (
+                    "verify", "verifier", "check", "test", "pytest", "unittest",
+                    "node", "npm", "python",
+                ))
+                and not any(s in _lower_content for s in (
+                    "gcc", "g++", "clang", "timeit", "benchmark", "matplotlib",
+                    "pyplot", "savefig", "seaborn",
+                ))
+            )
+            if "benchmark" in _lower_content and not _looks_like_docx_script:
+                _looks_like_benchmark = True
             # 2026-05-25: 检测计算/财务/统计脚本(不应由 edit helper 写)
             _looks_like_calculation = any(s in _lower_content for s in (
                 "npv", "irr", "np.npv", "np.irr", "numpy_financial",
@@ -418,31 +1044,73 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
             )) or any(s in content for s in (
                 "净现值", "内部收益率", "投资回收期", "财务", "折旧",
             ))
-            if _looks_like_plotting or _looks_like_benchmark or _looks_like_calculation or len(content) > 8000:
-                # 按原因选建议的 helper kind
-                if _looks_like_plotting:
+            if (
+                _looks_like_plotting
+                or _looks_like_benchmark
+                or _looks_like_calculation
+                or (len(content) > 8000 and not _looks_like_docx_script)
+                or (len(content) > 20000 and _looks_like_docx_script)
+            ):
+                # 按观察到的能力缺口标记匹配 helper kind。
+                if _looks_like_verifier_wrapper:
+                    _suggested_kind = "edit"
+                    _suggested_req = (
+                        "Run the existing verifier/check commands directly with workspace.run from the helper "
+                        "sandbox, preserving their working directory, arguments, stdout/stderr, and comparison "
+                        "semantics. Do not write a new wrapper script unless the task explicitly assigns one."
+                    )
+                elif _looks_like_plotting:
                     _suggested_kind = "draw"
                     _suggested_req = "request_resource(kind='draw', reason='need PNG charts from data', needed_outputs=['<chart>.png'])"
                 elif _looks_like_calculation:
                     _suggested_kind = "code"
                     _suggested_req = "request_resource(kind='code', reason='need financial/statistical calculation', needed_outputs=['<result>.csv'])"
+                elif _looks_like_docx_script:
+                    _suggested_kind = "edit"
+                    _suggested_req = (
+                        "Use office(action='write' or 'append', path='<target>.docx', blocks=[...]) for the same "
+                        "document content. Keep code/draw requests only for computation or chart resources."
+                    )
                 else:
                     _suggested_kind = "code"
                     _suggested_req = "request_resource(kind='code', reason='need benchmark/compile resource', needed_outputs=['<data>.csv'])"
-                return {
-                    "ok": False,
-                    "error": (
+                if _looks_like_verifier_wrapper:
+                    _message = (
+                        f"edit helper should not write this verifier/check wrapper script ({path}, kind=edit). "
+                        "Existing verifier or check commands are acceptance facts; run them directly with "
+                        "workspace.run and report the observed stdout/stderr, working directory, and blocker if "
+                        "the exact command cannot run.\n"
+                        "edit helper 不应为运行现有检查再写聚合脚本；直接用 workspace.run 执行检查并报告事实。"
+                    )
+                elif _looks_like_docx_script and not (_looks_like_plotting or _looks_like_benchmark or _looks_like_calculation):
+                    _message = (
+                        f"edit helper should not write this python-docx script ({path}, kind=edit). The same DOCX "
+                        "content can be expressed directly as office blocks with office(action='write'/'append'). "
+                        "Use scripts only for small verification probes, and request code/draw resources for computation or charts.\n"
+                        "edit helper 生成 DOCX 请直接用 office blocks；计算/绘图资源另行请求。"
+                    )
+                else:
+                    _message = (
                         f"edit helper cannot own this Python script ({path}, kind=edit). The content looks like "
                         "chart generation, benchmark/compile driving, financial/statistical computation, or an "
                         "oversized script. Request a draw helper for chart files or a code helper for computation "
                         "and experiments.\n"
                         "edit helper 只写文档相关小脚本；绘图请求 draw，计算/实验请求 code。"
-                    ),
+                    )
+                return {
+                    "ok": False,
+                    "error": _message,
                     "blocked_reason": "edit_helper_writing_out_of_scope_python",
                     "blocked_path": path,
                     "blocked_kind": _kind,
+                    "matching_helper_kind": _suggested_kind,
+                    "observed_recovery_tool": "workspace.run" if _looks_like_verifier_wrapper else "request_resource",
+                    "observed_recovery_shape": {
+                        "resource_kind": _suggested_kind,
+                        "shape": _suggested_req,
+                    },
                     "suggested_helper_kind": _suggested_kind,
-                    "suggested_tool": "request_resource",
+                    "suggested_tool": "workspace.run" if _looks_like_verifier_wrapper else "request_resource",
                     "suggested_request": _suggested_req,
                 }
         # 2026-05-11 P10: draw helper 限制 — 只允许写画图相关
@@ -455,12 +1123,19 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
                     "ok": False,
                     "error": (
                         f"draw helper cannot write compiled/source implementation files ({path}, kind=draw). "
-                        "If the task needs algorithm implementation or benchmark work, request a code helper "
-                        "resource and continue after it provides the data or source result.\n"
+                        "Algorithm implementation or benchmark work has code-helper ownership facts; draw helper "
+                        "ownership is image/chart production from data or visual specifications.\n"
                         "draw helper 负责图像产物；算法和 benchmark 请求 code helper。"
                     ),
                     "blocked_reason": "draw_helper_writing_compiled_source",
                     "blocked_path": path,
+                    "matching_helper_kind": "code",
+                    "observed_recovery_tool": "request_resource",
+                    "observed_recovery_shape": {
+                        "resource_kind": "code",
+                        "reason": "need algorithm/benchmark resource",
+                        "needed_outputs": ["<data>.csv"],
+                    },
                     "suggested_helper_kind": "code",
                     "suggested_tool": "request_resource",
                     "suggested_request": (
@@ -475,12 +1150,23 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
                     "ok": False,
                     "error": (
                         f"draw helper Python script is unusually large ({len(content)} chars; cap 30000). "
-                        "For benchmark or algorithm work, request a code helper. For genuine chart work, split "
-                        "the plotting into smaller focused scripts and continue with verifiable image outputs.\n"
+                        "Benchmark or algorithm work has code-helper ownership facts. Genuine chart work can be "
+                        "represented as smaller focused plotting scripts with verifiable image outputs.\n"
                         "draw 脚本过大时拆小；若是算法/benchmark 则请求 code helper。"
                     ),
                     "blocked_reason": "draw_helper_oversized_py",
                     "blocked_path": path,
+                    "observed_recovery_options": [
+                        {
+                            "shape": "split_draw_script",
+                            "fact": "If this is genuine chart work, smaller focused plotting scripts with verifiable image outputs fit draw-helper ownership.",
+                        },
+                        {
+                            "shape": "request_code_resource",
+                            "resource_kind": "code",
+                            "fact": "If the oversized script contains algorithm, benchmark, or data-computation work, code-helper ownership fits that portion.",
+                        },
+                    ],
                 }
     if "_delegate_" not in ws_dir and not _is_environment_workspace_copy:  # 主线程
         if _is_compiled_lang_ext:
@@ -509,14 +1195,20 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
                 "delegate_required": True,
             }
         # .py ≤ policy 上限 → 落到下面统一的"超大文件" 500KB 检查后写入
-    if len(content) > 500_000 and "_delegate_" not in ws_dir:
+    if len(content) > 500_000:
         return {
             "ok": False,
-            "error": (
-                f"Main workflow cannot write an oversized file directly ({path}: {len(content)} chars). "
-                "Delegate large artifact generation to a helper and verify the resulting file.\n"
-                "超大文件生成交给 helper。"
+            "error": "workspace_write_content_too_large",
+            "error_kind": "workspace_write_content_too_large",
+            "blocked_path": path,
+            "content_chars": len(content),
+            "max_chars": 500_000,
+            "fact": (
+                "The requested workspace.write content exceeds the hard write limit. No file was written and the "
+                "content was not truncated to disk. Use a helper-owned artifact, split the content into smaller "
+                "logical files, or write a short section and verify it."
             ),
+            "事实": "写入内容超过硬上限；未写入文件，也不会截断落盘。请改用 helper 产物、拆成逻辑小文件或短段写入。",
             "delegate_required": True,
         }
     try:
@@ -546,12 +1238,54 @@ async def handle_write(ws_dir: str, path: str, content: str) -> dict:
         collision_renamed = renamed
         log.info("collision rename: %s → %s", path, renamed)
 
-    capped = content if len(content) <= 500_000 else content[:500_000]
     with open(target, "w", encoding="utf-8") as f:
-        f.write(capped)
-    result = {"ok": True, "action": "write", "path": path, "size": len(capped)}
+        f.write(content)
+    try:
+        _content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    except Exception:
+        _content_sha256 = ""
+    _all_lines = content.splitlines()
+    _line_count = len(_all_lines)
+    _head_lines = _all_lines[:8]
+    _head_excerpt = "\n".join(_head_lines)
+    if len(_head_excerpt) > 800:
+        _head_excerpt = _head_excerpt[:800].rstrip() + "...[trim]"
+    result = {
+        "ok": True,
+        "action": "write",
+        "path": path,
+        "size": len(content),
+        "content_chars": len(content),
+        "line_count": _line_count,
+        "sha256": _content_sha256,
+        "write_fact": (
+            f"workspace.write created `{path}` with {len(content)} chars and {_line_count} line(s). "
+            "Use these write facts plus targeted checks for acceptance; a full reread is only useful for a named "
+            "main-owned gap, folded/truncated prior evidence, or an explicit display/quote need."
+        ),
+        "写入事实": (
+            f"workspace.write 已创建 `{path}`，字符数 {len(content)}，行数 {_line_count}；"
+            "除非存在明确缺口、折叠丢失或需要独立验收，否则不必仅为确认写入而全文重读。"
+        ),
+    }
+    if _head_excerpt:
+        result["head_excerpt"] = _head_excerpt
     if collision_renamed:
         result["renamed_previous"] = collision_renamed
+    if _env_overwrite_fact is not None:
+        result.update(_env_overwrite_fact)
+    # 2026-06-10 Round 8: co-authoring soft fact. In 20260610_163156 the main
+    # thread authored triage_report.md while a live helper owned the same
+    # deliverable via expected_outputs — duplicate authorship, conflicting
+    # artifacts, trajectory noise. The write still succeeds; this is a fact.
+    try:
+        from app.core.core_processes import current_helper_kind as _chk
+        if not _chk():  # main thread only (helpers report their kind)
+            _co_fact = await _active_helper_owns_path_fact(path)
+            if _co_fact:
+                result["helper_ownership_fact"] = _co_fact
+    except Exception:
+        pass
 
     # 2026-05-15 P69: write 重写 = "整文件重置" 意图明确, 清零此 path 的 edit_history。
     # 这样 P69 edit thrashing 阻断不会卡住"用户已经按推荐 workspace.write 重写过"的情况。
@@ -795,7 +1529,7 @@ async def handle_inspect_file(ws_dir: str, path: str) -> dict:
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     if not os.path.exists(target):
-        return _file_not_found_response(ws_dir, path)
+        return _file_not_found_response(ws_dir, path, action_hint="edit_file")
     if os.path.isdir(target):
         _size, _dir_err = _check_file_readable(target)
         if _dir_err is not None:
@@ -1001,6 +1735,7 @@ async def handle_read_file(
     start_line: int = 1, end_line: int = -1, max_chars: int | None = None,
     *,
     force: bool = False,
+    caller_kind: str = "main",
 ) -> dict:
     _sync_workspace_globals()
 
@@ -1025,7 +1760,26 @@ async def handle_read_file(
     try:
         target = _safe_resolve(ws_dir, path)
     except ValueError as e:
-        return {"ok": False, "error": str(e)}
+        result = {"ok": False, "error": str(e)}
+        # 2026-06-10 Round 7: in environment mode the model sometimes converts
+        # project-relative paths into `..\..\..\inbox\x.txt` traversal chains
+        # (20260610_165331: 11 such failed read_file calls in one run). The
+        # blocked path's tail is usually a valid project path — say so.
+        if "traversal" in str(e):
+            from app.core.runtime_mode import is_environment_mode
+            _tail = str(path).replace("\\", "/").strip("/")
+            while _tail.startswith("../"):
+                _tail = _tail[3:]
+            if _tail and not _tail.startswith("..") and is_environment_mode():
+                result["suggested_tool"] = "env_read"
+                result["suggested_args"] = {"path": _tail}
+                result["fact"] = (
+                    f"Parent-directory traversal is blocked in workspace reads. The target looks like project file "
+                    f"`{_tail}`; in environment mode read it with env_read(path={_tail!r}) using the project-relative "
+                    "path, or read the staged copy `_env/" + _tail + "` if it was fetched.\n"
+                    "工作区读取禁止越界；项目文件用 env_read 的项目相对路径读取。"
+                )
+        return result
     if not os.path.exists(target):
         # 2026-05-12 P47: 主进程在 .temp/ 工作但 helper 产物在永久根 (.temp 父目录)
         # 病因(实测 22:44 trace): workspace 双层架构 — main=<arch>/<group>/, temp=.temp/.
@@ -1046,7 +1800,7 @@ async def handle_read_file(
                     _main_result = await handle_read_file(
                         _parent_ws, path,
                         start_line=start_line, end_line=end_line,
-                        max_chars=max_chars, force=force,
+                        max_chars=max_chars, force=force, caller_kind=caller_kind,
                     )
                     if _main_result.get("ok"):
                         _main_result["_p47_main_fallback"] = True
@@ -1070,7 +1824,7 @@ async def handle_read_file(
                     _redirect_result = await handle_read_file(
                         ws_dir, _redirect,
                         start_line=start_line, end_line=end_line,
-                        max_chars=max_chars, force=force,
+                        max_chars=max_chars, force=force, caller_kind=caller_kind,
                     )
                     if _redirect_result.get("ok"):
                         _redirect_result["_p42_redirected_from"] = path
@@ -1097,7 +1851,7 @@ async def handle_read_file(
                         _main_result = await handle_read_file(
                             _parent_ws, _top["path"],
                             start_line=start_line, end_line=end_line,
-                            max_chars=max_chars, force=force,
+                            max_chars=max_chars, force=force, caller_kind=caller_kind,
                         )
                         if _main_result.get("ok"):
                             _main_result["_p47_main_fallback"] = True
@@ -1144,6 +1898,16 @@ async def handle_read_file(
             structured_rejection["repeat_error"] = "binary_read_repeat_use_inspect_file"
         return structured_rejection
 
+    helper_output_fact = _ready_helper_output_read_fact(
+        ws_dir,
+        path,
+        caller_kind=caller_kind,
+        force=force,
+        unbounded_full_read=(start_line <= 1 and end_line < 0),
+    )
+    if helper_output_fact is not None:
+        return helper_output_fact
+
     content, err = _read_text_safely(target)
     if err is not None:
         # 替换错误信息里的 path 占位符为实际路径
@@ -1180,6 +1944,19 @@ async def handle_read_file(
     # 判定"全读":start_line=1 且 end_line>=total_lines 且 not truncated。
     is_request_full = (start_line == 1 and (end_line == -1 or end_line >= total_lines))
     is_request_fragment = not is_request_full
+
+    helper_output_fact = _ready_helper_output_read_fact(
+        ws_dir,
+        path,
+        caller_kind=caller_kind,
+        force=force,
+        unbounded_full_read=False,
+        computed_full_read=is_request_full,
+    )
+    if helper_output_fact is not None:
+        helper_output_fact["total_lines"] = total_lines
+        helper_output_fact["shown_range"] = [1, 0]
+        return helper_output_fact
 
     # ─ 进程内 tracker 读 ─
     tracker_key = (os.path.realpath(ws_dir), path)
@@ -1227,6 +2004,21 @@ async def handle_read_file(
         out_lines.append(formatted)
         chars_used += len(formatted) + 1
         actual_end = line_no
+
+    prior_fragments = list(tracker_entry.get("fragments", []) or [])
+    if isinstance((prev_full_meta or {}).get("fragments"), list):
+        prior_fragments.extend((prev_full_meta or {}).get("fragments") or [])
+    covered_duplicate = False
+    duplicate_coverage_reason = ""
+    duplicate_coverage_ranges: list[list[int]] = []
+    if is_request_fragment and not force and not truncated:
+        covered_duplicate, duplicate_coverage_reason, duplicate_coverage_ranges = _range_is_covered_by_previous_reads(
+            start_line,
+            actual_end,
+            total_lines=total_lines,
+            already_read_full=already_read_full,
+            fragments=prior_fragments,
+        )
 
     # ── 重读"软退化":返回结构化 outline 而非 ERROR(2026-05-11 A2 重写)──
     # 原版返回 ERROR + "翻上去看就行"。问题:
@@ -1287,18 +2079,58 @@ async def handle_read_file(
         "path": path,
         "total_lines": total_lines,
         "shown_range": [start_line, actual_end],
-        "content": "\n".join(out_lines),
+        "content": "" if covered_duplicate else "\n".join(out_lines),
         "truncated": truncated,
     }
+    _recovery_provenance = _recovery_artifact_read_provenance(path)
+    if _recovery_provenance is not None:
+        result.update(_recovery_provenance)
+    if covered_duplicate:
+        result.update({
+            "content_omitted": True,
+            "content_omitted_reason": "duplicate_read_range_already_returned",
+            "coverage_reason": duplicate_coverage_reason,
+            "covered_by_ranges": duplicate_coverage_ranges,
+            "_fragment_read_count": fragment_read_count + 1,
+            "note": (
+                f"Requested lines {start_line}-{actual_end} of `{path}` were already returned by earlier read_file "
+                "results, so this duplicate content is omitted to preserve model context. This is not evidence that "
+                "the file is absent or unchanged; it only states prior coverage. Use force=true only if the earlier "
+                "tool result was folded/truncated and these exact lines are still required.\n\n"
+                "该行段此前已返回，本次省略重复正文以节省上下文；如确因折叠丢失，可 force=true 恢复读取。"
+            ),
+            "_next_action_instruction": (
+                "Use the previously returned lines as evidence, or request force=true only when the prior result is no "
+                "longer recoverable in context and the exact text is necessary.\n\n"
+                "优先复用已返回行段；只有上下文确实丢失且必须要原文时才 force=true。"
+            ),
+        })
     if truncated:
+        saved_path = write_tool_output_spill(
+            root_dir=ws_dir,
+            tool_name="read_file",
+            label="content",
+            text=content,
+        )
+        result["content_full_saved_path"] = saved_path
+        result["content_original_chars"] = len(content)
+        result["content_truncated"] = True
+        result["output_truncated"] = True
+        result["tool_result_truncated"] = True
+        result["visible_excerpt_policy"] = (
+            f"Full normalized file content was saved at `{saved_path}` (`content_full_saved_path`); "
+            "only the head excerpt is returned in this tool result.\n"
+            "完整规范化文件内容已保存；当前工具结果只返回头部摘录。"
+        )
         result["next_start_line"] = actual_end + 1
         result["note"] = (
             f"output truncated at {max_chars} chars ({result['shown_range'][0]}-{actual_end} of {total_lines} lines). "
-            f"Do NOT call again with next_start_line to continue — the hard single-call cap is {_READ_MAX_CHARS_HARD_CAP} chars "
-            f"and continuing would waste context on the same file. Use search_in_file to find specific content "
+            f"The hard single-call cap is {_READ_MAX_CHARS_HARD_CAP} chars. Continuing with next_start_line would page "
+            f"the same large file into the main context; when the missing detail is local, search_in_file can locate specific content "
             f"(e.g., search_in_file(path, 'keyword') for problem numbers, terms, or patterns), "
-            f"then read_file with narrow start_line/end_line that targets only the relevant lines.\n"
-            f"已截断；不要续读。用 search_in_file 搜索关键词后用 start_line/end_line 窄范围读取。"
+            f"then read_file with narrow start_line/end_line can target only the relevant lines. "
+            f"Full normalized file content was saved at `{saved_path}` for recovery or delegated paging if broad coverage is still needed.\n"
+            f"已截断并保存完整规范化正文；可搜索定位、窄范围读取，或交给 helper 分段覆盖。"
         )
 
     # ── 重读警告 ──
@@ -1338,13 +2170,13 @@ async def handle_read_file(
             f"{warn_phrase}: `{path}` was already read in full ({prev_total} lines, previous read: {prev_phrase}). "
             "Reuse the content already in context. If only a local detail is missing, read the smallest start_line/end_line fragment. "
             f"From read #{_READ_REPEAT_BLOCK_THRESHOLD}, repeated full reads return an outline unless force=true is justified by folded or emergency-truncated context.\n\n"
-            "全文已读过；复用上下文，必要时只读局部片段。"
+            "全文已读过；复用已有上下文，必要时只读局部片段。"
         )
         result["_next_action_instruction"] = (
-            "Proceed from the existing context. If a local detail is missing, read the smallest start_line/end_line fragment; use force=true only when context was folded or emergency-truncated.\n\n"
-            "基于已有上下文继续；只缺局部时读最小片段。"
+            "Fact: the full file body was already returned earlier in this run. If a local detail is missing, a small start_line/end_line fragment is available; force=true is for cases where the prior result was folded or emergency-truncated.\n\n"
+            "事实：全文已在本轮返回过；只缺局部时可读最小片段，force=true 用于先前结果被折叠或紧急截断。"
         )
-        result["_suggested_next_actions"] = ["reuse_existing_context", "read_minimal_fragment", "force_only_if_context_folded"]
+        result["_available_next_actions"] = ["reuse_existing_context", "read_minimal_fragment", "force_only_if_context_folded"]
     elif is_request_fragment and will_be_fragment_count >= _READ_REPEAT_WARN_THRESHOLD:
         result["_fragment_read_count"] = will_be_fragment_count
         result["_next_action_instruction"] = (
@@ -1359,7 +2191,7 @@ async def handle_read_file(
     fragments = list(tracker_entry.get("fragments", []))
     if is_request_fragment:
         fragments.append([start_line, actual_end])
-        fragments = fragments[-10:]  # 只留最近 10 个
+        fragments = fragments[-20:]  # keep enough recent ranges to detect duplicate fragments
     _read_tracker[tracker_key] = {
         "full_read": new_full,
         "read_count": will_be_count,
@@ -1382,12 +2214,14 @@ async def handle_read_file(
                 "last_was_full": full_now,
                 "read_count": will_be_count,
                 "fragment_read_count": will_be_fragment_count,
+                "fragments": fragments,
             }
         else:
             history[path]["last_read_range"] = [start_line, actual_end]
             history[path]["last_was_full"] = False
             history[path]["read_count"] = will_be_count
             history[path]["fragment_read_count"] = will_be_fragment_count
+            history[path]["fragments"] = fragments
         with open(history_path, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
     except OSError as e:
@@ -1398,6 +2232,63 @@ async def handle_read_file(
         )
 
     return result
+
+
+async def handle_append(ws_dir: str, path: str, content: str) -> dict:
+    _sync_workspace_globals()
+
+    _access_error = _path_access_error(path, operation="write")
+    if _access_error is not None:
+        return _access_error
+    _contract_error = _helper_env_write_contract_error(path)
+    if _contract_error is not None:
+        return _contract_error
+    _env_workspace_write_error = _main_environment_workspace_write_error(ws_dir, path, content)
+    if _env_workspace_write_error is not None:
+        return _env_workspace_write_error
+    if _is_shared_readonly_path(path):
+        return {
+            "ok": False,
+            "error": _SHARED_READONLY_ERROR_MSG,
+            "blocked_path": path,
+        }
+    if len(content) > 500_000:
+        return {
+            "ok": False,
+            "error": "workspace_append_content_too_large",
+            "error_kind": "workspace_append_content_too_large",
+            "blocked_path": path,
+            "content_chars": len(content),
+            "max_chars": 500_000,
+            "fact": (
+                "The requested workspace.append content exceeds the hard write limit. No file was changed and the "
+                "content was not truncated to disk. Use a helper-owned artifact or append a smaller logical section."
+            ),
+            "事实": "追加内容超过硬上限；未修改文件，也不会截断落盘。请改用 helper 产物或追加更小逻辑段。",
+            "delegate_required": True,
+        }
+    try:
+        target = _safe_resolve(ws_dir, path)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    if os.path.isdir(target):
+        dir_path = str(path).replace("\\", "/").rstrip("/") + "/"
+        return _path_access_error(dir_path, operation="write") or {
+            "ok": False,
+            "error": "path_is_directory",
+            "path": path,
+        }
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    existed = os.path.exists(target)
+    with open(target, "a", encoding="utf-8") as f:
+        f.write(content)
+    return {
+        "ok": True,
+        "action": "append",
+        "path": path,
+        "size_appended": len(content),
+        "created": not existed,
+    }
 
 
 async def handle_edit_file(
@@ -1419,6 +2310,7 @@ async def handle_edit_file(
     _contract_error = _helper_env_write_contract_error(path)
     if _contract_error is not None:
         return _contract_error
+    _env_edit_fact = _existing_env_project_copy_edit_fact(ws_dir, path, "edit_file")
     if old_str == new_str:
         return {
             "ok": False,
@@ -1450,7 +2342,7 @@ async def handle_edit_file(
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     if not os.path.exists(target):
-        return _file_not_found_response(ws_dir, path)
+        return _file_not_found_response(ws_dir, path, action_hint="edit_file")
 
     content, err = _read_text_safely(target)
     if err is not None:
@@ -1523,17 +2415,29 @@ async def handle_edit_file(
                 "old_str 未匹配；只读取局部片段并复制当前文本后重试。"
             ),
             "next_action_instruction": (
-                "Read only the relevant local fragment, copy the exact current old_str with surrounding context, then retry edit_file. "
-                "Avoid rereading the whole file unless the needed context is genuinely missing.\n"
-                "只读相关片段，精确复制当前 old_str 后重试。"
+                "Fact: the supplied old_str is not present in the current file text. A local fragment read can "
+                "provide the exact current text near the intended edit site; a whole-file reread is usually only "
+                "useful when the local edit site is genuinely unknown.\n"
+                "事实：old_str 未出现在当前文件中；局部片段可提供精确文本，只有定位未知时才通常需要全文重读。"
             ),
-            "suggested_next_actions": [
-                "read_local_fragment",
-                "expand_old_str_context",
-                "retry_edit_file",
-            ],
+            "recovery_facts": {
+                "old_str_present": False,
+                "available_recovery_shapes": [
+                    "read a relevant local fragment",
+                    "expand old_str with exact surrounding context",
+                    "retry edit_file after confirming the current text",
+                ],
+            },
         }
     if actual_count != expected_count:
+        # 2026-06-10 Round 8: include match line numbers so the model can
+        # decide expand-context vs replace-all without re-reading the file
+        # (20260610_165331: a count-mismatch retry cost one extra turn).
+        _match_lines: list[int] = []
+        _pos = content.find(old_str_norm)
+        while _pos >= 0 and len(_match_lines) < 20:
+            _match_lines.append(content[:_pos].count("\n") + 1)
+            _pos = content.find(old_str_norm, _pos + 1)
         return {
             "ok": False,
             "error": f"old_str appears {actual_count} times but expected_count={expected_count}; "
@@ -1541,6 +2445,12 @@ async def handle_edit_file(
                      f"or set expected_count={actual_count} to replace all.\n"
                      f"old_str 匹配次数不符；扩大上下文或显式设置 expected_count。",
             "actual_count": actual_count,
+            "match_line_numbers": _match_lines,
+            "fact": (
+                f"Matches start at lines {_match_lines}. If all occurrences should change, retry with "
+                f"expected_count={actual_count}; if only some, expand old_str with surrounding text from the "
+                "unwanted lines' context to exclude them."
+            ),
         }
 
     new_content = content.replace(old_str_norm, new_str_norm)
@@ -1722,6 +2632,9 @@ async def handle_edit_file(
         except OSError:
             pass  # 写笔记失败不影响 edit 主流程
 
+    if _env_edit_fact is not None:
+        result.update(_env_edit_fact)
+
     return result
 
 
@@ -1742,6 +2655,7 @@ async def handle_multi_edit(
     _contract_error = _helper_env_write_contract_error(path)
     if _contract_error is not None:
         return _contract_error
+    _env_edit_fact = _existing_env_project_copy_edit_fact(ws_dir, path, "multi_edit")
     if not isinstance(edits, list) or not edits:
         return {"ok": False, "error": "edits must be a non-empty list"}
     if len(edits) > 50:
@@ -1762,7 +2676,7 @@ async def handle_multi_edit(
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     if not os.path.exists(target):
-        return _file_not_found_response(ws_dir, path)
+        return _file_not_found_response(ws_dir, path, action_hint="multi_edit")
 
     content, err = _read_text_safely(target)
     if err is not None:
@@ -1945,6 +2859,9 @@ async def handle_multi_edit(
         except OSError:
             pass
 
+    if _env_edit_fact is not None:
+        result.update(_env_edit_fact)
+
     return result
 
 
@@ -1966,6 +2883,7 @@ async def handle_insert_in_file(
     _contract_error = _helper_env_write_contract_error(path)
     if _contract_error is not None:
         return _contract_error
+    _env_edit_fact = _existing_env_project_copy_edit_fact(ws_dir, path, "insert_in_file")
     # ── 2026-05-04 修复:_shared/ 写保护(Razor 教训) ──
     if _is_shared_readonly_path(path):
         return {
@@ -1979,7 +2897,7 @@ async def handle_insert_in_file(
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     if not os.path.exists(target):
-        return _file_not_found_response(ws_dir, path)
+        return _file_not_found_response(ws_dir, path, action_hint="insert_in_file")
 
     content, err = _read_text_safely(target)
     if err is not None:
@@ -2037,6 +2955,9 @@ async def handle_insert_in_file(
     if _edit_warning:
         result["_edit_count"] = _edit_count
         result["_rewrite_suggestion"] = _edit_warning
+
+    if _env_edit_fact is not None:
+        result.update(_env_edit_fact)
 
     return result
 

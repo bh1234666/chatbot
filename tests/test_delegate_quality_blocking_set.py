@@ -18,6 +18,8 @@ from __future__ import annotations
 from app.llm.tools.delegate_quality import (
     _BLOCKING_QUALITY_ISSUES,
     blocking_quality_warnings,
+    document_structure_quantity_warnings,
+    source_data_approximation_warnings,
 )
 
 
@@ -50,6 +52,9 @@ def test_subjective_size_thresholds_are_warnings_not_blocking():
         {"file": "paper.docx", "issue": "academic_citation_unverified"},
         {"file": "paper.docx", "issue": "docx_table_too_wide"},
         {"file": "paper.docx", "issue": "document_unbacked_pass_standard"},
+        {"file": "paper.docx", "issue": "document_source_data_approximated_from_truncation"},
+        {"file": "paper.docx", "issue": "document_required_table_count_shortfall"},
+        {"file": "paper.docx", "issue": "document_required_figure_count_shortfall"},
     ]
     blocking = blocking_quality_warnings(user_special_case_warnings)
     assert blocking == [], (
@@ -97,3 +102,41 @@ def test_blocking_set_intentionally_minimal():
         "stat_failed",
         "text_mojibake_suspected",
     }
+
+
+def test_source_data_approximation_from_truncation_is_model_visible_warning():
+    report = (
+        "Missing or warnings: RBT scaling values at 10K/100K: Approximated from O(log n) "
+        "scaling since only the n=1,000 row data was fully extracted from the truncated "
+        "read output. Actual CSV values should be spot-checked if precision is required."
+    )
+
+    warnings = source_data_approximation_warnings(report)
+
+    assert len(warnings) == 1
+    assert warnings[0]["issue"] == "document_source_data_approximated_from_truncation"
+    assert warnings[0]["severity"] == "warning"
+    assert "truncated" in warnings[0]["excerpt"].lower()
+    assert blocking_quality_warnings(warnings) == []
+
+
+def test_document_structure_quantity_shortfalls_are_model_visible_warnings():
+    prompt = (
+        "Final DOCX Assembly Contract. At least 4 comparative tables are required. "
+        "At minimum: 3 figures or charts must be present."
+    )
+
+    warnings = document_structure_quantity_warnings(
+        prompt,
+        file="paper.docx",
+        table_count=2,
+        image_count=0,
+    )
+
+    issues = {warning["issue"] for warning in warnings}
+    assert issues == {
+        "document_required_table_count_shortfall",
+        "document_required_figure_count_shortfall",
+    }
+    assert all(warning["severity"] == "warning" for warning in warnings)
+    assert blocking_quality_warnings(warnings) == []

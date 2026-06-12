@@ -34,9 +34,16 @@ _CACHE_RE = re.compile(
     r"hit_rate=(?P<rate>\d+)%"
 )
 
+_LCP_RE = re.compile(
+    r"(?P<label>[^:]+):\s+model=(?P<model>\S+)\s+local_common_prefix=(?P<percent>[0-9.]+)%\s+"
+    r"bytes=(?P<common>\d+)/(?P<denominator>\d+)"
+)
+
 
 @dataclass(frozen=True)
 class PromptShape:
+    time_text: str
+    timestamp: float | None
     trace: str
     label: str
     tag_hint: str
@@ -77,16 +84,31 @@ class RouteEvent:
 
 
 @dataclass(frozen=True)
+class PromptLcp:
+    time_text: str
+    timestamp: float | None
+    trace: str
+    label: str
+    tag_hint: str
+    model: str
+    common_prefix_bytes: int
+    denominator_bytes: int
+    common_prefix_percent: float
+
+
+@dataclass(frozen=True)
 class CacheReport:
     shapes: tuple[PromptShape, ...]
     stats: tuple[CacheStats, ...]
     route_events: tuple[RouteEvent, ...] = ()
+    lcps: tuple[PromptLcp, ...] = ()
 
 
 def parse_debug_log_text(text: str) -> CacheReport:
     shapes: list[PromptShape] = []
     stats: list[CacheStats] = []
     route_events: list[RouteEvent] = []
+    lcps: list[PromptLcp] = []
     pending_shape_index: int | None = None
     pending_payload_lines: list[str] = []
 
@@ -117,6 +139,8 @@ def parse_debug_log_text(text: str) -> CacheReport:
             hash_chain = []
         old = shapes[pending_shape_index_local]
         shapes[pending_shape_index_local] = PromptShape(
+            time_text=old.time_text,
+            timestamp=old.timestamp,
             trace=old.trace,
             label=old.label,
             tag_hint=old.tag_hint,
@@ -150,8 +174,11 @@ def parse_debug_log_text(text: str) -> CacheReport:
                     pending_payload_lines.append(raw_msg)
                 continue
             flush_payload()
+            time_text = header.group("time").strip()
             shapes.append(
                 PromptShape(
+                    time_text=time_text,
+                    timestamp=_parse_log_time_to_seconds(time_text),
                     trace=trace,
                     label=match.group("label").strip(),
                     tag_hint=_shape_label_tag_hint(match.group("label").strip()),
@@ -186,6 +213,26 @@ def parse_debug_log_text(text: str) -> CacheReport:
                     hit_rate_percent=int(match.group("rate")),
                 )
             )
+        elif category == "llm.prompt_cache_lcp":
+            flush_payload()
+            match = _LCP_RE.search(msg)
+            if not match:
+                continue
+            label = match.group("label").strip()
+            time_text = header.group("time").strip()
+            lcps.append(
+                PromptLcp(
+                    time_text=time_text,
+                    timestamp=_parse_log_time_to_seconds(time_text),
+                    trace=trace,
+                    label=label,
+                    tag_hint=_shape_label_tag_hint(label),
+                    model=match.group("model"),
+                    common_prefix_bytes=int(match.group("common")),
+                    denominator_bytes=int(match.group("denominator")),
+                    common_prefix_percent=float(match.group("percent")),
+                )
+            )
         elif category.startswith("round2.upgrade_") or category in {
             "delegate.helper_route",
             "llm.tools.start",
@@ -207,7 +254,12 @@ def parse_debug_log_text(text: str) -> CacheReport:
         else:
             flush_payload()
     flush_payload()
-    return CacheReport(shapes=tuple(shapes), stats=tuple(stats), route_events=tuple(route_events))
+    return CacheReport(
+        shapes=tuple(shapes),
+        stats=tuple(stats),
+        route_events=tuple(route_events),
+        lcps=tuple(lcps),
+    )
 
 
 def _parse_log_time_to_seconds(value: str) -> float | None:
@@ -228,6 +280,7 @@ def parse_debug_logs(paths: Iterable[str | Path]) -> CacheReport:
     shapes: list[PromptShape] = []
     stats: list[CacheStats] = []
     route_events: list[RouteEvent] = []
+    lcps: list[PromptLcp] = []
     for raw_path in paths:
         path = Path(raw_path)
         if not path.is_file():
@@ -236,7 +289,13 @@ def parse_debug_logs(paths: Iterable[str | Path]) -> CacheReport:
         shapes.extend(report.shapes)
         stats.extend(report.stats)
         route_events.extend(report.route_events)
-    return CacheReport(shapes=tuple(shapes), stats=tuple(stats), route_events=tuple(route_events))
+        lcps.extend(report.lcps)
+    return CacheReport(
+        shapes=tuple(shapes),
+        stats=tuple(stats),
+        route_events=tuple(route_events),
+        lcps=tuple(lcps),
+    )
 
 
 def _shape_label_tag_hint(label: str) -> str:
@@ -281,6 +340,37 @@ def _group_shapes(shapes: Iterable[PromptShape]) -> list[dict[str, object]]:
                 "local_prefix_share_percent": round(avg_prefix * 100 / avg_total, 1) if avg_total else "n/a",
                 "system_hashes": len({x.system_hash for x in items}),
                 "tool_schema_hashes": len({x.tool_schema_hash for x in items}),
+            }
+        )
+    return rows
+
+
+def _group_lcps(lcps: Iterable[PromptLcp]) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], list[PromptLcp]] = {}
+    for item in lcps:
+        grouped.setdefault((item.label, item.model), []).append(item)
+    rows: list[dict[str, object]] = []
+    for (label, model), items in sorted(grouped.items()):
+        weights = [max(0, item.denominator_bytes) for item in items]
+        total_weight = sum(weights)
+        if total_weight:
+            weighted_percent: float | str = round(
+                sum(item.common_prefix_percent * weight for item, weight in zip(items, weights)) / total_weight,
+                2,
+            )
+        else:
+            weighted_percent = "n/a"
+        rows.append(
+            {
+                "label": label,
+                "tag_hint": items[0].tag_hint,
+                "model": model,
+                "calls": len(items),
+                "avg_common_prefix_percent": round(mean(item.common_prefix_percent for item in items), 2),
+                "weighted_common_prefix_percent": weighted_percent,
+                "min_common_prefix_percent": round(min(item.common_prefix_percent for item in items), 2),
+                "avg_common_prefix_bytes": round(mean(item.common_prefix_bytes for item in items)),
+                "avg_denominator_bytes": round(mean(item.denominator_bytes for item in items)),
             }
         )
     return rows
@@ -357,6 +447,30 @@ def _warm_stats(stats: Iterable[CacheStats], *, skip_first: int = 2) -> tuple[Ca
     return tuple(
         sorted(
             warm,
+            key=lambda item: item.timestamp if item.timestamp is not None else float("inf"),
+        )
+    )
+
+
+def _in_trace_followup_stats(
+    stats: Iterable[CacheStats],
+    *,
+    skip_first: int = 1,
+) -> tuple[CacheStats, ...]:
+    """Return same-trace/tag/model stats after dropping initial in-trace calls."""
+    grouped: dict[tuple[str, str, str], list[CacheStats]] = {}
+    for item in stats:
+        grouped.setdefault((item.trace, item.tag, item.model), []).append(item)
+    kept: list[CacheStats] = []
+    for items in grouped.values():
+        ordered = sorted(
+            items,
+            key=lambda item: item.timestamp if item.timestamp is not None else float("inf"),
+        )
+        kept.extend(ordered[max(0, skip_first):])
+    return tuple(
+        sorted(
+            kept,
             key=lambda item: item.timestamp if item.timestamp is not None else float("inf"),
         )
     )
@@ -449,12 +563,14 @@ def _low_hit_diagnostic_rows(
     stats: Iterable[CacheStats],
     route_events: Iterable[RouteEvent] = (),
     shapes: Iterable[PromptShape] = (),
+    lcps: Iterable[PromptLcp] = (),
     *,
     limit: int = 20,
 ) -> list[dict[str, object]]:
     """Return low-hit calls with same-tag/model interval and likely-cause hints."""
     stat_items = tuple(stats)
     shape_items = tuple(shapes)
+    lcp_items = tuple(lcps)
     matching_shapes_by_stat = _matching_shapes_by_stat(stat_items, shape_items)
     last_seen: dict[tuple[str, str], CacheStats] = {}
     last_seen_trace_tag: dict[tuple[str, str], CacheStats] = {}
@@ -514,6 +630,7 @@ def _low_hit_diagnostic_rows(
                 "likely_cause": likely_cause,
                 "route_context": route_context,
                 "shape_evidence": _shape_evidence_for_stat(item, shape_items),
+                "lcp_evidence": _lcp_evidence_for_stat(item, lcp_items),
             }
         )
     return sorted(
@@ -656,13 +773,60 @@ def _matching_shapes_by_stat(
     shape_items = tuple(shapes)
     result: dict[CacheStats, tuple[PromptShape, ...]] = {}
     for item in stats:
-        result[item] = tuple(
-            shape for shape in shape_items
-            if shape.trace == item.trace
-            and shape.model == item.model
-            and _tag_matches_shape_hint(item.tag, shape.tag_hint)
-        )
+        result[item] = _shape_candidates_for_stat(item, shape_items)
     return result
+
+
+def _shape_candidates_for_stat(
+    item: CacheStats,
+    shapes: Iterable[PromptShape],
+) -> tuple[PromptShape, ...]:
+    """Return same-trace/model/tag shapes observed before this usage row."""
+    candidates = [
+        shape for shape in shapes
+        if shape.trace == item.trace
+        and shape.model == item.model
+        and _tag_matches_shape_hint(item.tag, shape.tag_hint)
+    ]
+    if not candidates:
+        return ()
+    before_or_same = [
+        shape for shape in candidates
+        if item.timestamp is None
+        or shape.timestamp is None
+        or shape.timestamp <= item.timestamp + 0.001
+    ]
+    pool = before_or_same or candidates
+    return tuple(
+        sorted(
+            pool,
+            key=lambda shape: shape.timestamp if shape.timestamp is not None else float("-inf"),
+        )
+    )
+
+
+def _lcp_evidence_for_stat(item: CacheStats, lcps: Iterable[PromptLcp]) -> str:
+    """Return nearest local adjacent-prefix evidence for a provider usage row."""
+    candidates = [
+        lcp for lcp in lcps
+        if lcp.trace == item.trace
+        and lcp.model == item.model
+        and _tag_matches_shape_hint(item.tag, lcp.tag_hint)
+    ]
+    if not candidates:
+        return "lcp_missing"
+    before_or_same = [
+        lcp for lcp in candidates
+        if item.timestamp is None
+        or lcp.timestamp is None
+        or lcp.timestamp <= item.timestamp + 0.001
+    ]
+    pool = before_or_same or candidates
+    chosen = sorted(
+        pool,
+        key=lambda lcp: lcp.timestamp if lcp.timestamp is not None else float("-inf"),
+    )[-1]
+    return f"local_lcp={round(chosen.common_prefix_percent, 2)}%:{chosen.label}"
 
 
 def _refine_low_hit_cause_with_shapes(
@@ -739,16 +903,11 @@ def _tag_matches_shape_hint(tag: str, tag_hint: str) -> bool:
 
 def _shape_evidence_for_stat(item: CacheStats, shapes: Iterable[PromptShape]) -> str:
     """Describe whether this usage row has same-trace/model prompt-shape evidence."""
-    candidates = [
-        shape for shape in shapes
-        if shape.trace == item.trace
-        and shape.model == item.model
-        and _tag_matches_shape_hint(item.tag, shape.tag_hint)
-    ]
+    candidates = list(_shape_candidates_for_stat(item, shapes))
     if not candidates:
         return "shape_missing"
     labels = []
-    for shape in candidates[:3]:
+    for shape in candidates[-3:]:
         label = shape.label
         if label not in labels:
             labels.append(label)
@@ -883,9 +1042,11 @@ def render_cache_report_markdown(
     long_helper_min_prompt_tokens: int = 20000,
 ) -> str:
     shape_rows = _group_shapes(report.shapes)
+    lcp_rows = _group_lcps(report.lcps)
     stat_rows = _group_stats(report.stats)
     tag_stat_rows = _group_stats_by_tag(report.stats)
     warm_stat_rows = _group_stats(_warm_stats(report.stats))
+    in_trace_followup_rows = _group_stats(_in_trace_followup_stats(report.stats))
     section_rows = _section_rows(report.shapes)
     unstable_section_rows = [row for row in section_rows if int(row["hashes"]) > 1]
     hash_chain_rows = _hash_chain_rows(report.shapes)
@@ -900,7 +1061,7 @@ def render_cache_report_markdown(
     ]
     shape_coverage_rows = _shape_coverage_rows(report.stats, report.shapes)
     low_hit_summary_rows = _low_hit_cause_summary_rows(report.stats, report.route_events, report.shapes)
-    low_hit_rows = _low_hit_diagnostic_rows(report.stats, report.route_events, report.shapes)
+    low_hit_rows = _low_hit_diagnostic_rows(report.stats, report.route_events, report.shapes, report.lcps)
     route_rows = _model_route_diagnostic_rows(report.stats, report.route_events)
     reference_hit_rows = _reference_rows(
         stat_rows,
@@ -933,11 +1094,13 @@ def render_cache_report_markdown(
         "## Summary",
         "",
         f"- Prompt shape events: {len(report.shapes)}",
+        f"- Local adjacent prefix diagnostics: {len(report.lcps)}",
         f"- Cache usage events: {len(report.stats)}",
         f"- Shape groups: {len(shape_rows)}",
         f"- Usage groups: {len(stat_rows)}",
         f"- Usage tag groups: {len(tag_stat_rows)}",
         f"- Warm usage groups (skip first 2 same tag/model calls): {len(warm_stat_rows)}",
+        f"- In-trace follow-up usage groups (skip first same trace/tag/model call): {len(in_trace_followup_rows)}",
         f"- Section groups: {len(section_rows)}",
         f"- Unstable section groups: {len(unstable_section_rows)}",
         f"- Hash chain groups: {len(hash_chain_rows)}",
@@ -985,6 +1148,30 @@ def render_cache_report_markdown(
             )
     else:
         lines.append("| (none) |  |  | 0 | 0 | 0 | 0 | n/a | 0 | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Local Adjacent Prefix Diagnostics",
+            "",
+            "This table is a local serialized-request common-prefix diagnostic for adjacent same label/model calls. It is not provider cache usage; compare it with Provider Cache Usage to distinguish structure regressions from upstream cache cold starts, TTL, or provider policy.",
+            "",
+            "本表是本地相邻同类请求公共前缀诊断，不是真实命中率；需与 Provider Cache Usage 对照。",
+            "",
+            "| label | tag hint | model | pairs | avg common prefix | weighted common prefix | min common prefix | avg common bytes | avg compared bytes |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    if lcp_rows:
+        for row in lcp_rows:
+            lines.append(
+                f"| {row['label']} | {row['tag_hint']} | {row['model']} | {row['calls']} | "
+                f"{row['avg_common_prefix_percent']}% | {row['weighted_common_prefix_percent']}% | "
+                f"{row['min_common_prefix_percent']}% | {row['avg_common_prefix_bytes']} | "
+                f"{row['avg_denominator_bytes']} |"
+            )
+    else:
+        lines.append("| (none) |  |  | 0 | n/a | n/a | n/a | 0 | 0 |")
 
     lines.extend(
         [
@@ -1129,6 +1316,29 @@ def render_cache_report_markdown(
     else:
         lines.append("| (no warm rows after skipping first 2 calls) |  | 0 | 0 | 0 | 0 | 0 | n/a |")
 
+    lines.extend(
+        [
+            "",
+            "## In-Trace Follow-Up Provider Cache Usage",
+            "",
+            "This table drops only the first call for each same trace/tag/model group. It separates reuse inside one tool loop from cross-request cold starts and changing conversation history.",
+            "",
+            "本表跳过同一 trace/tag/model 的首次调用，用于区分单轮工具循环内部复用与跨请求冷启动/历史变化。",
+            "",
+            "| tag | model | follow-up calls | prompt tokens | completion tokens | cache hit | cache miss | hit rate |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    if in_trace_followup_rows:
+        for row in in_trace_followup_rows:
+            lines.append(
+                f"| {row['tag']} | {row['model']} | {row['calls']} | {row['prompt_tokens']} | "
+                f"{row['completion_tokens']} | {row['cache_hit_tokens']} | {row['cache_miss_tokens']} | "
+                f"{row['hit_rate_percent']}% |"
+            )
+    else:
+        lines.append("| (no follow-up rows after skipping first in-trace call) |  | 0 | 0 | 0 | 0 | 0 | n/a |")
+
     if reference_hit_rows or reference_warm_rows or reference_shape_rows:
         lines.extend(
             [
@@ -1241,8 +1451,8 @@ def render_cache_report_markdown(
             "",
             "## Low-Hit Call Diagnostics",
             "",
-            "| time | trace | tag | model | hit rate | hit | miss | seconds since same tag/model | likely cause | route context | shape evidence |",
-            "|---|---|---|---|---:|---:|---:|---:|---|---|---|",
+            "| time | trace | tag | model | hit rate | hit | miss | seconds since same tag/model | likely cause | route context | shape evidence | local LCP evidence |",
+            "|---|---|---|---|---:|---:|---:|---:|---|---|---|---|",
         ]
     )
     if low_hit_rows:
@@ -1251,10 +1461,10 @@ def render_cache_report_markdown(
                 f"| {row['time']} | {row['trace']} | {row['tag']} | {row['model']} | "
                 f"{row['hit_rate_percent']}% | {row['cache_hit_tokens']} | {row['cache_miss_tokens']} | "
                 f"{row['seconds_since_same_tag_model']} | {row['likely_cause']} | {row['route_context']} | "
-                f"{row['shape_evidence']} |"
+                f"{row['shape_evidence']} | {row['lcp_evidence']} |"
             )
     else:
-        lines.append("| (none below 70%) |  |  |  | n/a | 0 | 0 | n/a |  |  |  |")
+        lines.append("| (none below 70%) |  |  |  | n/a | 0 | 0 | n/a |  |  |  |  |")
 
     lines.extend(
         [
@@ -1268,7 +1478,7 @@ def render_cache_report_markdown(
             "- Shape Coverage shows whether provider cache usage rows have matching local prompt-shape evidence. Low coverage means the report cannot yet explain prefix changes for that tag.",
             "- Model Route Diagnostics lists same-trace tag groups that crossed model branches. `missing_route_event` means the cache stats show a model switch but the log did not contain a matching upgrade/model-switch event.",
             "- Low-Hit Cause Summary ranks aggregate miss volume by likely cause and tag/model so optimization work starts where it can remove the most miss tokens.",
-            "- Low-Hit Call Diagnostics classifies likely causes from observable evidence: first seen tag/model, model switch cold start, long idle or TTL, short-interval prefix change, or normal low-hit residue.",
+            "- Low-Hit Call Diagnostics classifies likely causes from observable evidence: first seen tag/model, model switch cold start, long idle or TTL, short-interval prefix change, or normal low-hit residue. The local LCP column is local structure evidence only, not provider usage.",
             "- High local cacheable prefix bytes with low provider hit rate can indicate model routing changes, cache TTL expiry, or upstream cache pressure.",
             "- Gate hit rate with `--min-hit-rate tag=percent`; gate shape evidence with `--min-shape-coverage tag=percent`; both support `tag|model`. Gate hash-chain stability with `--max-unstable-hash-chain label=count`.",
             "",

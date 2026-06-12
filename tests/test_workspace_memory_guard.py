@@ -95,5 +95,7 @@ def test_memory_limit_error_exposes_facts_without_losing_partial_output():
     assert result["ok"] is False
     assert result["error_kind"] == "memory_limit_exceeded"
     assert result["memory"]["reason"] == "workspace_total_memory_limit_exceeded"
+    assert result["resource_required"]["matching_helper_kind"] == "code"
+    assert "memory pressure" in result["resource_required"]["resource_resolution_facts"]
     assert result["partial_stdout"] == "partial out"
     assert result["partial_stderr"] == "partial err"

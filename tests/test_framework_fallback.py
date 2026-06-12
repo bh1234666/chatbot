@@ -239,7 +239,8 @@ def test_broad_framework_guard_blocks_overconcentrated_task_even_with_framework(
 
     assert any(
         w.get("issue") == "overconcentrated_helper_task"
-        and w.get("suggested_action") == "split_using_existing_framework"
+        and w.get("observed_framework_state") == "has_framework"
+        and w.get("observed_framework_boundary_fact")
         for w in warnings
     )
 
@@ -272,7 +273,8 @@ def test_broad_framework_guard_counts_chinese_algorithm_units():
 
     assert any(
         w.get("issue") == "overconcentrated_helper_task"
-        and w.get("suggested_action") == "split_using_existing_framework"
+        and w.get("observed_framework_state") == "has_framework"
+        and w.get("observed_framework_boundary_fact")
         for w in warnings
     )
 

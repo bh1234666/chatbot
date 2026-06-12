@@ -68,3 +68,13 @@ def test_deliverable_warning_review_treats_plan_selection_as_evidence():
 
     assert "`current_deliverables` and `plan_*` fields are also review inputs" in src
     assert "old assistant messages or broad workspace listings" in src
+
+
+def test_prefix_resolution_does_not_pick_latest_candidate_symbolically():
+    from pathlib import Path
+
+    src = Path("app/core/orchestrator_entry.py").read_text(encoding="utf-8")
+
+    assert "workspace.prefix_resolve.ambiguous" in src
+    assert "no automatic choice was made" in src
+    assert "getmtime" not in src[src.find("if missing:"):src.find("if _resolved:")]

@@ -66,7 +66,11 @@ async def _add_to_completion_ledger(
             "delivered_files": files[:20],  # 最多前 20 个文件名
             "delivered_summary": result.get("delivered_summary"),  # G: 分类
             "outputs_complete": (outputs_check or {}).get("outputs_complete"),  # C: 验收
+            "producer_self_verified": (outputs_check or {}).get("producer_self_verified") is True,
             "outputs_missing": (outputs_check or {}).get("outputs_missing"),
+            "quality_blocked": bool(
+                (outputs_check or {}).get("quality_blocked") or result.get("quality_blocked")
+            ),
             "internal_evidence_files": (result.get("internal_evidence_files") or [])[:20],
             "read_evidence_summary": result.get("read_evidence_summary"),
             # 2026-05-11 P12.I: quality_warnings 持久到 ledger 让主线程持续看到
@@ -231,7 +235,9 @@ def _ledger_result_for_collect(trace_id: str, task_id: str) -> dict | None:
             "delivered_summary": entry.get("delivered_summary"),
             "outputs_check": {
                 "outputs_complete": entry.get("outputs_complete"),
+                "producer_self_verified": entry.get("producer_self_verified") is True,
                 "outputs_missing": entry.get("outputs_missing"),
+                "quality_blocked": bool(entry.get("quality_blocked")),
                 "quality_warnings": entry.get("quality_warnings") or [],
             },
             "internal_evidence_files": entry.get("internal_evidence_files") or [],
@@ -240,7 +246,7 @@ def _ledger_result_for_collect(trace_id: str, task_id: str) -> dict | None:
                 "Recovered from completion ledger after the helper finished but "
                 "its pending result was no longer available. Use the delivered "
                 "files/report artifacts listed here; do not respawn this task "
-                "unless outputs are missing."
+                "unless outputs are missing, warnings/blockers remain, or producer self-verification is absent."
             ),
             "recovered_from": "completion_ledger",
         }
@@ -250,6 +256,19 @@ def _ledger_result_for_collect(trace_id: str, task_id: str) -> dict | None:
         next_action_type = entry.get("next_action_type")
         if next_action_type:
             result["next_action"] = {"type": next_action_type}
+        if (
+            result["ok"]
+            and result["outputs_check"]["outputs_complete"] is not False
+            and result["outputs_check"]["producer_self_verified"] is True
+            and not result["outputs_check"]["quality_blocked"]
+        ):
+            result["_post_helper_action"] = "output_json_directly"
+            result["producer_owned_completion_fact"] = (
+                "This completion-ledger result represents a clean producer-self-verified helper completion. "
+                "Use its delivered files, output map, and check facts as helper-owned evidence; do not respawn "
+                "the same task_id or re-read helper-owned content merely to validate it again.\n"
+                "该 ledger 结果表示 helper 已干净自验证完成；使用产物和检查事实，不为复核内容重派或复读。"
+            )
         return result
     return None
 

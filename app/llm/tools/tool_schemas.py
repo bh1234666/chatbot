@@ -50,8 +50,9 @@ EXPAND_WARM_SCHEMA = {
         "description": (
             "Expand warm-memory entries by ID from the system index. Returns headline, summary, internal_hint, "
             "entities, and tendencies for each entry. Expand only entries that are relevant to this response; "
-            "batch multiple IDs when useful.\n\n"
-            "按 ID 展开相关温记忆条目。"
+            "batch multiple IDs when useful. IDs are opaque handles from the current memory index; semantic guesses "
+            "such as topic names are not evidence IDs and return empty results.\n\n"
+            "按当前记忆索引里的真实 ID 展开温记忆；主题词猜测不是 ID。"
         ),
         "parameters": {
             "type": "object",
@@ -74,8 +75,9 @@ EXPAND_COLD_SCHEMA = {
         "name": "expand_cold",
         "description": (
             "Expand cold-memory graph nodes by ID and traversal depth. Returns node content and neighbor headlines. "
-            "Use depth=1 for direct neighbors and depth=2 only when deeper context is needed.\n\n"
-            "按 ID 和深度展开冷记忆图节点。"
+            "Use depth=1 for direct neighbors and depth=2 only when deeper context is needed. IDs are opaque handles "
+            "from the current memory index; semantic guesses such as topic names are not evidence IDs and return empty results.\n\n"
+            "按当前记忆索引里的真实 ID 和深度展开冷记忆；主题词猜测不是 ID。"
         ),
         "parameters": {
             "type": "object",
@@ -102,8 +104,9 @@ EXPAND_KB_SCHEMA = {
     "function": {
         "name": "expand_kb",
         "description": (
-            "Expand knowledge-base nodes from condensed shared history. Usage mirrors expand_cold, but the scope is KB.\n\n"
-            "展开知识库节点；用法同冷记忆展开。"
+            "Expand knowledge-base nodes from condensed shared history. Usage mirrors expand_cold, but the scope is KB. "
+            "Use concrete KB IDs from the current index; semantic guesses such as topic names are not evidence IDs.\n\n"
+            "用当前索引里的真实 KB ID 展开知识库节点；主题词猜测不是 ID。"
         ),
         "parameters": {
             "type": "object",
@@ -156,15 +159,15 @@ WORKSPACE_TOOL_SCHEMA = {
         "name": "workspace",
         "description": (
             "Lightweight persistent workspace operations: create directories, write small text/verification files, run bounded commands, "
-            "and locate files. `action` is required; missing action returns `unknown action: ''`.\n\n"
-            "Main-process boundary: the main process coordinates, searches, verifies, and applies tiny patches. Substantive implementation, "
+            "and locate files. `action` is required; a missing action returns `workspace_action_required` without executing the tool.\n\n"
+            "Main-process boundary: the main process coordinates, searches, records narrow facts, and applies tiny patches. Substantive implementation, "
             "documents, charts, algorithms, and generated artifacts should be delegated to helpers. Main-process `.py` writes are for small "
             "verification/probing scripts only.\n\n"
             "Actions: mkdir creates a workspace subdirectory; write creates or rewrites small text/JSON/Markdown or tiny verify scripts; "
             "run executes bounded commands and returns stdout/stderr/returncode; locate finds files by name or glob.\n\n"
             "Workspace files remain available for later search/read. Writes outside the workspace are blocked; risky system commands are blocked. "
             "Use processes tools for background process control.\n\n"
-            "workspace 用于轻量文件和命令；主进程只编排/验证，实质实现交给 helper。"
+            "workspace 用于轻量文件和命令；主进程只编排、记录窄事实，实质实现和自检交给 helper。"
         ),
         "parameters": {
             "type": "object",
@@ -172,7 +175,7 @@ WORKSPACE_TOOL_SCHEMA = {
                 "action": {
                     "type": "string",
                     "enum": ["mkdir", "write", "run", "locate"],
-                    "description": "Required action: mkdir, write, run, or locate. Missing action returns unknown action.\n\naction 必填。",
+                    "description": "Required action: mkdir, write, run, or locate. Missing action returns workspace_action_required without execution.\n\naction 必填；缺失时不会执行。",
                 },
                 "path": {
                     "type": "string",
@@ -278,17 +281,18 @@ EDIT_WORKSPACE_TOOL_SCHEMA = {
         "name": "workspace",
         "description": (
             "Edit-helper scoped artifact writer and locator. Use it to create folders, write small final text artifacts, "
-            "or locate already available files. Computation, scripts, tests, and broad extraction belong to code/read "
+            "locate already available files, or run narrow existing verifier/check commands for the artifact. "
+            "Computation, new scripts, test development, builds, services, and broad extraction belong to code/read "
             "helpers.\n\n"
-            "edit helper 专用产物写入/定位工具，仅做产物文件操作。"
+            "edit helper 专用产物写入/定位工具；可运行窄验收命令，但不做计算、构建或新脚本开发。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["mkdir", "write", "locate"],
-                    "description": "Allowed action: mkdir, write, or locate.\n\n允许创建目录、写文本产物或定位已有文件。",
+                    "enum": ["mkdir", "write", "locate", "run"],
+                    "description": "Allowed action: mkdir, write, locate, or run. Use run only for existing verifier/check commands that validate the current artifact.\n\n允许创建目录、写文本产物、定位文件或运行已有验收命令。",
                 },
                 "path": {
                     "type": "string",
@@ -301,6 +305,14 @@ EDIT_WORKSPACE_TOOL_SCHEMA = {
                 "pattern": {
                     "type": "string",
                     "description": "Filename or glob pattern for locate.\n\n文件名或 glob 匹配。",
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Existing verifier/check command for run. Do not use for new computation, build, services, or broad extraction.\n\n已有验收/检查命令。",
+                },
+                "timeout_sec": {
+                    "type": "number",
+                    "description": "Optional timeout in seconds for run.\n\n可选运行超时秒数。",
                 },
             },
             "required": ["action"],
@@ -450,9 +462,9 @@ INSPECT_FILE_SCHEMA = {
     "function": {
         "name": "inspect_file",
         "description": (
-            "Preflight a workspace file to identify type, direct-read safety, and the recommended reader/conversion workflow. "
+            "Preflight a workspace file to identify type, direct-read safety, and available reader/conversion facts. "
             "Use it as the first step for unfamiliar files, especially Office, PDF, image, archive, media, or binary formats. "
-            "Text files can usually go to read_file after inspection; structured files should follow recommended_workflow.\n\n"
+            "Text files can usually go to read_file after inspection; for structured files, compare the returned workflow facts with the active task before choosing the next reader.\n\n"
             "先预检陌生文件，确定类型和读取路径。"
         ),
         "parameters": {
@@ -475,26 +487,28 @@ READ_FILE_SCHEMA = {
         "name": "read_file",
         "description": (
             "Read UTF-8 plain text from workspace-relative files and return line-numbered content for later targeted edits. "
+            "In environment project mode, real project paths are read with env_read/env_search/env_list_tree/env_run; "
+            "`_env/...` is only a fetched staged copy and may be absent until env_fetch succeeds. "
             "Use this for source, logs, markdown, JSON, CSV, XML, and other text files. Structured or binary formats return "
-            "a typed refusal with suggested_tools so the workflow can switch to the correct reader.\n"
+            "a typed refusal with file-category and recovery facts; compatibility fields such as suggested_tools describe candidate readers, not an automatic decision.\n"
             "\n"
             "## Reading Workflow\n"
             "- Plain text source and logs: read the whole file when size permits, or page with start_line/end_line.\n"
-            "- Office files: inspect first, then use office read/write actions for body, tables, or edits.\n"
+            "- Office files: inspect first, then use office(action='read'/'write'/'append'/'replace_block', ...) for body, tables, or edits.\n"
             "- PDFs: inspect first, then use the suggested text extraction or OCR path.\n"
             "- Images and visual files: inspect dimensions/format first, then use OCR or visual extraction.\n"
-            "- After binary_or_structured_file_not_readable_as_text, follow suggested_tools on the next step.\n"
+            "- After binary_or_structured_file_not_readable_as_text, compare suggested_tools/next_call_fact with the active task and choose the next reader from evidence.\n"
             "- When output is truncated, continue from next_start_line.\n"
             "\n"
             "Returns total_lines, shown_range, line-numbered content, and truncated status.\n\n"
-            "read_file 只读纯文本；结构化/二进制文件先 inspect，再按建议切换 office、PDF 或 OCR 工具；大文本按行分页。"
+            "read_file 只读工作区纯文本；项目路径用 env_*，`_env/...` 仅表示已 fetch 的暂存副本。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative text file path, such as 'sort.c'.\n\n工作区相对文本路径。",
+                    "description": "Workspace-relative text file path. In project mode, use env_read for project paths; use `_env/...` only after env_fetch.\n\n工作区相对文本路径；项目路径用 env_read，_env 需先 fetch。",
                 },
                 "start_line": {
                     "type": "integer",
@@ -521,6 +535,47 @@ READ_FILE_SCHEMA = {
 }
 
 
+MAIN_READ_FILE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "read_file",
+        "description": (
+            "Main-process text spot-check reader. It is designed for small files, narrow main-owned checks, or a narrow "
+            "evidence location already identified by helper/search/code_index/inspect. Broad source reading, long logs, "
+            "generated reports, source-material extraction, and full-file analysis are helper-owned in the normal workflow, "
+            "with the main process synthesizing from concise evidence. Large unbounded reads return "
+            "file-size and targeting facts instead of filling the main context.\n\n"
+            "主进程只做小文件或定点核查；大文件和全量分析由 helper 读取后回报精简证据。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Workspace-relative text file path.\n\n工作区相对文本路径。",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "Start line, 1-indexed, for a narrow evidence check after the location is known.\n\n已知位置后的窄范围核查起始行。",
+                    "default": 1,
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Inclusive end line, 1-indexed, for the same narrow evidence check.\n\n窄范围核查的结束行。",
+                    "default": -1,
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum returned characters. Main-process defaults and caps are intentionally small.\n\n返回字符上限；主进程默认和上限更小。",
+                    "default": 24000,
+                },
+            },
+            "required": ["path"],
+        },
+    },
+}
+
+
 EDIT_FILE_SCHEMA = {
     "type": "function",
     "function": {
@@ -532,16 +587,17 @@ EDIT_FILE_SCHEMA = {
             "## Matching Contract\n"
             "- old_str must appear exactly expected_count times; default expected_count is 1.\n"
             "- old_str should include enough surrounding context and at least 5 characters.\n"
+            "- old_str is literal file text, not the JSON-escaped representation of a tool result; backslashes before quotes belong only when the file itself contains them.\n"
             "- On mismatch, the file is unchanged and the error explains how to widen context or set expected_count.\n"
             "- Use read_file first when uniqueness or surrounding structure is uncertain.\n"
             "- If repeated focused edits fail on the same logic area, step back: read the relevant file/function, rebuild the data flow, and use a broader helper-owned rewrite or replacement strategy.\n"
             "- Use new_str='' for deletion with a precise old_str.\n\n"
-            "edit_file 用于精确文本替换；先确认唯一上下文，失败不改文件，连续局部失败时应重新理解结构并换更宽的修复策略。"
+            "edit_file 用于精确文本替换；old_str 填文件原文而非 JSON 转义形式；先确认唯一上下文，失败不改文件。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path.\n\n文件相对路径。"},
+                "path": {"type": "string", "description": "Workspace-relative file path. In environment project helpers, edit the staged `_env/...` copy, not the bare project-relative path.\n\n工作区相对路径；项目 helper 编辑已暂存的 `_env/...` 副本。"},
                 "old_str": {
                     "type": "string",
                     "description": "Exact text to replace, including indentation and newlines.\n\n要替换的精确文本。",
@@ -578,7 +634,7 @@ INSERT_IN_FILE_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path.\n\n文件相对路径。"},
+                "path": {"type": "string", "description": "Workspace-relative file path. In environment project helpers, insert into the staged `_env/...` copy, not the bare project-relative path.\n\n工作区相对路径；项目 helper 使用已暂存的 `_env/...` 副本。"},
                 "after_line": {
                     "type": "integer",
                     "description": "Insert after this line: 0 before first line, -1 at EOF, N after line N.\n\n插入位置行号。",
@@ -627,18 +683,18 @@ MULTI_EDIT_SCHEMA = {
             "\n"
             "## 限制\n"
             "- 单次最多 50 个 edit(超过拆多次调用)\n"
-            "- 每个 edit 同 edit_file 规则:old_str ≥ 5 字符、配对校验、expected_count 默认 1"
+            "- 每个 edit 同 edit_file 规则:old_str ≥ 5 字符、配对校验、expected_count 默认 1；old_str 是文件原文，不是 JSON 转义文本。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path.\n\n文件相对路径。"},
+                "path": {"type": "string", "description": "Workspace-relative target for the atomic edit batch. Environment project helpers should use the fetched staged `_env/...` file for coordinated replacements, not a bare project-relative path.\n\n原子批量替换的目标文件；项目 helper 使用已暂存的 `_env/...` 副本，不用裸项目路径。"},
                 "edits": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "old_str": {"type": "string", "description": "Exact text to replace, same contract as edit_file.\n\n要替换的精确文本。"},
+                            "old_str": {"type": "string", "description": "Exact literal file text to replace, same contract as edit_file; do not copy JSON escape backslashes unless they exist in the file.\n\n要替换的文件原文；不要复制 JSON 转义反斜杠。"},
                             "new_str": {"type": "string", "description": "Replacement text; empty string deletes.\n\n新文本；空字符串表示删除。"},
                             "expected_count": {
                                 "type": "integer",
@@ -662,7 +718,8 @@ SEARCH_IN_FILE_SCHEMA = {
     "function": {
         "name": "search_in_file",
         "description": (
-            "Search inside plain text files and return matching line numbers with previews. "
+            "Search inside workspace plain text files and return matching line numbers with previews. "
+            "In environment project mode, search real project paths with env_search; search `_env/...` only when that staged copy already exists. "
             "Use this for source code, Markdown, TXT, CSV/TSV, JSON/YAML, and logs; it is the "
             "portable replacement for `findstr` or `grep` and supports streaming scans up to 50MB. "
             "For Office/PDF/image/binary containers, first use `inspect_file`; use `office(action='read')` "
@@ -670,12 +727,12 @@ SEARCH_IN_FILE_SCHEMA = {
             "returns `binary_or_structured_file_not_readable_as_text`, switch to the suggested structured "
             "reader instead of retrying the same search. Use search results to confirm existence, locate "
             "line ranges for `read_file`, and establish edit uniqueness.\n\n"
-            "文本搜索工具只用于纯文本/源码/日志/CSV/JSON；Office/PDF/图片先 inspect，再用 office/OCR 等结构化读取。"
+            "工作区文本搜索；项目路径用 env_search，_env 仅用于已存在暂存副本。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative text file path.\n\n文件相对路径。"},
+                "path": {"type": "string", "description": "Workspace-relative text file path. In project mode, use env_search for project paths; use `_env/...` only after env_fetch.\n\n工作区文本路径；项目路径用 env_search，_env 需先 fetch。"},
                 "pattern": {
                     "type": "string",
                     "description": "Search pattern. Interpreted as plain text unless is_regex=true.\n\n搜索模式。",
@@ -705,7 +762,8 @@ CODE_INDEX_SCHEMA = {
     "function": {
         "name": "code_index",
         "description": (
-            "Create a compact structural index for one source file: functions, classes, structs, includes/imports, and line numbers. "
+            "Create a compact structural index for one workspace source file: functions, classes, structs, includes/imports, and line numbers. "
+            "In environment project mode, use env_read/env_search for project paths or env_fetch before indexing `_env/...`. "
             "Use this as the first step for unfamiliar source files instead of reading the whole file. "
             "It is especially useful before focused read_file ranges, read_function calls, and bug triage across large files.\n\n"
             "Supported source families include C/C++, Python, JS/TS, Go, and Rust. The `summary` field is the compact table to read first:\n"
@@ -720,14 +778,14 @@ CODE_INDEX_SCHEMA = {
             "  L720 fn       rdh_decompress\n"
             "```\n"
             "Read concrete code only after the index identifies the relevant range.\n\n"
-            "code_index 用于源码鸟瞰；先拿结构索引，再按行号精读。"
+            "code_index 用于工作区源码鸟瞰；项目文件先 env_read/env_search 或 env_fetch。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Workspace-relative source file path, such as 'rdh.c'.\n\n工作区相对源码路径。",
+                    "description": "Workspace-relative source file path. In project mode, use env_* for project paths or env_fetch first.\n\n工作区相对源码路径；项目路径先用 env_* 或 fetch。",
                 },
                 "include_includes": {
                     "type": "boolean",
@@ -877,7 +935,10 @@ AGENT_STATE_SCHEMA = {
             "Maintain the structured task ledger for complex work: task contracts, evidence records, artifact manifests, "
             "resource waits, and status snapshots. Use it when a task has acceptance criteria, produced files, helper "
             "resource dependencies, or facts that must survive long toolchains. This tool does not replace verification; "
-            "it records what has been verified, what is partial, and what is still blocked."
+            "it records what has been verified, what is partial, and what is still blocked. This ledger is internal "
+            "structured state; it is not a user-visible note file, memory file, or handoff artifact. When a user explicitly "
+            "asks to store facts as memory, notes, or later handoff, record each compact fact here as evidence or a contract "
+            "in addition to any requested or naturally needed visible note/handoff file; neither channel replaces the other."
         ),
         "parameters": {
             "type": "object",
@@ -1003,10 +1064,11 @@ TASK_PLAN_SCHEMA = {
         "name": "task_plan",
         "description": (
             "Maintain the active task plan snapshot for the main process. Use it after reading memory, files, "
-            "toolchain cache, or agent_state when the active task becomes clearer than the latest user turn alone. "
+            "toolchain cache, or agent_state when those facts clarify or change the active task beyond the current turn text. "
             "It updates the current thread plan and mirrors compact facts into the structured task ledger; it does "
-            "not verify artifacts or replace final JSON."
-            "\n\n维护当前主线任务快照；读取记忆、文件或续作证据后可更新。"
+            "not verify artifacts or replace final JSON. Updates retain prior acceptance/evidence facts for the "
+            "same task unless the model states task-change evidence in the plan."
+            "\n\n维护当前主线任务快照；读取记忆、文件或续作证据后可更新；同任务旧验收事实会保留。"
         ),
         "parameters": {
             "type": "object",
@@ -1033,12 +1095,16 @@ TASK_PLAN_SCHEMA = {
                 "acceptance": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Checkable completion criteria for the active task.\n\n可检查验收标准。",
+                    "description": "Checkable completion criteria for the active task. Include revised criteria as facts; omitted prior criteria for the same task remain visible in agent_state for comparison.\n\n可检查验收标准；同任务未重复的旧验收仍保留供对照。",
                 },
                 "evidence_required": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Evidence needed before finalizing this active task.\n\n最终交付前所需证据。",
+                    "description": (
+                        "Evidence needed before finalizing this active task. This records final evidence needs, not who must collect them. "
+                        "For coding/debugging, code helpers can satisfy source reading, failure diagnosis, edits, and tests through input_files and acceptance_checks; the main thread can keep final diff/apply and acceptance evidence compact.\n\n"
+                        "最终交付前所需证据；记录证据需求，不表示必须由主进程收集。"
+                    ),
                 },
                 "risks": {
                     "type": "array",
@@ -1067,18 +1133,9 @@ DELEGATE_TOOL_SCHEMA = {
         "name": "delegate",
         "description": (
             "Run and manage helper tasks in isolated workspaces. The main process owns goals, dependency order, monitoring, acceptance, and final synthesis; helpers do substantial bounded work.\n"
-            "\n"
-            "## Kinds and modes\n"
-            "`kind` is the product/tool family; `mode` is difficulty/resource strength. Use code for implementation/commands/benchmarks, read for source-material evidence extraction, edit for final documents/text artifacts, draw for charts/images, tts for audio artifacts, verify for read-only review, and inventory/project_map/file_summary/impact_review for project analysis. Use hard only for difficult same-kind work or recovery.\n"
-            "\n先按产物选择 kind，再按难度选择 mode。\n"
-            "\n"
-            "## Delegation\n"
-            "Delegate substantial implementation, reading/extraction, Office output, drawing, TTS, verification, broad file work, and independent exploration. Split independent modules, algorithms, sources, chapters, data shards, or artifacts; keep strict dependencies serial. For broad multi-part work, create a compact framework contract first: goal, interfaces/schema, evidence map, output matrix, ownership, checks, and merge order. Pass shared context through `framework` and concrete evidence through `input_files`; keep helper prompts compact.\n"
-            "\n大任务先定契约和证据，再按独立边界派发 helper；共享上下文放 framework，具体输入放 input_files。\n"
-            "\n"
-            "## Continuation and acceptance\n"
-            "Use the same task_id with resume=true for interrupted, incomplete, or repair work on the same boundary. Use fork_from for variants from a completed workspace. Monitor heartbeats, outputs_check, file_map, verify_verdict, quality_warnings, and repair hints before deciding to wait, resume, collect, verify, interrupt, or escalate. In environment tasks, main_available_files and copy_stats.env_copied_files expose usable `_env/...` paths in the main workspace.\n"
-            "\n同一边界用同 task_id 续作；验收前查看产物、映射、质量警告和修复提示。"
+            "Pick `kind` by product, `mode` by difficulty. Split independent work into parallel tasks in one call; keep strict dependencies serial. Shared structure goes in `framework`; readable paths go in `input_files`. Same task_id with resume=true continues interrupted work; fork_from clones a finished workspace. The first framework helper owns only this structural contract (slots, ownership, acceptance, exact output matrix); evidence-backed analysis, research claims, citations, final numeric values, conclusions, implementation bodies, and final assembly belong to producer helpers. `_helpers_shared/...` files are handoff evidence, not user-facing artifacts; final deliverables are clean non-shared workspace files (project-visible targets use staged `_env/<project-relative-path>`).\n"
+            "Run-state facts (heartbeats, outputs_check, file_map, main_available_files, quality_warnings, repair hints) arrive in tool results; decide wait/resume/collect/kill from those facts. Clean helper results are producer-owned quality evidence, so include all requested deliverables in expected_outputs and consume the compact helper report rather than rereading produced artifacts.\n"
+            "\u6309\u4ea7\u7269\u9009 kind\u3001\u6309\u96be\u5ea6\u9009 mode\uff1b\u72ec\u7acb\u4efb\u52a1\u5408\u4e00\u6b21\u8c03\u7528\u5e76\u884c\u6d3e\u53d1\uff1b\u5171\u4eab\u6846\u67b6\u53ea\u653e\u7ed3\u6784\u548c\u9a8c\u6536\uff0c\u5b9e\u8d28\u5185\u5bb9\u7531\u5206\u7247\u4ea7\u7269\u627f\u8f7d\uff1b\u8fd0\u884c\u4e8b\u5b9e\u89c1\u5de5\u5177\u7ed3\u679c\u3002"
         ),
         "parameters": {
             "type": "object",
@@ -1087,91 +1144,57 @@ DELEGATE_TOOL_SCHEMA = {
                     "type": "string",
                     "enum": ["spawn", "spawn_async", "poll", "collect", "wait_any", "kill", "status"],
                     "description": (
-                        "Delegate action.\n"
-                        "- spawn: start helpers and return when wait_window expires or all helpers finish.\n"
-                        "- spawn_async: start helpers and return proc_ids immediately while helpers continue in the background.\n"
-                        "- poll: quick heartbeat/status check for task_ids.\n"
-                        "- collect: wait for final results for task_ids; completed helpers return immediately.\n"
-                        "- wait_any: wait until any listed task finishes, useful after fan-out.\n"
-                        "- kill: cooperative interruption for one helper by task_id.\n"
-                        "- status: dashboard for all active and completed helpers in this trace; task_ids are optional.\n"
-                        "Preferred asynchronous flow: spawn_async, continue other coordination, then poll/status, wait_any, or collect. "
-                        "Use wait_any or collect for waiting; helper tasks should perform useful work rather than act as timers.\n\n"
-                        "delegate action 控制 helper 生命周期；异步流程用 spawn_async 后轮询/收集，等待用 wait_any 或 collect。"
+                        "spawn waits up to wait_window_sec; spawn_async returns immediately for overlapped coordination; "
+                        "poll = non-blocking heartbeat; collect/wait_any wait on listed task_ids; kill = cooperative interrupt; "
+                        "status = dashboard.\n\u5f02\u6b65\u6d41\u7a0b spawn_async \u540e poll/wait_any/collect\uff1b\u7b49\u5f85\u7528 wait_any \u6216 collect\u3002"
                     ),
                 },
                 "task_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": (
-                        "(action=poll/collect/wait_any 必须)要查询/收集的 task_id 列表。"
-                        "顺序无关。同名 task_id 重复会被去重。"
-                    ),
+                    "description": "Target task_ids for poll/collect/wait_any.",
                 },
                 "tasks": {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": 20,
                     "description": (
-                        "task 列表。每个 task 字段:task_id, prompt, kind, resume 等。\n"
-                        "**注意**:`wait_window_sec` 不是 task 字段,是 delegate 调用顶层字段(同 `tasks` 同级)。"
-                        "如果你把它放在 task 里,系统会自动 hoist 到顶层(取最大值)并 warn,但下次请放对位置。"
+                        "Task list for spawn/spawn_async (parallel, 1-16). `wait_window_sec` is a top-level field, not a task field."
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
                             "task_id": {
                                 "type": "string",
-                                "description": (
-                                    "短标识,如 'n_100' / 'mergesort' / 'variant_1'。"
-                                    "**用同一个 task_id 配 resume=true 可让 helper 续作上次中断的工作**"
-                                    "(工作区被保留)。"
-                                    "建议用语义化前缀(buddy/slab/...)而非 b1/b2/b3 — log 中能一眼看清谁在干啥。"
-                                ),
+                                "description": "Short semantic id; same id + resume=true continues prior workspace.",
                             },
                             "prompt": {
                                 "type": "string",
                                 "description": (
-                                    "Focused helper request: goal, inputs, owned output paths, constraints, recovery/resource conditions, "
-                                    "and 3-8 checkable acceptance points. For framework-first work, state the exact slice boundary and "
-                                    "local checks while putting shared structure in `framework`. For resume=true, include prior progress "
-                                    "and remaining work for the same task. Keep broad history, persona text, unrelated helper reports, "
-                                    "and tool manuals out.\n\n"
-                                    "helper prompt 应聚焦、可验收；共享结构放 framework，prompt 只写本分片目标、输入、产物和检查。"
+                                    "Focused request: goal, inputs, owned output paths, constraints, and 3-8 checkable acceptance points. "
+                                    "Pass file bodies via input_files, not pasted text; keep history/persona/manuals out; do not preselect implementation routes. "
+                                    "Structured source fields stay raw (values plus notes); ambiguous cost/unit/count semantics are for the helper to resolve from evidence.\n"
+                                    "\u805a\u7126\u76ee\u6807\u4e0e\u9a8c\u6536\uff1b\u6b63\u6587\u8d70 input_files\uff1b\u6b67\u4e49\u5b57\u6bb5\u4fdd\u7559\u539f\u503c\u7531 helper \u5224\u65ad\u3002"
                                 ),
                             },
                             "framework": {
                                 "type": ["string", "object"],
                                 "description": (
-                                    "Shared structural contract for broad or multi-part work: goal, interfaces/schema, outline, "
-                                    "evidence map, ownership, validation checks, output matrix, and merge/apply order. Keep this "
-                                    "field structural; evidence, final values, citations, implementation bodies, long prose, charts, "
-                                    "and final assembly belong in producer outputs. `_helpers_shared/...` is handoff evidence, not "
-                                    "a final user-facing artifact.\n\n"
-                                    "共享框架只放结构、槽位、归属、验收和合并顺序；实质内容由分片产物承载。"
+                                    "Shared structural contract for multi-part work: goal, interfaces/schema, outline, evidence map, ownership, validation checks, exact output matrix, merge order. Structure only; content belongs to producer helpers.\n\u5171\u4eab\u6846\u67b6\u53ea\u653e\u7ed3\u6784\u3001\u69fd\u4f4d\u3001\u5f52\u5c5e\u3001\u9a8c\u6536\u548c\u5408\u5e76\u987a\u5e8f\u3002"
                                 ),
+                            },
+                            "dispatch_reason": {
+                                "type": "string",
+                                "description": "Facts justifying this boundary/kind/mode/split, mainly after a guard block. Not an override.",
                             },
                             "resume": {
                                 "type": "boolean",
-                                "description": (
-                                    "Default false. When true, the helper keeps the previous workspace and continues from preserved files "
-                                    "instead of recopying from the main workspace. Use it for interrupted or incomplete work with the same task boundary. "
-                                    "Before resuming, inspect still_running status. If the existing helper is finalizing or about to produce a report, prefer waiting or collecting; "
-                                    "if the direction must change, cooperatively interrupt first and then resume with the new focused prompt. "
-                                    "The runtime protects against concurrent streams by finalizing or aborting the prior live stream before the resumed stream starts.\n\n"
-                                    "resume=true 用于同一任务续作；先看心跳，接近收尾则等待，需换方向则先协作中断再续作。"
-                                ),
+                                "description": "Keep prior workspace and continue the same task boundary. Check still_running first; interrupt before redirecting.",
                                 "default": False,
                             },
                             "fork_from": {
                                 "type": "string",
-                                "description": (
-                                    "可选。设为另一个已结束 helper 的 task_id 时,新 helper 启动前会"
-                                    "**复制源 helper 的工作区**作为起点(自动启用 resume=true)。"
-                                    "用法:看完 helper A 的报告后,想基于它的产物做 N 个并行变体——"
-                                    "spawn 多个 task 都 fork_from='A',各自做不同变体。"
-                                    "源工作区 >500MB 会被拒绝。"
-                                ),
+                                "description": "Clone a finished helper workspace as the starting point (implies resume).",
                             },
                             "kind": {
                                 "type": "string",
@@ -1179,37 +1202,24 @@ DELEGATE_TOOL_SCHEMA = {
                                 "enum": ["code", "edit", "verify", "draw", "tts", "read", "project_map", "file_summary", "impact_review", "inventory"],
                                 "default": "code",
                                 "description": (
-                                    "Choose the helper base kind from the work product, not from difficulty. "
-                                    "`mode` controls resource strength; `kind` controls the tool family and deliverable boundary.\n\n"
-                                    "- `code`: source implementation, debugging, build/test/benchmark commands, reusable scripts, data computation, algorithmic analysis, generated CSV/JSON evidence, executable file-preparation steps before reading, and project scaffold/shared-contract files that must be written or smoke-tested.\n"
-                                    "- `read`: source-material reading and evidence extraction from text files, prepared archive contents, images, PDFs, Office files, screenshots, forms, and scanned or visual content. It writes internal `.txt` evidence for the main thread.\n"
-                                    "- `edit`: polished document or structured-file assembly such as .docx/.pptx/.xlsx/Markdown/JSON/YAML/TXT. It consumes verified evidence and existing images; it does not gather broad source evidence, implement source code, or create charts.\n"
-                                    "- `verify`: read-only adversarial review of code, data, images, documents, or helper artifacts, with evidence and acceptance status.\n"
-                                    "- `draw`: image/chart production from data or a precise visual specification. Use `verify` for judging existing images and `code` for reusable charting applications.\n"
-                                    "- `tts`: audio synthesis resources; report the produced audio path without changing voice policy.\n"
-                                    "- `inventory`: environment project first-pass inventory: directory shape, file types, README/entry/config/test hints, lightweight statistics, and unread source-material groups.\n"
-                                    "Every requested deliverable, evidence source, and acceptance check needs an owner. For mixed work, pipeline by product: read evidence, code computation, draw charts, edit final documents, verify acceptance. Resume useful interrupted work with the same task_id and base kind.\n\n"
-                                    "按产物性质选 kind，按难度选 mode；混合任务按证据、计算、图表、文档和验收分工。"
+                                    "Product family: code=implementation/commands/benchmarks/data computation, including browser-automation evidence that requires running Playwright/Puppeteer/Selenium/Chromium-style commands; read=source-material reading/classification/triage/extraction (internal .txt evidence); "
+                                    "edit=final document/text assembly (may read small explicit input_files); draw=charts/images from data; tts=audio; verify=read-only review; "
+                                    "inventory/project_map/file_summary/impact_review=project analysis. Broad/visual/uncertain extraction goes read-first.\n"
+                                    "\u6309\u4ea7\u7269\u548c\u80fd\u529b\u9009 kind\uff1b\u9700\u8fd0\u884c\u6d4f\u89c8\u5668\u81ea\u52a8\u5316\u547d\u4ee4\u7684\u8bc1\u636e\u7528 code\uff0c\u5e7f\u6cdb\u6750\u6599\u5148 read\u3002"
                                 ),
                             },
                             "mode": {
                                 "type": "string",
                                 "enum": ["easy", "hard"],
                                 "default": "easy",
-                                "description": (
-                                    "Difficulty/resource mode for the same base kind.\n"
-                                    "- `easy`: default path for ordinary bounded work.\n"
-                                    "- `hard`: stronger reasoning/model budget for a specific difficult task, a useful retry, or an easy/hard race on a substantial project task.\n\n"
-                                    "Use `hard` after the task boundary is already narrow. Permissions, broad-work splitting, and helper kind stay governed by the base task contract. When continuing useful work, prefer the same `task_id` with `resume=true`; change the task id only when the old workspace is stale or the work boundary truly changed.\n\n"
-                                    "mode 只表示资源强度。先把任务边界拆清楚，再对具体难点或续作升 hard。"
-                                ),
+                                "description": "easy=default; hard=stronger reasoning for a narrow difficult task or evidence-backed retry.",
                             },
                             "expected_outputs": {
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": (
-                                    "List the concrete files the helper must deliver, up to 20 paths. Use the same path namespace the helper will edit. In project mode, use full staged paths such as `_env/src/pkg/file.py` for project files, not just basenames, so ownership, copyback, and output checks match the actual target. Helper completion reports include outputs_complete=true/false; use that evidence before deciding whether to resume.\n\n"
-                                    "列出 helper 必须交付的文件；项目模式使用完整 `_env/...` 路径，便于归属、回写和验收一致。"
+                                    "Files the helper must deliver or may modify (ownership, copyback, outputs_check). Project-visible targets use full staged `_env/<path>`; read-helper evidence uses helper-local .txt names.\n"
+                                    "\u9879\u76ee\u53ef\u89c1\u4ea7\u7269\u7528\u5b8c\u6574 `_env/...` \u8def\u5f84\uff0cread \u8bc1\u636e\u7528\u5185\u90e8 txt \u540d\u3002"
                                 ),
                                 "default": [],
                             },
@@ -1217,34 +1227,24 @@ DELEGATE_TOOL_SCHEMA = {
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": (
-                                    "Concrete files, staged paths, source ranges, or artifacts transferred or expected to be readable by this helper. "
-                                    "Use `_env/...` paths in environment mode and include only files relevant to this helper's slice.\n\n"
-                                    "传给 helper 或要求其读取的具体文件、路径、范围或产物。"
+                                    "Readable inputs: concrete files, staged paths, or project-relative paths (auto-staged at helper startup). Use instead of pasting bodies into prompt.\n"
+                                    "\u53ef\u8bfb\u8f93\u5165\uff1b\u9879\u76ee\u76f8\u5bf9\u8def\u5f84\u4f1a\u81ea\u52a8\u6682\u5b58\u3002"
                                 ),
                                 "default": [],
                             },
                             "acceptance_checks": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": (
-                                    "Focused checks the helper should run or report against: compile/test commands, smoke tests, schema checks, coverage points, "
-                                    "document sections, OCR completeness, or exact evidence requirements.\n\n"
-                                    "该 helper 需要执行或汇报的聚焦验收项。"
-                                ),
+                                "description": "Checks the helper runs or reports against: commands, coverage points, sections, evidence requirements.",
                                 "default": [],
                             },
                         },
                         "required": ["task_id", "prompt"],
                     },
-                    "description": "并行任务列表(action=spawn 时必填,1-16 个)",
                 },
                 "task_id": {
                     "type": "string",
-                    "description": (
-                        "Target helper task_id for action=kill. A kill request is cooperative; after killed_proc_id "
-                        "or already_killed=true, continue from the resulting report or status rather than repeating the same interruption.\n\n"
-                        "kill 的目标 task_id；协作中断已受理后，依据报告或状态继续。"
-                    ),
+                    "description": "Target helper for action=kill (cooperative).",
                 },
                 "reason": {
                     "type": "string",
@@ -1256,69 +1256,33 @@ DELEGATE_TOOL_SCHEMA = {
                         "api_stall_emergency",
                     ],
                     "description": (
-                        "Required for action=kill. Choose the evidence-backed reason:\n"
-                        "- self_report_cant_do: helper reports infeasible work.\n"
-                        "- self_report_done: helper reports completion while final ok result is not returned yet.\n"
-                        "- sibling_completed_first: a sibling or paired helper completed the same task first.\n"
-                        "- content_deemed_useless: the task is cancelled, superseded, or no longer useful.\n"
-                        "- api_stall_emergency: heartbeat shows API stall for 60s+ without chunks. Healthy iter/tool progress is not an API stall.\n\n"
-                        "kill reason 需匹配证据；API stall 只用于无 chunk 的卡死，不用于健康心跳。"
+                        "Required for kill; must match evidence. api_stall_emergency only for 60s+ without chunks; healthy iter/tool progress is not a stall."
                     ),
                 },
                 "force": {
                     "type": "boolean",
-                    "description": (
-                        "**已弃用**(2026-05-02)。helper 不再支持硬杀,无论传什么都按"
-                        "协作中断处理(响应里 force_downgraded=true 告知)。保留作向后兼容。"
-                    ),
+                    "description": "Deprecated; kills are always cooperative.",
                     "deprecated": True,
                 },
                 "wait_window_sec": {
                     "type": "number",
                     "default": 90,
                     "description": (
-                        "Optional wait window for spawn. Default is 90 seconds. Use 30-1800 seconds for a bounded wake-up, "
-                        "then inspect still_running heartbeats, recent_tools, last_thought, and age to decide whether to wait, "
-                        "resume the same task_id, cooperatively interrupt, or proceed from verified completed results. "
-                        "Use longer windows for compile-heavy, benchmark, or multi-artifact tasks; use shorter windows when early fan-in is useful. "
-                        "A nonpositive value waits for all helpers for legacy compatibility.\n\n"
-                        "等待窗口用于定期介入；醒来后根据心跳决定等待、续作、中断或整合已验证结果。"
+                        "Wait window for spawn/collect/wait_any (30-1800s; nonpositive waits for all). Wake up, read heartbeats, then wait/resume/interrupt/proceed."
                     ),
                 },
                 "min_results_to_return": {
                     "type": "integer",
-                    "description": (
-                        "Optional early fan-in threshold for spawn. Return as soon as N helpers finish, or when wait_window_sec expires. "
-                        "Use it when fast completed slices can be integrated while slower helpers continue. Valid range is 1..len(tasks)-1; "
-                        "values at or above task count are ignored.\n\n"
-                        "达到 N 个 helper 完成即可提前返回，便于边整合边等待慢任务。"
-                    ),
+                    "description": "Early fan-in: return once N helpers finish (1..len(tasks)-1).",
                     "minimum": 1,
                 },
                 "force_blanket_resume": {
                     "type": "boolean",
-                    "description": (
-                        "(action=spawn 时可选,2026-05-04 加)全部 alive helper 一起 resume "
-                        "时需设为 true 以确认非误操作。系统会检测≥3 个全 alive resume 并拦截,"
-                        "要求先看心跳再精挑。如确认所有 helper 都应 resume,传 true 绕过。"
-                    ),
-                },
-                "auto_final": {
-                    "type": "boolean",
-                    "description": (
-                        "Legacy compatibility switch for historical paired hard-helper behavior. For current workflows, prefer explicit "
-                        "same-task resume=true with the original base kind and mode='hard' when a narrow retry needs stronger resources.\n\n"
-                        "旧 paired hard 兼容开关；当前流程优先显式同 task_id 续作并按需升 hard。"
-                    ),
+                    "description": "Confirm a >=3 all-alive blanket resume is intentional.",
                 },
                 "helper_think": {
                     "type": "boolean",
-                    "description": (
-                        "(action=spawn 时可选,2026-05-08 加)设为 true 时本次 delegate 的所有 "
-                        "coding/verify helper 启用思考(reasoning=low)。用于:helper 编译通过但 "
-                        "运行 SEGFAULT/逻辑错误,需要模型深度推理才能定位的 bug。有成本,只在 "
-                        "确认 helper 无思考搞不定时才开。"
-                    ),
+                    "description": "Enable reasoning for coding/verify helpers in this call (costly; for deep bugs only).",
                 },
             },
         },
@@ -1336,18 +1300,19 @@ OFFICE_TOOL_SCHEMA = {
             "## Actions\n"
             "- read, extract_images, ocr_images: extract document text, structure, media metadata, image files, or embedded-image OCR. Page large DOCX bodies with start_block/end_block/max_blocks; save large OCR output with save_to and read it by ranges.\n"
             "- write, append: create or extend a document. DOCX uses blocks, PPTX uses slides, XLSX uses sheets.\n"
-            "- replace_section, replace_block, delete_block, insert_block: targeted DOCX edits. Use block indexes from office(action='read'). Targeted block/slide edits require an exact non-negative `block_index`/index.\n"
+            "- replace_section, replace_block, replace_blocks, delete_block, insert_block: targeted DOCX edits. Use block indexes from office(action='read'). Targeted block/slide edits require an exact non-negative `block_index`/index; use replace_blocks for multiple known block edits.\n"
+            "- fill_empty_headings: DOCX-only batch fill for existing empty heading paragraphs, optionally inserting body blocks after each heading.\n"
             "- replace_slide, insert_slide, delete_slide: targeted PPTX edits.\n"
             "- update_cells: targeted XLSX edits.\n"
             "- insert_image: append one image to DOCX.\n"
-            "- verify_numbers, verify_rigor: DOCX/PPTX numeric and rigor checks against CSV/source data. `verify_integrity` is XLSX-only.\n"
+            "- verify_numbers, verify_rigor: DOCX/PPTX numeric and rigor checks against CSV/source data; pass `csv_paths` when checking data claims. DOCX structural acceptance uses `read`; `verify_integrity` is XLSX-only and is not a DOCX validity check.\n"
             "\n"
             "## Formats\n"
-            "Valid DOCX block types are `heading`, `paragraph`, `list`, `table`, `image`, `equation`, and `page_break`; plain prose is `paragraph`, bullets are `list`, and Table rows must contain at least one non-empty cell. Image paths must already exist in the workspace. If document text references a figure/chart, embed the corresponding image block or markdown image and then verify structure/figure consistency.\n"
+            "Valid DOCX block types are `heading`, `paragraph`, `list`, `table`, `image`, `equation`, and `page_break`; plain prose is `paragraph`, subtitles are also `paragraph`, bullets are `list`, and Table rows must contain at least one non-empty cell in a 2D array such as rows:[[\"A\",\"B\"],[\"C\",\"D\"]]. Image paths must already exist in the workspace. If document text references a figure/chart, embed the corresponding image block or markdown image and then verify structure/figure consistency.\n"
             "PPTX layouts include title, section, title_content, two_column, image, table, and blank. XLSX sheets use rows, optional header/freeze_header/column_widths, and formulas as strings such as '=SUM(A1:A10)'.\n"
             "\n"
             "## Large And Specialized Work\n"
-            "Initial large write/append calls allow generous block/text limits; if the tool returns arg_size_warning, use the reported current limit for the next call. For formulas, data-rigor verification parameters, and detailed Office recipes, load `read_skill('office-recipes')` when those details affect the next action.\n"
+            "Initial large write/append calls allow generous block/text limits; if the tool returns arg_size_warning, use the reported current limit for the next call. A successful DOCX read returns headings plus paragraph/block, table, and image counts; repeat reads are useful when an artifact changed or a named block range/detail is still unchecked. For formulas, data-rigor verification parameters, and detailed Office recipes, load `read_skill` with `name=\"office-recipes\"` when those details affect the next action. Office containers are not plain text; do not use search_in_file on DOCX/PPTX/XLSX paths.\n"
             "\n"
             "Office 工具处理 DOCX/PPTX/XLSX 容器；schema 保留动作、格式和验收边界，长文档分段、嵌图、公式和数据严谨性细节按需读取 `office-recipes`。"
         ),
@@ -1359,6 +1324,7 @@ OFFICE_TOOL_SCHEMA = {
                     "enum": [
                         "read", "write", "append",
                         "replace_section", "replace_block",
+                        "fill_empty_headings",
                         "delete_block", "insert_block",
                         "replace_slide", "insert_slide", "delete_slide",
                         "update_cells",
@@ -1378,7 +1344,12 @@ OFFICE_TOOL_SCHEMA = {
                 },
                 "blocks": {
                     "type": "array",
-                    "description": "(.docx write/append/replace_section/replace_block/insert_block) 内容块数组。复杂内容请分小批追加:每次 append 建议 2-8 个 blocks;表格、大段含引号文本、公式说明不要一次塞入巨大 JSON。",
+                    "description": "(.docx write/append/replace_section/replace_block/insert_block or fill_empty_headings.after_blocks) Structured content blocks. Use canonical DOCX block types: heading, paragraph, list, table, image, equation, page_break. Subtitles are paragraph blocks. Table rows are non-empty 2D arrays, not row objects. Initial DOCX write/append limits are generous (currently up to 96 blocks and 30,000 text characters before adaptive shrink); if an arg_size_warning appears, use the reported active limits. Batch coherent sections when JSON remains reliable, and split only when size, quoting, or verification facts make that safer.\n\n中文摘要：DOCX 内容块；subtitle 用 paragraph；表格 rows 用二维数组；初始上限较大，若出现 arg_size_warning 则按返回的当前限制调整。",
+                    "items": {"type": "object"},
+                },
+                "headings": {
+                    "type": "array",
+                    "description": "(.docx fill_empty_headings) Heading entries to apply to existing empty DOCX heading paragraphs in document order: [{text, level?, after_blocks?}, ...]. The model decides titles and body content; the tool only writes them efficiently.\n\n中文摘要：按文档顺序批量填充空 heading，可在每个标题后插入正文块。",
                     "items": {"type": "object"},
                 },
                 "slides": {
@@ -1467,7 +1438,7 @@ OFFICE_TOOL_SCHEMA = {
                 "csv_paths": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "(verify_numbers / verify_rigor) 核对文档内数字所依据的 CSV/源数据文件路径列表",
+                    "description": "(verify_numbers / verify_rigor) 核对文档内数字所依据的 CSV/源数据文件路径列表；DOCX 数据校验需要提供，结构验收用 read",
                 },
                 "pivot_col": {
                     "type": "string",
@@ -1570,37 +1541,35 @@ TODO_WRITE_SCHEMA = {
     "function": {
         "name": "todo_write",
         "description": (
-            "管理任务清单。**复杂任务的第一个工具调用应该是 todo_write,把任务拆成 todos**。\n"
-            "之后每完成一项就再次 todo_write 把那项 mark completed。这是把思维外化,"
-            "避免漏事/死磕单点/忘记原计划。\n"
+            "Write the current short task checklist. Use `todo_write` for planning state only: "
+            "brief steps, ownership, and status. It is not a content-writing surface for long prose, "
+            "Python scripts, document bodies, tables, or patches; use `workspace`, `office`, or edit tools "
+            "for those artifacts. 中文概要：todo_write 只记录短计划状态，不承载长正文、脚本或文档内容。\n"
             "\n"
-            "## 何时用(强烈建议)\n"
-            "- 任务有 3+ 个明显步骤(读代码 → 找根因 → 改 → 测试 → 写报告)\n"
-            "- 调试 bug 需要尝试多个假设(假设 A 测一遍、假设 B 测一遍)\n"
-            "- 多文件协作(改 huffman.c 同时也要改 main.c)\n"
-            "- 用户给的任务清单(实现 A + 实现 B + 写文档)\n"
+            "## Use When\n"
+            "- The task has 3+ visible steps.\n"
+            "- Debugging needs several hypotheses or files.\n"
+            "- The user gave a checklist.\n"
             "\n"
-            "## 何时**不**用\n"
-            "- 单步任务(修一个 typo / 答一个问题)\n"
-            "- 闲聊\n"
+            "## Do Not Use For\n"
+            "- Single-step tasks or chat.\n"
+            "- Drafting long document sections, code, scripts, tables, or final answers.\n"
             "\n"
-            "## 规则\n"
-            "- 每个 todo 用 5-30 字描述具体做什么(不要含糊)\n"
+            "## Rules\n"
+            "- Keep each todo brief and concrete, normally 5-30 words.\n"
             "- status: `pending`(待办) / `in_progress`(正在做) / `completed`(完成)\n"
-            "- **同时只能有 1 个 in_progress** —— 即使你并行派多个 helper,也只能把当前主控步骤标为 in_progress,其他并行分支保持 pending\n"
-            "- 完成立刻 mark complete,不要等任务全部完成才一次更新\n"
-            "- 中途计划有变 → 直接 todo_write 重写整个 list\n"
+            "- At most one todo may be `in_progress`; even with parallel helpers, only the coordinating step is `in_progress`.\n"
+            "- Update when a step completes, becomes blocked, or the plan materially changes.\n"
             "\n"
-            "## 例子\n"
+            "## Example\n"
             "```\n"
             "todo_write(todos=[\n"
-            "  {\"id\": \"1\", \"content\": \"read_file huffman.c 看完整代码\", \"status\": \"in_progress\"},\n"
-            "  {\"id\": \"2\", \"content\": \"找 codes[i].code 所有写入路径\", \"status\": \"pending\"},\n"
-            "  {\"id\": \"3\", \"content\": \"补漏的赋值 + 编译测试\", \"status\": \"pending\"},\n"
-            "  {\"id\": \"4\", \"content\": \"写报告说明根因\", \"status\": \"pending\"},\n"
+            "  {\"id\": \"1\", \"content\": \"Read huffman.c and trace writes\", \"status\": \"in_progress\"},\n"
+            "  {\"id\": \"2\", \"content\": \"Patch missing assignment\", \"status\": \"pending\"},\n"
+            "  {\"id\": \"3\", \"content\": \"Run compile and focused tests\", \"status\": \"pending\"},\n"
             "])\n"
             "```\n"
-            "返回带 ☐/▶/✓ 三态可视化展示。"
+            "Returns a visual checklist."
         ),
         "parameters": {
             "type": "object",
@@ -1617,7 +1586,7 @@ TODO_WRITE_SCHEMA = {
                             },
                             "content": {
                                 "type": "string",
-                                "description": "todo 内容(5-30 字,具体可执行)",
+                                "description": "Brief concrete task description, not long prose/code/document content.",
                             },
                             "status": {
                                 "type": "string",
@@ -1870,10 +1839,12 @@ ASK_USER_QUESTION_SCHEMA = {
         "description": (
             "Ask the main process or user a concise clarifying question when progress depends on a missing decision, "
             "external input, or genuinely ambiguous choice. First use available context, file/search evidence, and "
-            "relevant skills when they can resolve the uncertainty. A good question names the ambiguity, gives two to "
+            "tool failure facts, and relevant skills when they can resolve the uncertainty. A current request to save, "
+            "create, edit, or jot down an artifact is already task authorization for that artifact; use the appropriate "
+            "file/project tool unless content or destination facts are missing. A good question names the ambiguity, gives two to "
             "four executable options when useful, and explains the practical consequence briefly. After the call, the "
             "main process will provide the answer or best available decision in a later turn.\n\n"
-            "用于缺少关键决策或外部信息时提问；先查已有证据，问题要具体并给可执行选项。"
+            "用于缺少关键决策或外部信息时提问；用户已要求保存/创建/记录时即有该产物授权，缺内容或目标事实才问。"
         ),
         "parameters": {
             "type": "object",
@@ -1910,13 +1881,13 @@ INSPECT_FILE_TOOL_SCHEMA = {
     "function": {
         "name": "inspect_file",
         "description": (
-            "检查工作区内文件的结构化元数据,**主线程验证 helper 二进制产物的关键工具**。\n"
+            "检查工作区内文件的结构化元数据；用于缺失结构事实、矛盾、警告或用户明确要求的窄范围核查。\n"
             "\n"
             "## 何时用\n"
-            "- helper 报告 ok=true + 产出了 docx/pptx/xlsx/png/pdf 等二进制文件\n"
-            "- 你需要确认产物的内部结构(段落数 / 表格数 / 图片数 / 幻灯片数 / 行数 / 尺寸 / 时长)\n"
+            "- helper 报告缺少必要结构事实，或存在矛盾、警告、用户显式核查要求\n"
+            "- 你需要一个很窄的内部结构事实(段落数 / 表格数 / 图片数 / 幻灯片数 / 行数 / 尺寸 / 时长)\n"
             "- 用 read_file 看不到二进制内部,只能拿到 base64;用 inspect_file 能拿到结构元数据\n"
-            "- 验收前最后一步:把 helper 报告说的'4 张图'与 inspect_file 给的 image_count 对照\n"
+            "- 干净 helper 报告已经给出足够结构事实时，不要仅为复验而调用\n"
             "\n"
             "## 何时不用\n"
             "- 文本文件(.c/.h/.py/.md/.txt 等):用 read_file 直接读内容\n"
@@ -1937,7 +1908,7 @@ INSPECT_FILE_TOOL_SCHEMA = {
             "such as empty files, missing paragraphs, missing images, or very small media. Repair, reassign, "
             "or report the verified gap before presenting the artifact as a deliverable.\n"
             "\n"
-            "inspect_file 用于验收结构；warnings 表示产物结构异常，需修复、重派或说明缺口后再交付。"
+            "inspect_file 用于窄范围结构事实；warnings 表示产物结构异常，需修复、重派或说明缺口后再交付。"
         ),
         "parameters": {
             "type": "object",
@@ -2104,6 +2075,7 @@ MAIN_WORKSPACE_TOOL_SCHEMA = {
             "## actions\n"
             "- mkdir: create a workspace subdirectory.\n"
             "- write: write lightweight document/metadata files ending in .md/.json/.txt or named Makefile.\n"
+            "- append: append a short section to a lightweight text file when main-process authorship is still the chosen route.\n"
             "- run: file-management commands such as dir/ls/copy/move/mkdir/type. Use delegate(kind='code') for gcc, python, tests, builds, and computation.\n"
             "- Use delegate file_map/main_available_files/copy_stats for helper outputs; resume or regenerate missing outputs instead of copying or moving files from `.temp/_delegate_*`.\n"
             "\n"
@@ -2116,8 +2088,8 @@ MAIN_WORKSPACE_TOOL_SCHEMA = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["mkdir", "write", "run", "locate"],
-                    "description": "Required action: mkdir, write lightweight docs, run file-management commands, or locate files.\n必填动作字段。",
+                    "enum": ["mkdir", "write", "append", "run", "locate"],
+                    "description": "Required action: mkdir, write/append lightweight docs, run file-management commands, or locate files.\n必填动作字段。",
                 },
                 "path": {
                     "type": "string",
@@ -2152,4 +2124,3 @@ from app.llm.tools.tool_schema_descriptions import apply_english_schema_descript
 
 
 apply_english_schema_descriptions(globals())
-

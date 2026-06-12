@@ -4,49 +4,32 @@ from __future__ import annotations
 import re
 
 
-def _normalize_guard_result(result) -> tuple[bool, str, list, list, dict]:
-    """Normalize legacy and extended guard tuples to the current five-field shape.
+def _normalize_guard_result(result) -> tuple[bool, str]:
+    """Normalize guard output to the only runtime decision: allow/block + reason.
 
-    Guard producers may grow extra metadata fields. The wait loop only needs the
-    stable core fields, so ignore extensions instead of failing delegation.
+    Older callers may still pass split/kind/framework fields. They are ignored
+    here: symbolic checks provide facts to the guard, and only the guard's
+    should_act verdict is executed.
 
-    守卫结果统一裁剪为五字段；扩展字段不应导致 helper 调度失败。
+    守卫运行时只读取是否允许和自由理由；旧结构化字段不参与程序决策。
     """
     if not isinstance(result, tuple):
-        return True, "", [], [], {}
+        return True, ""
     if len(result) >= 5:
-        should_act, veto_reason, split_recs, kind_recs, framework_block = result[:5]
+        should_act, veto_reason = result[:2]
     elif len(result) == 4:
-        should_act, veto_reason, split_recs, kind_recs = result
-        framework_block = {}
+        should_act, veto_reason = result[:2]
     elif len(result) == 3:
-        should_act, veto_reason, split_recs = result
-        kind_recs = []
-        framework_block = {}
+        should_act, veto_reason = result[:2]
     elif len(result) == 2:
         should_act, veto_reason = result
-        split_recs = []
-        kind_recs = []
-        framework_block = {}
     elif len(result) == 1:
         should_act = bool(result[0])
         veto_reason = ""
-        split_recs = []
-        kind_recs = []
-        framework_block = {}
     else:
         should_act = True
         veto_reason = ""
-        split_recs = []
-        kind_recs = []
-        framework_block = {}
-    return (
-        bool(should_act),
-        str(veto_reason or ""),
-        list(split_recs or []) if isinstance(split_recs, list) else [],
-        list(kind_recs or []) if isinstance(kind_recs, list) else [],
-        framework_block if isinstance(framework_block, dict) else {},
-    )
+    return bool(should_act), str(veto_reason or "")
 
 
 def _zero_result_wait_extension_seconds(wait_window_sec: float) -> float:
@@ -56,6 +39,15 @@ def _zero_result_wait_extension_seconds(wait_window_sec: float) -> float:
     except (TypeError, ValueError):
         window = 90.0
     return min(max(window * 2.0, 180.0), 300.0)
+
+
+def _zero_result_final_grace_seconds(wait_window_sec: float) -> float:
+    """Return a bounded final grace period after a zero-result wait extension."""
+    try:
+        window = float(wait_window_sec)
+    except (TypeError, ValueError):
+        window = 90.0
+    return min(max(window, 90.0), 120.0)
 
 
 def _sync_delegate_action_globals() -> None:
@@ -76,15 +68,15 @@ def _sync_delegate_action_globals() -> None:
 
 def _kind_mode_guidance(rec: dict) -> tuple[str, str, str]:
     """Return display text, follow-up mode value, and recovery-plan guidance."""
-    suggested_mode = str(rec.get("suggested_mode") or "").strip().lower()
+    suggested_mode = str(rec.get("observed_helper_mode_name") or rec.get("suggested_mode") or "").strip().lower()
     mode_reason = str(rec.get("mode_reason") or "").strip()
     if suggested_mode in {"easy", "hard"}:
-        display = f", suggested_mode={suggested_mode!r}"
+        display = f", observed_helper_mode_name={suggested_mode!r}"
         if mode_reason:
             display += f", mode_reason={mode_reason}"
         plan = (
-            f"Use mode='{suggested_mode}' for this corrected task unless fresh evidence shows a different "
-            "same-kind resource level is needed."
+            f"Observed compatible mode name: {suggested_mode!r}. Compare it with the active task evidence "
+            "before retrying; mode changes resource discipline, not tool access."
         )
         return display, suggested_mode, plan
     return (
@@ -153,6 +145,12 @@ def _preserve_task_envelope_for_retry(
             if framework_placeholder is not None
             else str(original.get("framework") or "")
         ),
+        "dispatch_reason": str(
+            original.get("dispatch_reason")
+            or original.get("routing_reason")
+            or original.get("delegation_reason")
+            or ""
+        ).strip()[:1200],
         "input_files": _compact_string_list_field(
             original.get("input_files")
             or original.get("source_files")
@@ -189,417 +187,42 @@ async def _build_guard_intervention(
     cancel_helpers: bool,
     helper_specs: list[dict] | None = None,
 ) -> dict | None:
-    """Convert a guard result into a model-visible recovery payload.
+    """Convert a guard allow/block verdict into a model-visible payload.
 
-    Used both before starting hard-paired helpers and during the wait loop. The
-    payload is guidance, not a substitute for the main model's task planning.
+    Symbolic checks and old structured fields are facts for the guard only. The
+    runtime executes exactly one guard decision: should_act=false blocks this
+    delegation, and should_act=true allows it.
 
-    将守卫结果统一转换为恢复协议；hard 竞速批次可在启动前复用，避免先启动再杀。
+    符号化检测只供守卫参考；运行时只执行守卫 allow/block 判决与自由理由。
     """
     _sync_delegate_action_globals()
     _sync_delegate_globals()
 
     if not isinstance(guard_result, tuple):
         return None
-    _should_act, _veto_reason, _split_recs, _kind_recs, _framework_block = _normalize_guard_result(guard_result)
+    _should_act, _guard_reason = _normalize_guard_result(guard_result)
+    if _should_act is not False:
+        return None
 
-    if _should_act is False:
-        _killed = 0
-        if cancel_helpers:
-            try:
-                _killed = await proc_registry().cancel_all_helpers_in_trace(trace_id)
-            except Exception:
-                _killed = 0
-        return {
-            "ok": False,
-            "error": "persona_veto",
-            "reason": _veto_reason,
-            "killed_helpers": _killed,
-            "instruction": (
-                "The role/persona guard rejected this delegation. Choose a response or a smaller task that fits the persona and user request.\n\n"
-                "角色守卫拒绝了这次派发；请改为符合人设和用户请求的回应或更小任务。"
-            ),
-        }
-
-    if isinstance(_framework_block, dict) and _framework_block.get("block"):
+    _killed = 0
+    if cancel_helpers:
         try:
-            _task_ids = [str(x).strip() for x in (_framework_block.get("task_ids") or []) if str(x).strip()]
-            _framework_counter_key = _framework_block_counter_key(trace_id, _task_ids)
-            _trace_blocks = _guard_framework_block_trace_total.get(_framework_counter_key, 0)
-            if _trace_blocks >= 1 or _has_embedded_peer_framework_contract(helper_specs or [], _task_ids):
-                debug.log(
-                    "delegate.guard_framework.intervention_suppressed",
-                    (
-                        f"framework_block ignored before intervention: "
-                        f"counter_key={_framework_counter_key} trace_blocks={_trace_blocks} "
-                        f"task_ids={_task_ids[:8]}"
-                    ),
-                )
-                _framework_block = {}
+            _killed = await proc_registry().cancel_all_helpers_in_trace(trace_id)
         except Exception:
-            pass
-
-    if isinstance(_framework_block, dict) and _framework_block.get("block"):
-        _killed = 0
-        if cancel_helpers:
-            try:
-                _killed = await proc_registry().cancel_all_helpers_in_trace(trace_id)
-            except Exception:
-                _killed = 0
-        _blocked_tids = [
-            str(x).strip()
-            for x in (_framework_block.get("task_ids") or [])
-            if str(x).strip()
-        ]
-        _spec_by_tid = {
-            str(spec.get("task_id") or ""): spec
-            for spec in (helper_specs or [])
-            if isinstance(spec, dict)
-        }
-        _blocked_specs = [
-            _spec_by_tid.get(tid)
-            for tid in _blocked_tids
-            if _spec_by_tid.get(tid)
-        ]
-        _respawn_templates = [
-            _preserve_task_envelope_for_retry(
-                spec,
-                framework_placeholder="<paste the verified compact shared framework contract here>",
-                prompt_prefix=(
-                    "Use the shared framework contract in the `framework` field as the source of truth. "
-                    "Keep this task to its original bounded slice and report conflicts instead of inventing a new framework."
-                ),
-            )
-            for spec in _blocked_specs
-        ]
-        return {
-            "ok": False,
-            "error": "framework_first_required",
-            "reason": _framework_block.get("reason") or _veto_reason,
-            "framework_block": _framework_block,
-            "blocked_task_ids": _blocked_tids,
-            "killed_helpers": _killed,
-            "recovery_plan": [
-                "Spawn a focused framework or benchmark-spec helper first.",
-                "Wait for the shared interface/schema/checks to complete.",
-                "Then respawn the blocked helpers with the same logical task fields and the compact contract in each `framework` field.",
-            ],
-            "next_delegate_shape": {
-                "action": "spawn",
-                "tasks": _respawn_templates[:16],
-                "note": (
-                    "These are the original blocked helper envelopes with only the shared framework placeholder added. "
-                    "Fill the placeholder from verified contract evidence, preserve kind/mode/input_files/expected_outputs, and only narrow the prompt when the original slice is still too broad."
-                ),
-            },
-            "instruction": (
-                "Comparable helpers need a shared framework before fan-out. Build or inspect the common contract first, then respawn the blocked helper envelopes with the same kind, mode, input files, expected outputs, acceptance checks, and a compact `framework` field.\n\n"
-                "同类横向任务先建立共享框架，再保留原 helper 信封并补 framework 字段后重派。"
-            ),
-        }
-
-    _trace_id_split = trace_id
-    _actionable_kinds = []
-    for _rec in (_kind_recs or []):
-        if not isinstance(_rec, dict):
-            continue
-        _cur_kind = str(_rec.get("current_kind") or "").strip().lower()
-        _suggested_kind = str(_rec.get("suggested_kind") or "").strip().lower()
-        if not _suggested_kind or _suggested_kind == _cur_kind:
-            continue
-        # 2026-06-04 P133: 与 split-block 对称, 同 task_id kind-block ≥ 2 次后放行,
-        # 避免反复对抗 LLM 的判断造成循环。LLM + 物理硬约束 (_deterministic_kind_recommendations)
-        # 已经做了至少 2 轮过滤, 仍坚持当前 kind 通常是 LLM 已找到合理路径。
-        _ktid_pre = str(_rec.get("task_id") or "").strip()
-        if _ktid_pre:
-            _kcnt = _guard_kind_block_count.get((_trace_id_split, _ktid_pre), 0)
-            if _kcnt >= 2:
-                debug.log(
-                    "delegate.guard_kind.task_deferred",
-                    f"task '{_ktid_pre}' 已 kind-block {_kcnt} 次, 放行避免循环",
-                )
-                continue
-        _actionable_kinds.append(_rec)
-
-    # Kind mismatch changes the available tool family. Fix it before applying
-    # split guidance so the next plan is built with the right helper capabilities.
-    #
-    # 类型不匹配优先于拆分；先修工具族，再让主进程决定新的任务边界。
-    _kind_mismatch_tids = {str(rec.get("task_id") or "") for rec in _actionable_kinds}
-    _trace_total = _guard_split_block_trace_total.get(_trace_id_split, 0)
-    _actionable_splits = []
-    if _trace_total < _GUARD_SPLIT_TRACE_HARD_CAP:
-        for _rec in (_split_recs or []):
-            _stid = _rec.get("task_id", "")
-            _reason_l = str(_rec.get("reason") or "").lower()
-            _source_read_split = (
-                "source material" in _reason_l
-                or "read helpers" in _reason_l
-                or "source-material" in _reason_l
-            )
-            if str(_stid) in _kind_mismatch_tids and not _source_read_split:
-                debug.log(
-                    "delegate.guard_split.deferred_for_kind",
-                    f"task '{_stid}' also has a kind mismatch; returning kind correction first",
-                )
-                continue
-            if _source_read_split and str(_stid) in _kind_mismatch_tids:
-                debug.log(
-                    "delegate.guard_kind.deferred_for_source_read_split",
-                    f"task '{_stid}' has kind mismatch but broad source-material reading split takes priority",
-                )
-                _actionable_kinds = [
-                    rec for rec in _actionable_kinds
-                    if str(rec.get("task_id") or "") != str(_stid)
-                ]
-            _key = (_trace_id_split, _stid)
-            _cur_count = _guard_split_block_count.get(_key, 0)
-            if _cur_count >= 2:
-                debug.log("delegate.guard_split.task_deferred", f"task '{_stid}' 已 split-block {_cur_count} 次, 放行避免循环")
-                continue
-            _actionable_splits.append(_rec)
-
-    if _actionable_splits:
-        _killed = 0
-        if cancel_helpers:
-            try:
-                _killed = await proc_registry().cancel_all_helpers_in_trace(_trace_id_split)
-            except Exception:
-                _killed = 0
-        for _rec in _actionable_splits:
-            _stid = _rec.get("task_id", "")
-            _key = (_trace_id_split, _stid)
-            _guard_split_block_count[_key] = _guard_split_block_count.get(_key, 0) + 1
-        _guard_split_block_trace_total[_trace_id_split] = (
-            _guard_split_block_trace_total.get(_trace_id_split, 0)
-            + len(_actionable_splits)
-        )
-        _new_trace_total = _guard_split_block_trace_total[_trace_id_split]
-        debug.log(
-            "delegate.guard_split.blocked",
-            f"P19 拆分拦截 {len(_actionable_splits)} 个 task: "
-            f"{[r.get('task_id') for r in _actionable_splits]}, "
-            f"killed {_killed} helpers; trace_total={_new_trace_total}/"
-            f"{_GUARD_SPLIT_TRACE_HARD_CAP}",
-        )
-        _split_instructions = []
-        _split_followup_tasks = []
-
-        def _suggest_kind_for_boundary(name: str) -> str:
-            lower = name.lower()
-            if any(s in lower for s in ("read", "source", "material", "ocr", "transcript", "extract")):
-                return "read"
-            if any(s in lower for s in ("doc", "report", "readme", "summary", "changelog", "notes", "manual")):
-                return "edit"
-            if any(s in lower for s in ("verify", "review", "check", "audit", "test_review")):
-                return "verify"
-            if any(s in lower for s in ("chart", "plot", "figure", "visual")):
-                return "draw"
-            return "code"
-
-        def _suggest_outputs_for_boundary(name: str) -> list[str]:
-            lower = name.lower()
-            if any(s in lower for s in ("read", "source", "material", "ocr", "transcript", "extract")):
-                safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", name).strip("_").lower() or "source_batch"
-                return [f"{safe}_evidence.txt"]
-            if any(s in lower for s in ("doc", "report", "summary", "notes")):
-                return ["_env/docs/report.md"]
-            return []
-
-        def _suggest_prompt_for_boundary(name: str, kind: str) -> str:
-            lower = name.lower()
-            if kind == "edit":
-                return (
-                    "Assemble the documentation/report for this boundary from already available project evidence and helper outputs. "
-                    "Keep this helper focused on document assembly from existing evidence; use code helpers for algorithms and benchmarks. Cite the exact files you used, write the declared document path, "
-                    "and keep unresolved gaps explicit for the main process."
-                )
-            if kind == "read":
-                return (
-                    "Read only this focused source-material batch. Use the concrete files or ranges supplied by the main process, "
-                    "extract evidence needed for the user's goal, save one internal `.txt` evidence file, and report covered files, gaps, "
-                    "quality notes, and line ranges. Keep final report assembly and downstream computation for the appropriate later helper."
-                )
-            if kind == "verify":
-                return (
-                    "Perform a read-only verification pass for this boundary. Inspect the relevant staged _env files, run only safe checks if needed, "
-                    "and report exact failures, missing files, or acceptance evidence without modifying files."
-                )
-            if any(s in lower for s in ("benchmark", "bench", "data", "example")):
-                return (
-                    "Implement or update only the benchmark/example-data boundary. Keep generated data reproducible and small, write the declared files, "
-                    "and run a focused smoke check for this boundary."
-                )
-            if any(s in lower for s in ("test", "pytest", "coverage")):
-                return (
-                    "Implement or update only the pytest/verification-file boundary. Cover normal, boundary, and error cases for the staged implementation, "
-                    "then run the focused pytest command and report the exact result."
-                )
-            return (
-                "Implement only this focused source-code boundary using the staged _env project files. Keep interfaces compatible with sibling work, "
-                "write only declared target files, and run a focused compile/smoke check before reporting."
-            )
-
-        for _rec in _actionable_splits:
-            _stid = _rec.get("task_id", "")
-            _into = _rec.get("split_into", [])
-            _reason = _rec.get("reason", "")
-            _cnt = _guard_split_block_count.get((_trace_id_split, _stid), 1)
-            _split_instructions.append(
-                f"- task_id={_stid!r}, block_count={_cnt}, reason={_reason}, "
-                f"suggested_boundaries={_into}"
-            )
-            for _name in _into[:8]:
-                _name_s = str(_name or "").strip()
-                if not _name_s:
-                    continue
-                _suggested_kind = _suggest_kind_for_boundary(_name_s)
-                _split_followup_tasks.append({
-                    "task_id": _name_s,
-                    "kind": _suggested_kind,
-                    "mode": "easy",
-                    "prompt": _suggest_prompt_for_boundary(_name_s, _suggested_kind),
-                    "expected_outputs": _suggest_outputs_for_boundary(_name_s),
-                })
-        return {
-            "ok": False,
-            "error": "task_too_broad_should_split",
-            "reason": f"The guard found {len(_actionable_splits)} task(s) too broad for one helper.",
-            "split_recommendations": _actionable_splits,
-            "next_delegate_shape": {
-                "action": "spawn",
-                "tasks": _split_followup_tasks[:16],
-                "note": (
-                    "Use these as concrete starting boundaries, then fill missing project-specific file paths from current evidence before calling delegate. "
-                    "Keep mode='easy' until a narrow task fails or clearly needs a hard race."
-                ),
-            },
-            "killed_helpers": _killed,
-            "recovery_plan": [
-                "Read split_recommendations and decide the real dependency order.",
-                "Spawn multiple focused helpers in one delegate call when they are independent.",
-                "Give each helper concrete inputs, target files, expected outputs, and acceptance checks.",
-                "Keep implementation, verification, chart/document assembly, and summary work in matching helper kinds.",
-                "Change the work boundaries rather than rephrasing the same broad task under new names.",
-            ],
-            "instruction": (
-                "Rebuild the helper plan before spawning again.\n\n"
-                + "\n".join(_split_instructions) + "\n\n"
-                "Use one focused helper per independent module, algorithm, experiment, "
-                "document, chart, or verification loop. Preserve real dependencies in the "
-                "spawn order: shared interfaces and evidence first, independent producers "
-                "in parallel, then consumers such as reports or final integration. Give each "
-                "helper concrete inputs, target files, expected outputs, and acceptance checks. "
-                "Use mode='hard' as a stricter same-kind workflow only after the root cause is diagnosed. "
-                "For code/coding it strengthens implementation and debugging; for other kinds it strengthens evidence "
-                "review, staged validation, and reporting without changing tool access. Prefer concrete task ids such as algorithm_core, "
-                "example_data, benchmark_script, pytest_coverage, readme_update, report_assembly, "
-                "and final_verify when the guard boundary names are too generic.\n\n"
-                "任务过宽时重建边界再派发；hard 是同类增强，先修根因再使用。"
-            ),
-        }
-
-    if _actionable_kinds:
-        _trace_id_split = trace_id
-        _spec_by_tid = {
-            str(spec.get("task_id") or ""): spec
-            for spec in (helper_specs or [])
-            if isinstance(spec, dict)
-        }
-        _killed = 0
-        if cancel_helpers:
-            try:
-                _killed = await proc_registry().cancel_all_helpers_in_trace(_trace_id_split)
-            except Exception:
-                _killed = 0
-        for _rec in _actionable_kinds:
-            _ktid = _rec.get("task_id", "")
-            _kkey = (_trace_id_split, _ktid)
-            _guard_kind_block_count[_kkey] = _guard_kind_block_count.get(_kkey, 0) + 1
-        _guard_kind_block_trace_total[_trace_id_split] = (
-            _guard_kind_block_trace_total.get(_trace_id_split, 0)
-            + len(_actionable_kinds)
-        )
-        debug.log(
-            "delegate.guard_kind.blocked",
-            f"P21 kind 类型拦截 {len(_actionable_kinds)} 个: "
-            f"{[(r.get('task_id'), r.get('current_kind'), '→', r.get('suggested_kind')) for r in _actionable_kinds]}; "
-            f"killed {_killed} helpers; trace_total={_guard_kind_block_trace_total[_trace_id_split]}",
-        )
-        _kind_instructions = []
-        _kind_followup_tasks = []
-        _mode_plans = []
-        for _rec in _actionable_kinds:
-            _ktid = _rec.get("task_id", "")
-            _cur = _rec.get("current_kind", "?")
-            _sug = _rec.get("suggested_kind", "?")
-            _reason = _rec.get("reason", "")
-            _original_spec = _spec_by_tid.get(str(_ktid)) or {}
-            _mode_display, _followup_mode, _mode_plan = _kind_mode_guidance(_rec)
-            if _mode_plan not in _mode_plans:
-                _mode_plans.append(_mode_plan)
-            _kind_instructions.append(
-                f"- task_id={_ktid!r}, current_kind={_cur!r}, "
-                f"suggested_kind={_sug!r}{_mode_display}, reason={_reason}"
-            )
-            _followup_mode_value = (
-                _followup_mode
-                if _followup_mode in {"easy", "hard"}
-                else str(_original_spec.get("mode") or "easy").strip().lower() or "easy"
-            )
-            _kind_followup_tasks.append(_preserve_task_envelope_for_retry(
-                _original_spec or {"task_id": _ktid},
-                kind=_sug,
-                mode=_followup_mode_value,
-                prompt_prefix=(
-                    "Reuse the same logical work with the corrected helper kind. "
-                    "Keep original coverage, declared outputs, files, and acceptance checks. "
-                    "If the work mixes tool families, split producer and consumer helpers before respawning."
-                ),
-            ))
-        return {
-            "ok": False,
-            "error": "task_kind_mismatch",
-            "reason": f"The guard found {len(_actionable_kinds)} task(s) whose base kind does not match the requested work.",
-            "kind_recommendations": _actionable_kinds,
-            "next_delegate_shape": {
-                "action": "spawn",
-                "tasks": _kind_followup_tasks[:16],
-                "note": (
-                    "These are same-task retry envelopes with the corrected base kind. "
-                    "Preserve the original prompt, framework, input_files, expected_outputs, and acceptance_checks unless the main model deliberately splits the work."
-                ),
-            },
-            "killed_helpers": _killed,
-            "recovery_plan": [
-                "Re-spawn the same logical work with the recommended base kind.",
-                "Preserve the original user-goal coverage: every deliverable, evidence source, and acceptance check must still be owned by some helper or by the main thread.",
-                *(_mode_plans or ["Preserve the original mode unless root-cause review shows the same kind needs a stricter hard retry; mode changes resource discipline, not tool access."]),
-                "If a task mixes capabilities, split it into producer and consumer helpers instead of forcing one kind.",
-                "Code owns source, scripts, compile/test/debug, benchmarks, and data computation; edit owns document assembly; draw owns charts; verify owns concrete read-only checks; project_map/file_summary/impact_review own read-only project analysis.",
-            ],
-            "instruction": (
-                "Re-spawn the same logical work with the correct base kind. Preserve total coverage.\n\n"
-                + "\n".join(_kind_instructions) + "\n\n"
-                "The base kind selects the tool family: code for source, scripts, commands, "
-                "benchmarks, data computation, and debugging; edit for Office or polished "
-                "document assembly; draw for image/chart production; verify for read-only "
-                "inspection of a concrete artifact or claim; project_map for architecture maps; "
-                "file_summary for selected source/config summaries; impact_review for change-risk review. "
-                "Follow any suggested_mode attached to the recommendation; otherwise keep the original mode unless "
-                "the same narrow task needs a stronger retry. Lightweight framework, outline, and prose-analysis setup usually uses easy mode; hard is for concrete failures, difficult final assembly, or stricter same-kind validation. When one request mixes tool "
-                "families, split it into producer and consumer helpers instead of forcing one "
-                "helper to own everything. Before the next spawn, compare the new task list "
-                "against the user's requested deliverables, evidence, and acceptance checks; "
-                "nothing should disappear just because one helper kind was corrected. Treat "
-                "failed or cancelled helper output as evidence to repair or verify, not as a "
-                "completed fact.\n\n"
-                "类型修正后仍要覆盖全部目标；kind 决定工具族，mode 决定资源强度，失败结果只能作为待验证证据。"
-            ),
-        }
-
-    return None
-
+            _killed = 0
+    return {
+        "ok": False,
+        "error": "guard_blocked",
+        "error_kind": "guard_blocked",
+        "preflight_guard": False,
+        "reason": _guard_reason,
+        "killed_helpers": _killed,
+        "instruction": (
+            "The task-quality guard blocked this delegation. The reason is free-form guard feedback, not a structured program decision. "
+            "Replan only after considering the stated facts; if the main thread believes the delegation is still correct, call delegate again with a clear dispatch_reason explaining why.\n\n"
+            "守卫已拦截本次派发；理由为自由事实说明。主进程可根据事实重规划，或用 dispatch_reason 说明后重新派发。"
+        ),
+    }
 
 async def _dynamic_wait_loop(
     initial_tasks: list[asyncio.Task],
@@ -660,6 +283,7 @@ async def _dynamic_wait_loop(
     import time as _t
     deadline = (_t.monotonic() + wait_window_sec) if wait_window_sec else None
     _deadline_extended = False  # 自适应延长仅一次
+    _zero_result_final_grace_used = False
 
     while pending:
         # ── stuck 感知:有 helper 报告 stuck 时缩短 deadline,不再傻等 ──
@@ -694,6 +318,22 @@ async def _dynamic_wait_loop(
                         f"because helpers are still running",
                     )
                     continue
+                if (
+                    len(results) == 0
+                    and wait_window_sec
+                    and _deadline_extended
+                    and not _zero_result_final_grace_used
+                    and pending
+                ):
+                    _grace = _zero_result_final_grace_seconds(wait_window_sec)
+                    deadline = _t.monotonic() + _grace
+                    _zero_result_final_grace_used = True
+                    debug.log(
+                        "delegate.wait_window.zero_result_final_grace",
+                        f"0 results after the extended wait window; granting {_grace:.0f}s final grace "
+                        f"because {len(pending)} helper task(s) are still pending",
+                    )
+                    continue
                 # wait_window 到了,不等了 — pending 留给调用方处理
                 debug.log(
                     "delegate.wait_window.expired",
@@ -718,21 +358,16 @@ async def _dynamic_wait_loop(
             wakeup.cancel()
             raise
 
-        # 2026-05-10 Patch 83: 守卫否决检测(放在最前 — 优先于 wakeup / helper done 处理)
-        # 注意:不论守卫是否在 done 中,先做"否决检测";然后**从 done 移除 guard_task**
-        # 让后续 helper 处理逻辑跳过它(guard_task 不是 helper task)。
-        # 2026-05-12 P19+P21: guard 现在返回 4-tuple, 同时判断 ① 人设拒绝 ② 任务可拆分性 ③ kind 类型匹配
+        # Guard verdict check. The guard now owns the hard block decision; old
+        # split/kind/framework structured fields are ignored by runtime.
+        #
+        # 守卫只返回 allow/block + 自由理由；符号化事实不在这里直接执行。
         guard_task_local_ref = guard_task  # 备份引用,稍后从 done 移除
         if guard_task is not None and guard_task.done():
             try:
                 _result = guard_task.result()
-                _should_act, _veto_reason, _split_recs, _kind_recs, _framework_block = _normalize_guard_result(_result)
             except Exception as _gerr:
-                _should_act, _veto_reason, _split_recs, _kind_recs = (
-                    True, f"guard_exception: {_gerr}", [], []
-                )
-                _framework_block = {}
-                _result = (_should_act, _veto_reason, _split_recs, _kind_recs, _framework_block)
+                _result = (True, f"guard_exception: {_gerr}")
             _guard_payload = await _build_guard_intervention(
                 _result,
                 trace_id=debug.current_trace_id() or "unknown",
@@ -746,338 +381,8 @@ async def _dynamic_wait_loop(
                         _t.cancel()
                 return _guard_payload
 
-            # The unified guard intervention helper owns all blocking paths.
-            # Keep the legacy code below inert for now so pass-through logging and
-            # historical line references stay stable while behavior is single-path.
-            _should_act = True
-            _framework_block = {}
-            _split_recs = []
-            _kind_recs = []
-            if not _should_act:
-                # 否决:cancel 整棵 trace 的 helper + 返回 persona_veto
-                wakeup.cancel()
-                _trace_id = debug.current_trace_id() or ""
-                try:
-                    _killed = await proc_registry().cancel_all_helpers_in_trace(_trace_id)
-                except Exception as _ke:
-                    _killed = 0
-                    debug.log("delegate.persona_veto.cancel_failed", str(_ke))
-                debug.log(
-                    "delegate.persona_veto",
-                    f"P83 守卫否决: {_veto_reason}; killed {_killed} helpers in trace",
-                )
-                # 等所有 pending 真正退出(避免泄漏)
-                for _t in pending:
-                    if not _t.done():
-                        _t.cancel()
-                # 返回 persona_veto 结果给主线程(handle_delegate caller 负责 json.dumps)
-                return {
-                    "ok": False,
-                    "error": "persona_veto",
-                    "reason": _veto_reason,
-                    "killed_helpers": _killed,
-                    "instruction": (
-                        "The persona guard rejected this delegation. Replan the response within the active persona "
-                        "and the user's request: keep deliverables empty unless a smaller persona-compatible task is useful, "
-                        "avoid re-delegating the rejected task, and let the final reply explain the outcome in persona voice.\n"
-                        f"Guard reason: {_veto_reason}\n\n"
-                        "角色守卫拒绝本次派发；重新规划为符合人设的小任务或最终回复。"
-                    ),
-                }
-
-            # 2026-05-21: 同类对比缺统一框架 → 驳回, 要求先建框架再 fan-out。
-            # 复用 split 的驳回路径(kill helpers + 返回指令), 但语义是"先建框架"而非"拆分"。
-            # 死循环防御: 同 trace block ≥2 次后放行(主线程已按要求建过框架则守卫会看到而不再 block)。
-            if isinstance(_framework_block, dict) and _framework_block.get("block"):
-                _trace_id_fb = debug.current_trace_id() or ""
-                _fb_tids = [str(x).strip() for x in (_framework_block.get("task_ids") or []) if str(x).strip()]
-                _framework_counter_key = _framework_block_counter_key(_trace_id_fb, _fb_tids)
-                _fb_total = _guard_framework_block_trace_total.get(_framework_counter_key, 0)
-                if _fb_total >= _GUARD_FRAMEWORK_TRACE_HARD_CAP:
-                    debug.log(
-                        "delegate.guard_framework.trace_cap_reached",
-                        f"framework batch 已 block {_fb_total} 次, 达 cap "
-                        f"{_GUARD_FRAMEWORK_TRACE_HARD_CAP}, 放行",
-                    )
-                else:
-                    wakeup.cancel()
-                    _fb_reason = _framework_block.get("reason", "")
-                    try:
-                        _killed = await proc_registry().cancel_all_helpers_in_trace(_trace_id_fb)
-                    except Exception:
-                        _killed = 0
-                    _guard_framework_block_trace_total[_framework_counter_key] = _fb_total + 1
-                    debug.log(
-                        "delegate.guard_framework.blocked",
-                        f"同类对比缺统一框架, block {len(_fb_tids)} 个 task: {_fb_tids}; "
-                        f"killed {_killed} helpers; counter_key={_framework_counter_key}; trace_total={_fb_total + 1}/"
-                        f"{_GUARD_FRAMEWORK_TRACE_HARD_CAP}",
-                    )
-                    for _t in pending:
-                        if not _t.done():
-                            _t.cancel()
-                    return {
-                        "ok": False,
-                        "error": "framework_first_required",
-                        "reason": _fb_reason or "Comparable tasks need a unified framework before fan-out.",
-                        "blocked_task_ids": _fb_tids,
-                        "killed_helpers": _killed,
-                        "instruction": (
-                            "This is a comparable multi-slice task. Before broad fan-out, create one compact "
-                            "shared framework contract so every downstream helper uses the same interfaces, "
-                            "measurement definitions, data schema, source/evidence map, validation checks, and "
-                            "merge order. Then respawn bounded slice helpers with that contract in the `framework` "
-                            "field and their own narrow expected outputs. Keep substantive implementation, "
-                            "final values, citations, and long prose in the slice outputs, not in the framework "
-                            "contract itself.\n"
-                            f"Blocked task_ids: {_fb_tids}. Reason: {_fb_reason or 'missing shared framework'}.\n\n"
-                            "同类对比或多分片任务先建统一框架契约，再分片并行。"
-                        ),
-                    }
-
-
-            # 死循环防御 — 双维度:
-            #   单 task_id: 同一 task_id 已被拦 ≥ 2 次 → 跳过(放行)
-            #   全 trace: 整个 trace 已拦 ≥ 4 次 → 全部跳过(防主线程改名无限绕)
-            _trace_id_split = debug.current_trace_id() or ""
-            _trace_total = _guard_split_block_trace_total.get(_trace_id_split, 0)
-            if _trace_total >= _GUARD_SPLIT_TRACE_HARD_CAP:
-                # 全 trace 拦截已达上限, 无论建议什么都放行
-                debug.log(
-                    "delegate.guard_split.trace_cap_reached",
-                    f"trace 已 split-block {_trace_total} 次, 达 hard cap "
-                    f"{_GUARD_SPLIT_TRACE_HARD_CAP}, 全部放行"
-                )
-                _actionable_splits = []
-            else:
-                _actionable_splits = []
-                for _rec in _split_recs:
-                    _stid = _rec.get("task_id", "")
-                    _key = (_trace_id_split, _stid)
-                    _cur_count = _guard_split_block_count.get(_key, 0)
-                    if _cur_count >= 2:
-                        # 同 task_id 已被拦 2 次, 不再拦(防循环)
-                        debug.log(
-                            "delegate.guard_split.task_deferred",
-                            f"task '{_stid}' 已 split-block {_cur_count} 次, 放行避免循环"
-                        )
-                        continue
-                    _actionable_splits.append(_rec)
-
-            if _actionable_splits:
-                # 有可执行的拆分建议 → 拦截 + kill helpers + 返回建议
-                wakeup.cancel()
-                try:
-                    _killed = await proc_registry().cancel_all_helpers_in_trace(_trace_id_split)
-                except Exception as _ke:
-                    _killed = 0
-                # 记录拦截次数(双维度)
-                for _rec in _actionable_splits:
-                    _stid = _rec.get("task_id", "")
-                    _key = (_trace_id_split, _stid)
-                    _guard_split_block_count[_key] = _guard_split_block_count.get(_key, 0) + 1
-                _guard_split_block_trace_total[_trace_id_split] = (
-                    _guard_split_block_trace_total.get(_trace_id_split, 0)
-                    + len(_actionable_splits)
-                )
-                _new_trace_total = _guard_split_block_trace_total[_trace_id_split]
-                debug.log(
-                    "delegate.guard_split.blocked",
-                    f"P19 拆分拦截 {len(_actionable_splits)} 个 task: "
-                    f"{[r.get('task_id') for r in _actionable_splits]}, "
-                    f"killed {_killed} helpers; trace_total={_new_trace_total}/"
-                    f"{_GUARD_SPLIT_TRACE_HARD_CAP}"
-                )
-                for _t in pending:
-                    if not _t.done():
-                        _t.cancel()
-                # 构造给主线程的拆分指令
-                _split_instructions = []
-                _split_followup_tasks = []
-                for _rec in _actionable_splits:
-                    _stid = _rec.get("task_id", "")
-                    _into = _rec.get("split_into", [])
-                    _reason = _rec.get("reason", "")
-                    _cnt = _guard_split_block_count.get((_trace_id_split, _stid), 1)
-                    _split_instructions.append(
-                        f"- task_id={_stid!r}, block_count={_cnt}, reason={_reason}, "
-                        f"suggested_boundaries={_into}"
-                    )
-                    for _name in _into[:8]:
-                        _name_s = str(_name or "").strip()
-                        if not _name_s:
-                            continue
-                        _split_followup_tasks.append({
-                            "task_id": _name_s,
-                            "kind": "same_base_kind_as_original_boundary",
-                            "mode": "easy",
-                            "prompt": (
-                                "Create a focused helper prompt for this boundary using the original task evidence. "
-                                "Include concrete inputs, target files, expected outputs, and verification checks."
-                            ),
-                            "expected_outputs": [],
-                        })
-                return {
-                    "ok": False,
-                    "error": "task_too_broad_should_split",
-                    "reason": (
-                        f"The guard found {len(_actionable_splits)} task(s) too broad for one helper."
-                    ),
-                    "split_recommendations": _actionable_splits,
-                    "next_delegate_shape": {
-                        "action": "spawn",
-                        "tasks": _split_followup_tasks[:16],
-                        "note": (
-                            "Fill each prompt from the current evidence before calling delegate. "
-                            "Keep mode='easy' until a narrow task fails or clearly needs a hard race."
-                        ),
-                    },
-                    "killed_helpers": _killed,
-                    "recovery_plan": [
-                        "Read split_recommendations and decide the real dependency order.",
-                        "Spawn multiple focused helpers in one delegate call when they are independent.",
-                        "Give each helper concrete inputs, target files, expected outputs, and acceptance checks.",
-                        "Keep implementation, verification, chart/document assembly, and summary work in matching helper kinds.",
-                        "Change the work boundaries rather than rephrasing the same broad task under new names.",
-                    ],
-                    "instruction": (
-                        "Rebuild the helper plan before spawning again.\n\n"
-                        + "\n".join(_split_instructions) + "\n\n"
-                        "Use one focused helper per independent module, algorithm, experiment, "
-                        "document, chart, or verification loop. Preserve real dependencies in the "
-                        "spawn order: shared interfaces and evidence first, independent producers "
-                        "in parallel, then consumers such as reports or final integration. Give each "
-                        "helper concrete inputs, target files, expected outputs, and acceptance checks. "
-                        "Use mode='hard' as a stricter same-kind workflow only after the root cause is diagnosed. "
-                        "For code/coding it strengthens implementation and debugging; for other kinds it strengthens evidence "
-                        "review, staged validation, and reporting without changing tool access.\n\n"
-                        "任务过宽时重建边界再派发；hard 是同类增强，先修根因再使用。"
-                    ),
-                }
-
-            # 2026-05-12 P21: kind 类型匹配拦截(无 split 问题时检查)
-            # 2026-06-04 P133: 与 split-block 对称, 同 task_id kind-block ≥ 2 次后放行,
-            # 避免反复对抗 LLM 判断造成循环。LLM + 物理硬约束已经过滤。
-            _actionable_kinds = []
-            for _rec in _kind_recs:
-                if not isinstance(_rec, dict):
-                    continue
-                _cur_kind = str(_rec.get("current_kind") or "").strip().lower()
-                _suggested_kind = str(_rec.get("suggested_kind") or "").strip().lower()
-                if not _suggested_kind or _suggested_kind == _cur_kind:
-                    continue
-                _ktid_pre = str(_rec.get("task_id") or "").strip()
-                if _ktid_pre:
-                    _kcnt = _guard_kind_block_count.get((_trace_id_split, _ktid_pre), 0)
-                    if _kcnt >= 2:
-                        debug.log(
-                            "delegate.guard_kind.task_deferred",
-                            f"task '{_ktid_pre}' 已 kind-block {_kcnt} 次, 放行避免循环",
-                        )
-                        continue
-                _actionable_kinds.append(_rec)
-
-            if _actionable_kinds:
-                # kind 类型错配 → 拦截 + kill helpers + 返回建议
-                wakeup.cancel()
-                try:
-                    _killed = await proc_registry().cancel_all_helpers_in_trace(_trace_id_split)
-                except Exception:
-                    _killed = 0
-                # 计数
-                for _rec in _actionable_kinds:
-                    _ktid = _rec.get("task_id", "")
-                    _kkey = (_trace_id_split, _ktid)
-                    _guard_kind_block_count[_kkey] = _guard_kind_block_count.get(_kkey, 0) + 1
-                _guard_kind_block_trace_total[_trace_id_split] = (
-                    _guard_kind_block_trace_total.get(_trace_id_split, 0)
-                    + len(_actionable_kinds)
-                )
-                debug.log(
-                    "delegate.guard_kind.blocked",
-                    f"P21 kind 类型拦截 {len(_actionable_kinds)} 个: "
-                    f"{[(r.get('task_id'), r.get('current_kind'), '→', r.get('suggested_kind')) for r in _actionable_kinds]}; "
-                    f"killed {_killed} helpers; trace_total={_guard_kind_block_trace_total[_trace_id_split]}"
-                )
-                for _t in pending:
-                    if not _t.done():
-                        _t.cancel()
-                # 构造给主线程的 kind 修正指令
-                _kind_instructions = []
-                _kind_followup_tasks = []
-                _mode_plans = []
-                for _rec in _actionable_kinds:
-                    _ktid = _rec.get("task_id", "")
-                    _cur = _rec.get("current_kind", "?")
-                    _sug = _rec.get("suggested_kind", "?")
-                    _reason = _rec.get("reason", "")
-                    _mode_display, _followup_mode, _mode_plan = _kind_mode_guidance(_rec)
-                    if _mode_plan not in _mode_plans:
-                        _mode_plans.append(_mode_plan)
-                    _kind_instructions.append(
-                        f"- task_id={_ktid!r}, current_kind={_cur!r}, "
-                        f"suggested_kind={_sug!r}{_mode_display}, reason={_reason}"
-                    )
-                    _kind_followup_tasks.append({
-                        "task_id": _ktid,
-                        "kind": _sug,
-                        "mode": _followup_mode,
-                        "resume": False,
-                        "prompt": (
-                            "Reuse the same logical work, but rewrite the prompt so it fits this base kind's tools. "
-                            "If the work mixes capabilities, split producer and consumer helpers instead."
-                        ),
-                    })
-                return {
-                    "ok": False,
-                    "error": "task_kind_mismatch",
-                    "reason": (
-                        f"The guard found {len(_actionable_kinds)} task(s) whose base kind does not match the requested work."
-                    ),
-                    "kind_recommendations": _actionable_kinds,
-                    "next_delegate_shape": {
-                        "action": "spawn",
-                        "tasks": _kind_followup_tasks[:16],
-                        "note": (
-                            "Use these as field corrections, not as complete prompts. "
-                            "Preserve useful evidence and expected_outputs from the original tasks."
-                        ),
-                    },
-                    "killed_helpers": _killed,
-                    "recovery_plan": [
-                        "Re-spawn the same logical work with the recommended base kind.",
-                        "Preserve the original user-goal coverage: every deliverable, evidence source, and acceptance check must still be owned by some helper or by the main thread.",
-                        *(_mode_plans or ["Preserve the original mode unless root-cause review shows the same kind needs a stricter hard retry; mode changes resource discipline, not tool access."]),
-                        "If a task mixes capabilities, split it into producer and consumer helpers instead of forcing one kind.",
-                        "Code owns source, scripts, compile/test/debug, benchmarks, and data computation; edit owns document assembly; draw owns charts; verify owns concrete read-only checks; project_map/file_summary/impact_review own read-only project analysis.",
-                    ],
-                    "instruction": (
-                        "Re-spawn the same logical work with the correct base kind. Preserve total coverage.\n\n"
-                        + "\n".join(_kind_instructions) + "\n\n"
-                        "The base kind selects the tool family: code for source, scripts, commands, "
-                        "benchmarks, data computation, and debugging; edit for Office or polished "
-                        "document assembly; draw for image/chart production; verify for read-only "
-                        "inspection of a concrete artifact or claim; project_map for architecture maps; "
-                        "file_summary for selected source/config summaries; impact_review for change-risk review. "
-                        "Follow any suggested_mode attached to the recommendation; otherwise keep the original mode unless "
-                        "the same narrow task needs a stronger retry. Lightweight framework, outline, and prose-analysis setup usually uses easy mode; hard is for concrete failures, difficult final assembly, or stricter same-kind validation. When one request mixes tool "
-                        "families, split it into producer and consumer helpers instead of forcing one "
-                        "helper to own everything. Before the next spawn, compare the new task list "
-                        "against the user's requested deliverables, evidence, and acceptance checks; "
-                        "nothing should disappear just because one helper kind was corrected. Treat "
-                        "failed or cancelled helper output as evidence to repair or verify, not as a "
-                        "completed fact.\n\n"
-                        "类型修正后仍要覆盖全部目标；kind 决定工具族，mode 决定资源强度，失败结果只能作为待验证证据。"
-                    ),
-                }
-            else:
-                # 守卫通过,清空引用避免重复检查
-                debug.log(
-                    "delegate.persona_guard.passed",
-                    f"P83 守卫通过: {_veto_reason}"
-                    + (f"; 拆分建议 {len(_split_recs)} 个但都已超拦截上限" if _split_recs else "")
-                )
-                guard_task = None  # 不再检查
+            debug.log("delegate.quality_guard.passed", "guard allowed delegation")
+            guard_task = None
         # 不论否决还是通过,从 done 移除 guard_task(它不是 helper task)
         if guard_task_local_ref is not None:
             done.discard(guard_task_local_ref)
@@ -1119,6 +424,22 @@ async def _dynamic_wait_loop(
                     f"because {len(pending)} helper(s) still running",
                 )
                 continue  # 重入 while 循环再等一段
+            if (
+                len(results) == 0
+                and wait_window_sec
+                and _deadline_extended
+                and not _zero_result_final_grace_used
+                and pending
+            ):
+                _grace = _zero_result_final_grace_seconds(wait_window_sec)
+                deadline = _t.monotonic() + _grace
+                _zero_result_final_grace_used = True
+                debug.log(
+                    "delegate.wait_window.zero_result_final_grace",
+                    f"asyncio.wait timeout reached after extension with 0 results; "
+                    f"granting {_grace:.0f}s final grace because {len(pending)} helper(s) still pending",
+                )
+                continue
             debug.log(
                 "delegate.wait_window.timeout",
                 f"asyncio.wait timeout reached at {wait_window_sec}s; "
@@ -1268,7 +589,7 @@ async def _dynamic_wait_loop(
                 break
 
     # 2026-05-10 Patch 55: 不再在 dispatcher 退出时 cancel helper。
-    # 旧 P50 在这里 cancel auto_final/auto_verify,但 dispatcher 退出 ≠ chat
+    # 旧 P50 在这里 cancel 自动 paired/verify helper,但 dispatcher 退出 ≠ chat
     # 回合结束 — 主进程下次 tool call 可能调 wait_helper 等剩下的 helper。
     # 所有 helper 的最终 cancel 移到 orchestrator 的 finally 块(chat 回合彻底结束)。
     return results
@@ -1455,10 +776,17 @@ async def handle_spawn_helper(
             "through delegate. This helper cannot spawn, wait for, resume, or kill other helpers.\n"
             "helper 的创建、资源补齐和恢复由主进程统一调度。"
         ),
+        "dispatch_boundary_facts": (
+            "Only the main process can create helpers, fulfill resources, activate resumes, wait for helpers, or kill helpers. "
+            "Same-batch resource results, preserved helper workspaces, and the blocked helper report are the relevant recovery facts."
+        ),
+        "recovery_facts": {
+            "coordinator": "main_process",
+            "available_shapes": ["reuse_same_batch_resource", "spawn_resource_helper", "resume_same_task_id", "refuse_resource", "terminate_frozen_helper"],
+        },
         "main_thread_action": (
-            "The main process should decide from this helper's report whether to reuse same-batch resources, "
-            "spawn a resource helper, resume the same task_id, refuse the resource and wake the helper, "
-            "or terminate the frozen helper.\n"
+            "The main process decides from this helper's report whether same-batch resources, a new resource helper, "
+            "same-task resume, resource refusal, or termination fits the active task.\n"
             "主进程根据报告决定复用资源、派资源 helper、续作、拒绝或终止。"
         ),
         "suggested_tool": "request_resource",
@@ -1476,9 +804,17 @@ async def handle_wait_helper(args: dict) -> str:
             "decisions are coordinated by the main process.\n"
             "helper 不能等待或激活其它 helper，相关调度由主进程负责。"
         ),
+        "dispatch_boundary_facts": (
+            "Only the main process can inspect global helper state, confirm resources, wait for helpers, activate resumes, or terminate helpers."
+        ),
+        "recovery_facts": {
+            "coordinator": "main_process",
+            "available_shapes": ["inspect_helper_state", "resume_same_task_id", "terminate_helper", "reuse_existing_resource", "spawn_resource_helper"],
+        },
         "main_thread_action": (
-            "The main process should inspect helper state with delegate/process tools, then decide whether to "
-            "resume, terminate, reuse existing resources, or spawn a resource helper.\n"
+            "The main process can inspect helper state with delegate/process tools, then decide whether resume, termination, "
+            "existing resources, or a resource helper fits the active task.\n"
             "主进程检查状态后决定续作、终止、复用资源或派资源 helper。"
         ),
     }, ensure_ascii=False)
+

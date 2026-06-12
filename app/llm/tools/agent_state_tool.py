@@ -9,10 +9,16 @@ from app.core import debug
 def _string_list(value: Any) -> list[str]:
     if value is None:
         return []
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple, set)):
         return [str(x).strip() for x in value if str(x).strip()]
     item = str(value).strip()
     return [item] if item else []
+
+
+def _optional_string_list(args: dict, key: str) -> list[str] | None:
+    if key not in args:
+        return None
+    return _string_list(args.get(key))
 
 
 async def handle_agent_state(args: dict) -> str:
@@ -47,10 +53,10 @@ async def handle_agent_state(args: dict) -> str:
             trace_id=trace_id,
             task_id=task_id,
             goal=goal,
-            acceptance=_string_list(args.get("acceptance")),
-            evidence_required=_string_list(args.get("evidence_required")),
-            deliverables=_string_list(args.get("deliverables")),
-            risks=_string_list(args.get("risks")),
+            acceptance=_optional_string_list(args, "acceptance"),
+            evidence_required=_optional_string_list(args, "evidence_required"),
+            deliverables=_optional_string_list(args, "deliverables"),
+            risks=_optional_string_list(args, "risks"),
             current_stage=current_stage,
         )
         return json.dumps({"ok": True, "contract": record, "status": agent_state.structured_status(trace_id)}, ensure_ascii=False)
@@ -85,6 +91,31 @@ async def handle_agent_state(args: dict) -> str:
             "partial": agent_state.ARTIFACT_INTERMEDIATE,
             "intermediate": agent_state.ARTIFACT_INTERMEDIATE,
         }.get(raw_status, raw_status)
+        # 2026-06-10: successful env_apply_* / helper copyback already register
+        # ready artifacts automatically. A manual re-register of the same path
+        # used to append a duplicate record and dump the full structured status
+        # (~10k chars) into the model context (t4-cross-repo-migration
+        # 20260609_113326). Return a compact already-registered fact instead.
+        norm_path = path.replace("\\", "/").strip().lstrip("./")
+        existing = next(
+            (
+                record for record in (agent_state.structured_status(trace_id).get("artifacts_ready") or [])
+                if isinstance(record, dict)
+                and str(record.get("path") or "").replace("\\", "/").strip().lstrip("./") == norm_path
+            ),
+            None,
+        )
+        if existing is not None and artifact_status == agent_state.ARTIFACT_READY:
+            return json.dumps({
+                "ok": True,
+                "already_registered": True,
+                "artifact": existing,
+                "fact": (
+                    "This path is already recorded as a ready artifact (successful apply/copyback "
+                    "registers automatically). No further registration is needed.\n"
+                    "该路径已自动登记为 ready 产物，无需重复注册。"
+                ),
+            }, ensure_ascii=False)
         record = agent_state.register_artifact(
             trace_id=trace_id,
             path=path,
@@ -95,13 +126,33 @@ async def handle_agent_state(args: dict) -> str:
             evidence_ids=_string_list(args.get("evidence_ids")),
             metadata=args.get("metadata") if isinstance(args.get("metadata"), dict) else None,
         )
-        return json.dumps({"ok": True, "artifact": record, "status": agent_state.structured_status(trace_id)}, ensure_ascii=False)
+        snapshot = agent_state.structured_status(trace_id)
+        return json.dumps({
+            "ok": True,
+            "artifact": record,
+            "status_summary": {
+                "artifacts_ready_paths": [
+                    str(item.get("path") or "")
+                    for item in (snapshot.get("artifacts_ready") or [])
+                    if isinstance(item, dict)
+                ][:16],
+                "contracts": len(snapshot.get("contracts") or []),
+                "blocked_helpers": len(snapshot.get("blocked_helpers") or []),
+            },
+        }, ensure_ascii=False)
 
     if action == "add_resource_task":
         request_id = str(args.get("request_id") or "").strip()
         task_id = str(args.get("resource_task_id") or args.get("task_id") or "").strip()
         if not request_id or not task_id:
-            return json.dumps({"ok": False, "error": "add_resource_task requires request_id and resource_task_id"}, ensure_ascii=False)
+            status = agent_state.structured_status(trace_id)
+            return json.dumps({
+                "ok": False,
+                "error": "add_resource_task requires request_id and resource_task_id",
+                "resource_requests": status.get("resource_requests") or [],
+                "fact": "Use action='status' or the resource_requests list here to choose an existing request_id; resource_task_id is the helper task that produced or will produce the resource.",
+                "status": status,
+            }, ensure_ascii=False)
         record = agent_state.add_resource_task(trace_id, request_id, task_id)
         return json.dumps({"ok": bool(record), "resource_request": record, "status": agent_state.structured_status(trace_id)}, ensure_ascii=False)
 
@@ -109,7 +160,14 @@ async def handle_agent_state(args: dict) -> str:
         request_id = str(args.get("request_id") or "").strip()
         state = str(args.get("status") or "").strip()
         if not request_id or not state:
-            return json.dumps({"ok": False, "error": "update_resource_request requires request_id and status"}, ensure_ascii=False)
+            status_snapshot = agent_state.structured_status(trace_id)
+            return json.dumps({
+                "ok": False,
+                "error": "update_resource_request requires request_id and status",
+                "resource_requests": status_snapshot.get("resource_requests") or [],
+                "fact": "A resource request update needs the request_id from the current resource_requests list and a concrete status such as ready, failed, refused, or waiting.",
+                "status": status_snapshot,
+            }, ensure_ascii=False)
         record = agent_state.update_resource_request(
             trace_id=trace_id,
             request_id=request_id,

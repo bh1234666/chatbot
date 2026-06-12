@@ -304,14 +304,14 @@ def _inspect_wav(abs_path: str) -> dict:
 
 
 def _inspect_warnings(result: dict) -> list[str]:
-    """根据 metadata 生成警告(主线程可读后判断 deliverable 是否真完成)。"""
+    """Generate metadata warnings for the model; delivery decisions stay with the LLM."""
     warnings = []
     md = result.get("metadata") or {}
     file_type = result.get("type", "")
     size = result.get("size_bytes", 0)
 
     if size == 0:
-        warnings.append("⚠️ 文件大小为 0 — 几乎肯定空交付,不要列入 deliverables")
+        warnings.append("File size is 0 bytes. This is factual evidence that the artifact has no stored content.")
     elif size < 100 and file_type in ("docx", "pptx", "xlsx", "pdf"):
         warnings.append(f"⚠️ {file_type} 文件极小(<100 字节),可能损坏")
 
@@ -331,15 +331,16 @@ def _inspect_warnings(result: dict) -> list[str]:
         # 阈值 80 段:短备忘录 / 会议纪要 < 80 段不会触发,论文/长报告 ≥ 100 段必触发。
         if para >= 80 and img == 0:
             warnings.append(
-                f"⚠️ docx {para} 段正文但 0 张图 — 论文/长报告通常应有图表,"
-                f"helper 可能只更新了文字、漏跑了图表脚本/未嵌入 PNG"
+                f"docx has {para} paragraphs and 0 embedded images. For papers or long reports, compare this fact "
+                f"with the user's requested deliverable and any stated chart/figure requirements before deciding whether "
+                f"the document is complete."
             )
         if img > 0:
             hit = md.get("stale_chart_placeholder_hit") or ""
             if hit:
                 warnings.append(
-                    "⚠️ docx 已包含图片但正文仍有阶段性占位说法"
-                    f"({hit}) — 交付前应读正文并把图表状态、章节标题和结论协调一致"
+                    "docx contains embedded images and also contains transitional chart-placeholder wording "
+                    f"({hit}). Read the relevant text before deciding whether the figure status is consistent."
                 )
     elif file_type == "pptx":
         slides = md.get("slide_count", 0)
@@ -349,7 +350,7 @@ def _inspect_warnings(result: dict) -> list[str]:
         # 2026-05-09 Patch 32a: pptx 5+ 页但 0 张图 — 演示文稿没图基本不达标
         elif slides >= 5 and img == 0:
             warnings.append(
-                f"⚠️ pptx {slides} 张幻灯片但 0 张图 — 演示文稿通常应包含图表/图片"
+                f"pptx has {slides} slides and 0 embedded images. Compare this fact with the requested presentation requirements."
             )
     elif file_type == "xlsx":
         rps = md.get("rows_per_sheet", [])

@@ -51,6 +51,48 @@ def test_environment_copyback_allows_declared_new_env_files(tmp_path):
     assert stats["env_skipped_unexpected_new"] == []
 
 
+def test_environment_copyback_does_not_overwrite_sibling_output_with_unowned_env_input(tmp_path):
+    helper_ws = tmp_path / "helper"
+    main_ws = tmp_path / "main"
+    helper_contracts = helper_ws / "_env" / "contracts"
+    helper_service = helper_ws / "_env" / "service"
+    main_contracts = main_ws / "_env" / "contracts"
+    main_service = main_ws / "_env" / "service"
+    helper_contracts.mkdir(parents=True)
+    helper_service.mkdir(parents=True)
+    main_contracts.mkdir(parents=True)
+    main_service.mkdir(parents=True)
+
+    old_contract = "def validate_event(payload):\n    return payload['customer_name']\n"
+    new_contract = "def validate_event(payload):\n    return payload['account_name']\n"
+    old_service = "def render_account(event):\n    return event['customer_name']\n"
+    new_service = "def render_account(event):\n    return event['account_name']\n"
+
+    (helper_contracts / "customer_event.py").write_text(old_contract, encoding="utf-8")
+    (helper_service / "render.py").write_text(new_service, encoding="utf-8")
+    (main_contracts / "customer_event.py").write_text(new_contract, encoding="utf-8")
+    (main_service / "render.py").write_text(old_service, encoding="utf-8")
+    snapshot = {
+        "_env/contracts/customer_event.py": (0.0, len(old_contract.encode("utf-8"))),
+        "_env/service/render.py": (0.0, len(old_service.encode("utf-8"))),
+    }
+
+    copied, stats, _file_map = _copy_results_to_main(
+        str(helper_ws),
+        str(main_ws),
+        "migrate-service",
+        fork_snapshot=snapshot,
+        expected_outputs=["_env/service/render.py"],
+        helper_kind="code",
+    )
+
+    assert "_env/service/render.py" in copied
+    assert "_env/contracts/customer_event.py" not in copied
+    assert (main_contracts / "customer_event.py").read_text(encoding="utf-8") == new_contract
+    assert (main_service / "render.py").read_text(encoding="utf-8") == new_service
+    assert "_env/contracts/customer_event.py" in stats["env_skipped_unowned"]
+
+
 def test_environment_copyback_registers_staged_outputs(tmp_path):
     helper_ws = tmp_path / "helper"
     main_ws = tmp_path / "main"

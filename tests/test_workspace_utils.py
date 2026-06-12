@@ -97,3 +97,11 @@ def test_extract_declared_files_returns_set():
     out = _extract_declared_files("产出文件:`main.py`、`README.md`")
     assert isinstance(out, set)
     assert _extract_declared_files("") == set()
+
+
+def test_extract_declared_files_preserves_project_relative_paths():
+    report = '```json\n{"files": ["_env/src/package/__init__.py", "reports/final.md"]}\n```'
+    assert _extract_declared_files(report) == {
+        "_env/src/package/__init__.py",
+        "reports/final.md",
+    }

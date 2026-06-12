@@ -27,7 +27,9 @@ def test_language_detection_and_directive():
     assert "matplotlib 中文绘图约束" in zh_directive or "Matplotlib Chinese" in zh_directive
     assert "⁰" not in zh_directive
     assert "中英混合" in mixed_directive
-    assert language_directive("en") == ""
+    # 2026-06-10 Round 7: en now gets an explicit English-output directive
+    # (Chinese-default personas were answering English users in Chinese).
+    assert "should be in English" in language_directive("en")
 
 
 def test_precheck_script_exists_with_expected_scope():

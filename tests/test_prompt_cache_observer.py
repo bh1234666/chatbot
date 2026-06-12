@@ -6,6 +6,36 @@ from pathlib import Path
 from app.core.prompt_cache_observer import describe_prompt_cache_input
 
 
+def _tuple_assignment_strings(source: str, name: str) -> tuple[str, ...]:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
+            continue
+        if isinstance(node.value, ast.Tuple):
+            values = []
+            for item in node.value.elts:
+                if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                    values.append(item.value)
+            return tuple(values)
+    raise AssertionError(f"missing tuple assignment {name}")
+
+
+def test_prompt_cache_observer_knows_context_dynamic_tail_headers() -> None:
+    context_src = Path("app/core/context.py").read_text(encoding="utf-8")
+    observer_src = Path("app/core/prompt_cache_observer.py").read_text(encoding="utf-8")
+
+    header_order = _tuple_assignment_strings(context_src, "_HEADER_ORDER")
+    observer_dynamic = {
+        item.strip()
+        for item in _tuple_assignment_strings(observer_src, "dynamic_headers")
+    }
+    dynamic_tail = header_order[header_order.index("## Shared Files") :]
+
+    assert set(dynamic_tail) <= observer_dynamic
+
+
 def test_tendency_block_uses_sorted_json_keys() -> None:
     from app.core.context import _build_tendency_block
 
@@ -114,6 +144,36 @@ def test_environment_project_facts_do_not_change_stable_mode_contract(tmp_path) 
 
     assert shape_a["system_static_hash"] == shape_b["system_static_hash"]
     assert shape_a["messages_hash"] != shape_b["messages_hash"]
+
+
+def test_dynamic_session_info_stays_before_current_request_but_after_history() -> None:
+    from app.core.orchestrator_prompts import _inject_dynamic_session_info
+
+    messages = [
+        {"role": "system", "content": "stable"},
+        {
+            "role": "user",
+            "content": (
+                "## Conversation History\nsame previous context\n\n"
+                "---\n\n"
+                "## Current Time\n10:00\n\n"
+                "---\n\n"
+                "## Current Message To Answer\nA：finish the report"
+            ),
+        },
+    ]
+
+    _inject_dynamic_session_info(
+        messages,
+        lang_directive="Reply in Chinese.",
+        project_context="Project root: F:/chatbot",
+    )
+
+    user_text = messages[-1]["content"]
+    assert len(messages) == 2
+    assert user_text.index("## Conversation History") < user_text.index("## Dynamic Session Information")
+    assert user_text.index("## Dynamic Session Information") < user_text.index("## Current Message To Answer")
+    assert user_text.endswith("A：finish the report")
 
 
 def test_hash_chain_exposes_first_changed_segment() -> None:
@@ -317,9 +377,9 @@ def test_round2_messages_keep_task_context_out_of_system_prefix() -> None:
 
     assert shape_a["system_static_hash"] == shape_b["system_static_hash"]
     assert "source-a.csv" not in joined_system
-    assert "## Previous Analysis" not in joined_system
+    assert "## Entry Routing Snapshot" not in joined_system
     assert "source-a.csv" in joined_user
-    assert "## Previous Analysis" in joined_user
+    assert "## Entry Routing Snapshot" in joined_user
 
 
 def test_round2_real_context_system_prefix_is_task_independent() -> None:
@@ -397,13 +457,12 @@ def test_round2_dynamic_context_precedes_current_request_tail() -> None:
         needs_recall=True,
     )
     user_messages = [m["content"] for m in messages if m.get("role") == "user"]
+    user_text = "\n\n".join(user_messages)
 
-    assert len(user_messages) >= 2
-    assert user_messages[0].startswith("[SYSTEM_MEMORY_INJECTION")
-    assert "## Round 2 Dynamic Context" in user_messages[0]
-    assert "## Current Message To Answer" not in user_messages[0]
-    assert "## Current Message To Answer" in user_messages[-1]
-    assert "分析 A.csv 并输出结论" in user_messages[-1]
+    assert "## Round 2 Dynamic Context" in user_text
+    assert "## Current Message To Answer" in user_text
+    assert user_text.index("## Round 2 Dynamic Context") < user_text.index("## Current Message To Answer")
+    assert "分析 A.csv 并输出结论" in user_text
 
 
 def test_round2_dynamic_context_orders_task_specific_routing_late() -> None:
@@ -442,7 +501,7 @@ def test_round2_dynamic_context_orders_task_specific_routing_late() -> None:
     )
 
     assert dynamic_context.index("## Shared Knowledge Base") < dynamic_context.index("## Current Workspace (.temp) Snapshot")
-    assert dynamic_context.index("## Current Workspace (.temp) Snapshot") < dynamic_context.index("## Previous Analysis")
+    assert dynamic_context.index("## Current Workspace (.temp) Snapshot") < dynamic_context.index("## Entry Routing Snapshot")
 
 
 def test_round1_real_context_system_prefix_is_task_independent() -> None:
@@ -713,6 +772,57 @@ def test_continue_toolchain_use_does_not_change_tool_schema_hash() -> None:
     toolchain_cache.reset_trace(trace_id)
 
 
+def test_tool_schema_retry_guidance_is_trace_scoped_dynamic_overlay() -> None:
+    from app.core import toolchain_cache
+
+    trace_a = "trace_schema_retry_a"
+    trace_b = "trace_schema_retry_b"
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "workspace",
+                "description": "workspace tool " + ("details " * 80),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["run", "write"]},
+                        "path": {"type": "string"},
+                    },
+                    "required": ["action"],
+                },
+            },
+        }
+    ]
+    messages = [{"role": "system", "content": "stable system"}, {"role": "user", "content": "task"}]
+
+    toolchain_cache.reset_trace(trace_a)
+    toolchain_cache.reset_trace(trace_b)
+    before = describe_prompt_cache_input(
+        messages=messages,
+        tools=toolchain_cache.filter_tools_for_trace(tools, trace_a),
+    )
+    toolchain_cache.mark_tool_schema_retry("workspace", "missing action", trace_a)
+
+    guidance_a = toolchain_cache.tool_schema_retry_guidance(tools, trace_a)
+    guidance_b = toolchain_cache.tool_schema_retry_guidance(tools, trace_b)
+    after = describe_prompt_cache_input(
+        messages=messages,
+        tools=toolchain_cache.filter_tools_for_trace(tools, trace_a),
+    )
+
+    assert "Tool Schema Retry Facts" in guidance_a
+    assert '"workspace"' in guidance_a
+    assert guidance_b == ""
+    assert after["tool_schema_hash"] == before["tool_schema_hash"]
+    assert after["tool_schema_bytes"] == before["tool_schema_bytes"]
+
+    toolchain_cache.clear_tool_schema_retry("workspace", trace_a, reason="test cleanup")
+    assert toolchain_cache.tool_schema_retry_guidance(tools, trace_a) == ""
+    toolchain_cache.reset_trace(trace_a)
+    toolchain_cache.reset_trace(trace_b)
+
+
 def test_round2_runtime_tool_schema_is_task_signal_independent() -> None:
     from app.core.prompt_cache_observer import describe_prompt_cache_input
     from app.llm.tools.registry import tools_for_runtime_mode
@@ -763,6 +873,23 @@ def test_round2_dynamic_task_guidance_does_not_change_system_prefix() -> None:
     assert shape_a["messages_hash"] != shape_b["messages_hash"]
     assert "Active Task Contract Anchor" in messages_a[-1]["content"]
     assert "Mandatory Fresh OCR" in messages_b[-1]["content"]
+
+
+def test_round2_dynamic_task_guidance_reuses_single_container() -> None:
+    from app.core.orchestrator import _append_round2_dynamic_user_tail
+
+    messages = [
+        {"role": "system", "content": "stable round2 system"},
+        {"role": "user", "content": "base task"},
+    ]
+
+    _append_round2_dynamic_user_tail(messages, "## Active Task Contract Anchor\nAnalyze project A.")
+    _append_round2_dynamic_user_tail(messages, "## Current Coding Task Contract\nUse helper evidence.")
+
+    content = messages[-1]["content"]
+    assert content.count("## Round 2 Dynamic Task Guidance") == 1
+    assert "## Active Task Contract Anchor" in content
+    assert "## Current Coding Task Contract" in content
 
 
 def test_prior_tier_guidance_does_not_change_round2_system_prefix(tmp_path: Path) -> None:
@@ -906,6 +1033,138 @@ def test_tool_loop_dynamic_guidance_merges_consecutive_guidance_messages() -> No
     assert "[SYSTEM_HINT/second]" in messages[-1]["content"]
 
 
+def test_tool_loop_dynamic_guidance_dedupes_same_pending_tag() -> None:
+    from app.llm.client_tools_loop import _append_tool_loop_dynamic_guidance
+
+    messages = [
+        {"role": "system", "content": "stable tool loop system"},
+        {"role": "user", "content": "task A"},
+    ]
+
+    _append_tool_loop_dynamic_guidance(messages, "[SYSTEM_HINT/retry] first fact")
+    _append_tool_loop_dynamic_guidance(messages, "[SYSTEM_HINT/retry] repeated fact")
+
+    text = messages[-1]["content"]
+    assert text.count("[SYSTEM_HINT/retry]") == 1
+    assert "first fact" in text
+    assert "repeated fact" not in text
+
+
+def test_tool_loop_dynamic_guidance_dedupes_same_tag_across_context() -> None:
+    from app.llm.client_tools_loop import _append_tool_loop_dynamic_guidance
+
+    messages = [
+        {"role": "system", "content": "stable tool loop system"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": (
+                '{"ok": true}\n\n## Tool Loop Dynamic Guidance\n'
+                "[SYSTEM_HINT/across_context] old pending fact"
+            ),
+        },
+        {"role": "assistant", "content": "thinking"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    before = len(messages)
+    _append_tool_loop_dynamic_guidance(messages, "[SYSTEM_HINT/across_context] new duplicate fact")
+
+    assert len(messages) == before
+    joined = "\n".join(str(m.get("content") or "") for m in messages)
+    assert joined.count("[SYSTEM_HINT/across_context]") == 1
+    assert "new duplicate fact" not in joined
+
+
+def test_tool_loop_dynamic_guidance_shortens_large_payload() -> None:
+    from app.llm.client_tools_loop import _append_tool_loop_dynamic_guidance
+
+    messages = [
+        {"role": "system", "content": "stable tool loop system"},
+        {"role": "user", "content": "task A"},
+    ]
+    payload = "[SYSTEM_HINT/large]\n" + ("a" * 30_000)
+
+    _append_tool_loop_dynamic_guidance(messages, payload)
+
+    text = messages[-1]["content"]
+    assert len(text) < 13_000
+    assert "dynamic guidance payload shortened" in text
+    assert "[SYSTEM_HINT/large]" in text
+
+
+def test_transient_tool_loop_guidance_clears_after_model_response() -> None:
+    from app.llm.client_tools_loop import (
+        _append_tool_loop_dynamic_guidance,
+        _clear_transient_tool_loop_guidance,
+    )
+
+    messages = [
+        {"role": "system", "content": "stable tool loop system"},
+        {"role": "user", "content": "task A"},
+    ]
+
+    _append_tool_loop_dynamic_guidance(messages, "[SYSTEM_HINT/auto_retry] retry task A")
+
+    assert _clear_transient_tool_loop_guidance(messages, reason="test") == 1
+    assert [m["role"] for m in messages] == ["system", "user"]
+    assert "SYSTEM_HINT" not in "\n".join(str(m.get("content") or "") for m in messages)
+
+
+def test_transient_tool_loop_guidance_retained_until_action_taken() -> None:
+    from app.llm.client_tools_loop import (
+        _append_tool_loop_dynamic_guidance,
+        _clear_transient_tool_loop_guidance,
+    )
+
+    messages = [
+        {"role": "system", "content": "stable tool loop system"},
+        {"role": "user", "content": "task A"},
+    ]
+
+    _append_tool_loop_dynamic_guidance(messages, "[SYSTEM_HINT/needs_action] retry task A")
+
+    assert _clear_transient_tool_loop_guidance(messages, reason="test", action_taken=False) == 0
+    assert "SYSTEM_HINT/needs_action" in messages[-1]["content"]
+
+    assert _clear_transient_tool_loop_guidance(messages, reason="test", action_taken=True) == 1
+    assert "SYSTEM_HINT" not in "\n".join(str(m.get("content") or "") for m in messages)
+
+
+def test_transient_tool_loop_guidance_clears_from_tool_result_without_breaking_pairing() -> None:
+    from app.llm.client_tools_loop import (
+        _append_tool_loop_dynamic_guidance,
+        _clear_transient_tool_loop_guidance,
+    )
+
+    messages = [
+        {"role": "system", "content": "stable tool loop system"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_1", "content": '{"ok": true}'},
+    ]
+
+    _append_tool_loop_dynamic_guidance(messages, "[SYSTEM_HINT/auto_retry] retry task A")
+
+    assert _clear_transient_tool_loop_guidance(messages, reason="test") == 1
+    assert messages[-1]["role"] == "tool"
+    assert messages[-1]["tool_call_id"] == "call_1"
+    assert messages[-1]["content"] == '{"ok": true}'
+
+
+def test_transient_schema_retry_facts_clear_as_one_shot_guidance() -> None:
+    from app.llm.client_tools_loop import _clear_transient_tool_loop_guidance
+
+    messages = [
+        {"role": "system", "content": "stable tool loop system"},
+        {"role": "user", "content": "task A"},
+        {"role": "user", "content": "## Tool Schema Retry Facts\nfull schema payload"},
+    ]
+
+    assert _clear_transient_tool_loop_guidance(messages, reason="test") == 1
+    assert [m["content"] for m in messages] == ["stable tool loop system", "task A"]
+
+
 def test_high_frequency_auxiliary_prompts_keep_stable_system_prefix() -> None:
     from app.api.chat import _auto_continue_user_payload
     from app.core.guard_prompts import AUTO_CONTINUE_JUDGE_SYSTEM
@@ -1000,7 +1259,7 @@ def test_task_quality_guard_dynamic_facts_do_not_change_system_prefix() -> None:
     system_a = aux_prompts.build_task_quality_guard_system(
         persona="persona A",
         env_helper_kind_line="env A",
-        suggested_kind_line="kind A",
+        helper_kind_scope_facts="kind A",
         project_kind_principle="project A",
         existing_block_counts={"a": 1},
         existing_kind_block_counts={"a": 2},
@@ -1008,7 +1267,7 @@ def test_task_quality_guard_dynamic_facts_do_not_change_system_prefix() -> None:
     system_b = aux_prompts.build_task_quality_guard_system(
         persona="persona B",
         env_helper_kind_line="env B",
-        suggested_kind_line="kind B",
+        helper_kind_scope_facts="kind B",
         project_kind_principle="project B",
         existing_block_counts={"b": 3},
         existing_kind_block_counts={"b": 4},
@@ -1020,7 +1279,7 @@ def test_task_quality_guard_dynamic_facts_do_not_change_system_prefix() -> None:
         runtime_facts=aux_prompts.build_task_quality_guard_runtime_facts(
             persona="persona A",
             env_helper_kind_line="env A",
-            suggested_kind_line="kind A",
+            helper_kind_scope_facts="kind A",
             project_kind_principle="project A",
             existing_block_counts={"a": 1},
             existing_kind_block_counts={"a": 2},
@@ -1033,7 +1292,7 @@ def test_task_quality_guard_dynamic_facts_do_not_change_system_prefix() -> None:
         runtime_facts=aux_prompts.build_task_quality_guard_runtime_facts(
             persona="persona B",
             env_helper_kind_line="env B",
-            suggested_kind_line="kind B",
+            helper_kind_scope_facts="kind B",
             project_kind_principle="project B",
             existing_block_counts={"b": 3},
             existing_kind_block_counts={"b": 4},
@@ -1078,10 +1337,11 @@ def test_round3_plan_and_evidence_do_not_change_system_prefix() -> None:
                 "user_name": "Alice",
                 "content": "A recent chat fact",
                 "addressed_bot": True,
-            }
-        ],
-        helper_reports_excerpt=[{"task_id": "read_a", "excerpt": "A evidence"}],
-    )
+                }
+            ],
+            helper_reports_excerpt=[{"task_id": "read_a", "excerpt": "A evidence"}],
+            light=False,
+        )
     messages_b = context.round3_messages(
         persona,
         ResponsePlan(
@@ -1104,10 +1364,11 @@ def test_round3_plan_and_evidence_do_not_change_system_prefix() -> None:
                 "user_name": "Bob",
                 "content": "B recent chat fact",
                 "addressed_bot": False,
-            }
-        ],
-        helper_reports_excerpt=[{"task_id": "read_b", "excerpt": "B evidence"}],
-    )
+                }
+            ],
+            helper_reports_excerpt=[{"task_id": "read_b", "excerpt": "B evidence"}],
+            light=False,
+        )
 
     shape_a = describe_prompt_cache_input(messages=messages_a)
     shape_b = describe_prompt_cache_input(messages=messages_b)
@@ -1601,6 +1862,34 @@ def test_helper_auxiliary_context_stays_before_latest_task_tail() -> None:
     assert task_tail.startswith("Build benchmark.c using framework.h and report results.")
 
 
+def test_helper_task_contract_snapshot_stays_after_latest_task_tail() -> None:
+    from app.llm.tools.delegate_runner import _build_helper_user_prompt
+
+    prompt = _build_helper_user_prompt(
+        prompt="Write the final DOCX from the verified outline.",
+        dynamic_prompt_prefix_parts=["## Workspace Listing\n- outline.md\n- evidence.json"],
+        task_contract_context=(
+            '{\n'
+            '  "task_id": "writer",\n'
+            '  "expected_outputs": ["final.docx"],\n'
+            '  "acceptance_checks": ["docx opens and follows outline"]\n'
+            '}'
+        ),
+        kind="edit",
+    )
+
+    before_task, after_task = prompt.split("\n\n---\n\n## Task\n", 1)
+    task_block, contract_block = after_task.split("\n\n---\n\n## Helper Task Contract Snapshot\n", 1)
+
+    assert "## Dynamic Helper Context" in before_task
+    assert "outline.md" in before_task
+    assert "final.docx" in contract_block
+    assert "docx opens and follows outline" in contract_block
+    assert "Write the final DOCX from the verified outline." not in before_task
+    assert "Write the final DOCX from the verified outline." in task_block
+    assert task_block.startswith("Write the final DOCX from the verified outline.")
+
+
 def test_core_long_workflow_prefix_shape_is_stable_across_dynamic_tasks() -> None:
     from app.core import context as ctx_build
     from app.llm.tools.delegate import _select_helper_system
@@ -1702,6 +1991,76 @@ def test_core_long_workflow_prefix_shape_is_stable_across_dynamic_tasks() -> Non
         assert shape_a["hash_chain"][0]["hash"] == shape_b["hash_chain"][0]["hash"], label
         assert shape_a["hash_chain"][1]["hash"] == shape_b["hash_chain"][1]["hash"], label
         assert shape_a["messages_hash"] != shape_b["messages_hash"], label
+
+
+def test_serialized_prompt_shape_keeps_task_facts_after_large_shared_prefix() -> None:
+    """Local structure diagnostic only; provider cache hit rate must come from logs."""
+    from app.core import context as ctx_build
+    from app.core.prompt_cache_observer import compare_prompt_cache_prefix, describe_prompt_cache_input
+    from app.llm.tools.registry import tools_for_runtime_mode
+
+    tools = tools_for_runtime_mode("environment")
+    shared_history = [
+        "User asked for a cache audit.",
+        "Assistant inspected prompt layering.",
+        "Main process kept current task facts in the dynamic tail.",
+    ]
+    large_shared_context = [
+        {
+            "id": f"kb{i}",
+            "headline": f"cache and prompt layering note {i}: stable policy stays before dynamic task facts",
+        }
+        for i in range(80)
+    ]
+    large_workspace = [f"src/module_{i:03d}.py" for i in range(500)]
+
+    def build(current_message: str) -> list[dict]:
+        base = ctx_build.build_base_context(
+            user_name="A",
+            current_message=current_message,
+            hot_user=[],
+            hot_group=[],
+            warm_user_index=[
+                {
+                    "id": f"w{i}",
+                    "headline": text,
+                    "timestamp": f"2026-06-01T00:0{i}:00",
+                    "tendencies": {},
+                }
+                for i, text in enumerate(shared_history)
+            ],
+            warm_group_index=[],
+            cold_user_topk=[],
+            cold_group_topk=[],
+            kb_topk=large_shared_context,
+            file_index=[],
+        )
+        return ctx_build.round2_messages(
+            base,
+            {"complexity": "hard", "needs_tools": True, "needs_recall": True, "rationale": "shared cache audit"},
+            workspace_listing=large_workspace,
+            needs_tools=True,
+            needs_recall=True,
+        )
+
+    messages_a = build("Continue the cache audit and focus on Round3 dynamic facts.")
+    messages_b = build("Continue the cache audit and focus on helper prompt cache reuse.")
+
+    shape_a = describe_prompt_cache_input(messages=messages_a, tools=tools)
+    shape_b = describe_prompt_cache_input(messages=messages_b, tools=tools)
+    comparison = compare_prompt_cache_prefix(
+        left_messages=messages_a,
+        right_messages=messages_b,
+        left_tools=tools,
+        right_tools=tools,
+    )
+
+    assert shape_a["system_static_hash"] == shape_b["system_static_hash"]
+    assert shape_a["tool_schema_hash"] == shape_b["tool_schema_hash"]
+    assert "Round3 dynamic facts" not in messages_a[0]["content"]
+    assert "helper prompt cache reuse" not in messages_b[0]["content"]
+    assert comparison["common_prefix_ratio"] >= 0.99
+    assert comparison["common_prefix_percent"] > 99.0
 
 
 def test_direct_nonstream_llm_calls_log_shape_and_usage() -> None:

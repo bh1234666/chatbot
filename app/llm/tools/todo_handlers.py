@@ -8,6 +8,10 @@ import os
 import time
 
 
+_TODO_CONTENT_SOFT_LIMIT = 240
+_TODO_CONTENT_HARD_HINT_LIMIT = 800
+
+
 async def handle_todo_write(ws_dir: str, todos: list) -> dict:
     """管理任务 todo list。
 
@@ -44,6 +48,7 @@ async def handle_todo_write(ws_dir: str, todos: list) -> dict:
     seen_ids = set()
     in_progress_count = 0
     demoted_in_progress: list[dict] = []
+    long_content_items: list[dict] = []
     for i, t in enumerate(todos):
         if not isinstance(t, dict):
             return {"ok": False, "error": f"todos[{i}] must be an object"}
@@ -57,6 +62,12 @@ async def handle_todo_write(ws_dir: str, todos: list) -> dict:
         seen_ids.add(tid)
         if not content:
             return {"ok": False, "error": f"todos[{i}] (id={tid}): content is required"}
+        if len(content) > _TODO_CONTENT_SOFT_LIMIT:
+            long_content_items.append({
+                "id": tid,
+                "chars": len(content),
+                "preview": content[:120],
+            })
         if status not in ("pending", "in_progress", "completed"):
             return {
                 "ok": False,
@@ -123,6 +134,26 @@ async def handle_todo_write(ws_dir: str, todos: list) -> dict:
             "todo 状态已规范化；只保留一个 in_progress。"
         )
         result["demoted_in_progress"] = demoted_in_progress
+    if long_content_items:
+        max_chars = max(int(item["chars"]) for item in long_content_items)
+        result["content_length_warning"] = {
+            "issue": "todo_content_long_for_planning_state",
+            "long_items": long_content_items[:5],
+            "max_content_chars": max_chars,
+            "fact": (
+                "todo_write stores checklist state. Long prose, scripts, document bodies, tables, patches, "
+                "or final answers are artifact content and are usually better carried by workspace, office, "
+                "or edit tools. The submitted todos were still recorded."
+            ),
+            "中文概要": "todo_write 已记录本次清单；长正文、脚本或文档内容通常应放入 workspace/office/edit 等产物工具。",
+        }
+        if max_chars >= _TODO_CONTENT_HARD_HINT_LIMIT:
+            result["next_action_facts"] = [
+                "A todo item exceeded 800 characters.",
+                "The task can continue from the recorded checklist.",
+                "For a DOCX body, office(action='write'/'append', ...) can create document blocks directly.",
+                "For scripts or long text artifacts, workspace/edit tools can create files.",
+            ]
 
     # 2026-05-10 Patch 78: 过度 todo_write 检测
     # 病因(trace bb69a01654554ad0):mergesort helper 单任务跑了 5 min,177 次 todo_write,
@@ -153,23 +184,40 @@ async def handle_todo_write(ws_dir: str, todos: list) -> dict:
         # 阈值:≥10 次提示;≥30 次强警告(明显过度)
         result["todo_write_count"] = _cnt
         if _cnt >= 30:
-            result["throttle_warning"] = (
+            result["throttle_warning"] = {
+                "issue": "frequent_todo_write_calls",
+                "count": _cnt,
+                "fact": (
+                    f"todo_write has been called {_cnt} times in this task. It records planning state; "
+                    "it does not execute work, verify artifacts, or deliver files. Frequent updates can consume "
+                    "LLM/tool iterations without changing workspace artifacts."
+                ),
+                "state_change_guidance": (
+                    "A todo update is most useful when a task becomes complete, blocked, or enters a new stage."
+                ),
+                "中文概要": "todo_write 只是计划状态记录；频繁更新会消耗轮次，但不会执行、验证或交付产物。",
+            }
+            result["next_action_facts"] = [
+                "The current todo list has been recorded.",
+                "No workspace artifact is created by todo_write itself.",
+                "Execution, verification, delivery, or resource requests require the relevant tool calls.",
+            ]
+            result["legacy_throttle_warning"] = (
                 f"todo_write has been called {_cnt} times in this task. "
                 "Treat it as state tracking, not a thinking tool. "
-                "Next, run a tool that advances the task, verify completed work, or deliver if acceptance is satisfied. "
                 "Update todos again only when a task becomes complete, blocked, or enters a new stage.\n\n"
-                "todo_write 调用过多；下一步应执行、验证或交付，只在状态变化时更新。"
-            )
-            result["next_action_instruction"] = (
-                "Call a tool that advances the task directly; if the artifact is ready, verify it and deliver.\n\n"
-                "直接推进任务；产物已完成则验证并交付。"
+                "todo_write 调用过多；只在状态变化时更新。"
             )
         elif _cnt >= 10:
-            result["throttle_hint"] = (
-                f"todo_write has been called {_cnt} times in this task. "
-                "Use it at task start, major stage changes, and task end; avoid updating before every step.\n\n"
-                "todo_write 是状态记录；按阶段更新，避免每步都调。"
-            )
+            result["throttle_hint"] = {
+                "issue": "repeated_todo_write_calls",
+                "count": _cnt,
+                "fact": (
+                    f"todo_write has been called {_cnt} times in this task. It stores planning state; "
+                    "workspace artifacts change only through execution/editing/delivery tools."
+                ),
+                "中文概要": "todo_write 是状态记录；工作区产物只会通过执行、编辑或交付类工具改变。",
+            }
     except Exception:
         pass  # throttle 检测失败不阻塞 todo_write
     if newly_completed:

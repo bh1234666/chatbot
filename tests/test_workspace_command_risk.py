@@ -144,6 +144,77 @@ def test_analyze_command_allows_null_device_redirects(tmp_path):
     assert decision.category == "outside_redirect"
 
 
+def test_analyze_command_blocks_helper_unix_copy_to_project_path(tmp_path):
+    from app.llm.tools.command_risk import analyze_command
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_env_tests"
+    (helper_ws / "_env").mkdir(parents=True)
+
+    decision = analyze_command(
+        "cp _env/app.js /f/chatbot/stress_tools/runs/current/state/workspace/project/app.js 2>/dev/null",
+        str(helper_ws),
+        is_main_thread=False,
+    )
+
+    assert not decision.allowed
+    assert decision.category == "helper_scope"
+    assert "staged local `_env/...` copy" in decision.reason
+
+
+def test_analyze_command_blocks_helper_python_access_to_project_path(tmp_path):
+    from app.llm.tools.command_risk import analyze_command
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_env_tests"
+    (helper_ws / "_env").mkdir(parents=True)
+
+    for command in (
+        "python -c \"p='F:/chatbot/project/app.js'; print(open(p).readline())\"",
+        "python -c \"p='F:/chatbot/project/app.js'; open(p, 'w').write('x')\"",
+    ):
+        decision = analyze_command(command, str(helper_ws), is_main_thread=False)
+        assert not decision.allowed, command
+        assert decision.category == "helper_scope"
+
+
+def test_analyze_command_allows_helper_url_arguments(tmp_path):
+    from app.llm.tools.command_risk import analyze_command
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_env_tests"
+    helper_ws.mkdir(parents=True)
+
+    commands = (
+        "curl -s http://127.0.0.1:61422/app.js 2>/dev/null | head -3",
+        "cd _env && curl -s http://127.0.0.1:9123/health",
+    )
+
+    for command in commands:
+        decision = analyze_command(command, str(helper_ws), is_main_thread=False)
+        assert decision.allowed, command
+
+
+def test_analyze_command_allows_helper_unix_copy_inside_workspace(tmp_path):
+    from app.llm.tools.command_risk import analyze_command
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_env_tests"
+    (helper_ws / "_env").mkdir(parents=True)
+
+    decision = analyze_command(
+        "cp _env/app.js _env/app.fixed.js 2>/dev/null",
+        str(helper_ws),
+        is_main_thread=False,
+    )
+
+    assert decision.allowed
+
+
+def test_analyze_command_allows_unix_null_device_redirect_on_destructive_ops(tmp_path):
+    from app.llm.tools.command_risk import analyze_command
+
+    decision = analyze_command("cp _env/app.js _env/app.fixed.js 2>/dev/null", str(tmp_path))
+
+    assert decision.allowed
+
+
 
 
 def test_analyze_command_blocks_helper_parent_read_access(tmp_path):
@@ -239,3 +310,89 @@ def test_analyze_command_blocks_gcc_risky_plugin_inputs(tmp_path):
         decision = analyze_command(command, str(tmp_path))
         assert not decision.allowed
         assert decision.category in {"gcc_blocked_flag", "gcc_at_file"}
+
+
+def test_analyze_command_blocks_main_environment_python_write_to_staged_project_copy(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools.command_risk import analyze_command
+
+    (tmp_path / "_env").mkdir()
+    command = "python -c \"open('_env/app.js','w').write('fixed')\""
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        decision = analyze_command(command, str(tmp_path), is_main_thread=True)
+
+    assert not decision.allowed
+    assert decision.category == "main_thread_env_project_edit_should_delegate"
+    assert "Fact:" in decision.reason
+    assert "_env/..." in decision.reason
+
+
+def test_analyze_command_blocks_main_environment_redirect_to_staged_project_copy(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools.command_risk import analyze_command
+
+    (tmp_path / "_env").mkdir()
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        decision = analyze_command("cmd /c echo fixed > _env/app.js", str(tmp_path), is_main_thread=True)
+
+    assert not decision.allowed
+    assert decision.category == "main_thread_env_project_edit_should_delegate"
+
+
+def test_analyze_command_allows_main_environment_read_and_validation_against_staged_copy(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools.command_risk import analyze_command
+
+    (tmp_path / "_env").mkdir()
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        assert analyze_command("python -c \"print(open('_env/app.js').read())\"", str(tmp_path), is_main_thread=True).allowed
+        assert analyze_command("cmd /c type _env\\app.js", str(tmp_path), is_main_thread=True).allowed
+        assert analyze_command("cd _env && npm test", str(tmp_path), is_main_thread=True).allowed
+
+
+def test_analyze_command_allows_helper_environment_write_to_local_staged_output(tmp_path):
+    from app.core.runtime_mode import EnvironmentContext, runtime_context
+    from app.llm.tools.command_risk import analyze_command
+
+    helper_ws = tmp_path / ".temp" / "_delegate_user_env_tests"
+    (helper_ws / "_env").mkdir(parents=True)
+    env = EnvironmentContext(
+        root_dir=str(tmp_path),
+        archive_id="arch",
+        group_id="group",
+        user_id="user",
+        project_key="project",
+    )
+
+    with runtime_context("environment", env):
+        decision = analyze_command(
+            "python -c \"open('_env/app.js','w').write('fixed')\"",
+            str(helper_ws),
+            is_main_thread=False,
+        )
+
+    assert decision.allowed
