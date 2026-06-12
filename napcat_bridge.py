@@ -911,12 +911,13 @@ async def _send_generated_files(
                 if await _napcat_ok(resp):
                     log.info("file uploaded: group=%s name=%s path=%s", group_id, fname, local_path)
                 else:
-                    log.warning("file upload failed: %s status=%d body=%s -- falling back to link", fname, resp.status_code, resp.text[:300])
-                    # 回退：发送下载链接文本
-                    await _send_file_link_fallback(client, group_id, fname, file_url)
+                    log.warning("file upload failed: %s status=%d body=%s -- retrying via download+reupload", fname, resp.status_code, resp.text[:300])
+                    if not await _download_and_reupload(client, group_id, fname, file_url):
+                        await _send_file_link_fallback(client, group_id, fname, file_url)
             else:
-                # 无本地路径：发送下载链接文本
-                await _send_file_link_fallback(client, group_id, fname, file_url)
+                # 无本地路径：先尝试下载后上传，再回退到链接
+                if not await _download_and_reupload(client, group_id, fname, file_url):
+                    await _send_file_link_fallback(client, group_id, fname, file_url)
         except Exception as e:
             log.error("file send failed: %s error=%s", fname, e)
             try:
@@ -958,6 +959,56 @@ async def _convert_to_amr(wav_path: str) -> str | None:
     except Exception as e:
         log.warning("WAV→AMR conversion error: %s", e)
         return None
+
+
+async def _download_and_reupload(
+    client: httpx.AsyncClient,
+    group_id: str,
+    fname: str,
+    file_url: str,
+) -> bool:
+    """Download the file from chatbot and re-upload to QQ group. Returns True on success."""
+    import tempfile
+    import os as _os
+    _tmp_dir = _os.path.join(tempfile.gettempdir(), "napcat_bridge_uploads")
+    _os.makedirs(_tmp_dir, exist_ok=True)
+    _tmp_path = _os.path.join(_tmp_dir, fname)
+    try:
+        # Download from chatbot file endpoint
+        full_url = f"{CHATBOT_URL}{file_url}" if file_url.startswith("/") else file_url
+        log.info("download+reupload: fetching %s → %s", full_url[:120], _tmp_path)
+        dl_resp = await client.get(full_url, timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0))
+        if dl_resp.status_code != 200:
+            log.warning("download+reupload: GET %s returned %d", full_url[:120], dl_resp.status_code)
+            return False
+        content = dl_resp.content
+        if not content or len(content) == 0:
+            log.warning("download+reupload: empty body from %s", full_url[:120])
+            return False
+        with open(_tmp_path, "wb") as f:
+            f.write(content)
+        log.info("download+reupload: saved %d bytes to %s", len(content), _tmp_path)
+        # Re-upload via NapCat
+        resp = await client.post(
+            f"{NAPCAT_URL}/upload_group_file",
+            json={"group_id": int(group_id), "file": _tmp_path, "name": fname},
+            timeout=60.0,
+        )
+        ok = await _napcat_ok(resp)
+        if ok:
+            log.info("download+reupload: uploaded group=%s name=%s", group_id, fname)
+        else:
+            log.warning("download+reupload: upload_group_file failed status=%d body=%s", resp.status_code, resp.text[:300])
+        return ok
+    except Exception:
+        log.exception("download+reupload failed: group=%s name=%s", group_id, fname)
+        return False
+    finally:
+        try:
+            if _os.path.isfile(_tmp_path):
+                _os.remove(_tmp_path)
+        except OSError:
+            pass
 
 
 async def _send_file_link_fallback(

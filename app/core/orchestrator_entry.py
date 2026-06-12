@@ -2185,6 +2185,21 @@ async def orchestrate(
                             main_workspace_dir, workspace_dir, list(_to_promote),
                         )
                         promoted_to_main_total = list(promoted)
+                        # 2026-06-12: 提升后把 generated_files 的 local_path 更新到主区
+                        # 否则 done.files 的 local_path 指向 .temp/,bridge 做
+                        # upload_group_file 时可能因 .temp/ 被清理而找不到文件。
+                        # 也覆盖 skipped (已在主区) 的情况:重推文件不会被 promote,但仍需
+                        # 把 local_path 从 .temp/ 改写为主区路径。
+                        _main_fp_map: dict[str, str] = {}
+                        for _pb in promoted_to_main_total + list(skipped):
+                            _mp = os.path.join(main_workspace_dir, _pb)
+                            if os.path.isfile(_mp):
+                                _main_fp_map[_pb] = _mp
+                        if _main_fp_map:
+                            generated_files = [
+                                (_f, _u, _main_fp_map.get(os.path.basename(_f), _p))
+                                for _f, _u, _p in generated_files
+                            ]
                         if skipped:
                             _existing_partial = set(plan.delivery_partial or [])
                             plan.delivery_partial = sorted(_existing_partial | set(skipped))

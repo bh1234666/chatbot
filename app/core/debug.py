@@ -29,11 +29,16 @@ from __future__ import annotations
 import sys
 import json
 import os
+import threading
 from datetime import datetime
 from contextvars import ContextVar
 from typing import Any, TextIO
 
 from app.config import settings
+
+# 多 asyncio task 并发写 stderr 会导致 ANSI 码/换行符字节级交错,
+# 产生 ←[36m / ♪◙ 等伪字符,严重时损坏事件循环输出流导致进程卡死。
+_stderr_lock = threading.Lock()
 
 
 _trace_id_var: ContextVar[str] = ContextVar("trace_id", default="--------")
@@ -188,10 +193,11 @@ def section(title: str) -> None:
     # behavior-level log review noisy.
     bar = "=" * 60
     head = _header("section")
-    # 控制台（带颜色）
-    print(_c("33", f"{head} {bar}"), file=sys.stderr, flush=True)
-    print(_c("33;1", f"{head} > {title}"), file=sys.stderr, flush=True)
-    print(_c("33", f"{head} {bar}"), file=sys.stderr, flush=True)
+    # 控制台（带颜色）— 三行原子化防止并发交错
+    with _stderr_lock:
+        print(_c("33", f"{head} {bar}"), file=sys.stderr, flush=True)
+        print(_c("33;1", f"{head} > {title}"), file=sys.stderr, flush=True)
+        print(_c("33", f"{head} {bar}"), file=sys.stderr, flush=True)
     # 文件:单行只写 title,不写横线(parser 友好)
     _write_file("section", title)
 
@@ -411,12 +417,13 @@ def _console_enabled() -> bool:
 
 
 def _emit_console(category: str, msg: str, payload: Any | None, *, color: str = "36") -> None:
-    """输出到 stderr（带颜色，可选 payload）。"""
+    """输出到 stderr（带颜色，可选 payload）。受 _stderr_lock 保护防止并发交错。"""
     if not _console_enabled():
         return
     head = _header(category)
     line = _c(color, head) + " " + str(msg)
-    print(line, file=sys.stderr, flush=True)
+    with _stderr_lock:
+        print(line, file=sys.stderr, flush=True)
     if payload is None:
         return
     try:
@@ -434,7 +441,8 @@ def _emit_console(category: str, msg: str, payload: Any | None, *, color: str = 
             + f"\n...(truncated, total {len(body)} chars)"
         )
     for line in body.split("\n"):
-        print(_c("90", head) + "   " + line, file=sys.stderr, flush=True)
+        with _stderr_lock:
+            print(_c("90", head) + "   " + line, file=sys.stderr, flush=True)
 
 
 def _safe_default(obj: Any) -> str:

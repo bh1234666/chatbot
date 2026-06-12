@@ -16,6 +16,7 @@ from app.llm.tools.memory_guard import (
     workspace_memory_limits,
 )
 from app.llm.tools.output_spill import spill_text_field
+from app.llm.tools.process_utils import _kill_process_tree
 
 
 _UNIX_INVENTORY_COMMANDS = {
