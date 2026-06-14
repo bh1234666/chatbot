@@ -349,6 +349,19 @@ def test_runtime_tool_schema_descriptions_are_english_first_with_chinese_summary
             assert _contains_cjk(desc), f"{path} is missing a concise Chinese summary"
 
 
+def test_search_files_schema_tells_model_history_search_returns_summaries():
+    from app.llm.tools.tool_schemas import SEARCH_FILES_SCHEMA
+
+    function = SEARCH_FILES_SCHEMA["function"]
+    description = function["description"]
+    query_description = function["parameters"]["properties"]["query"]["description"]
+
+    assert "historical files" in description
+    assert "visible Shared Files window" in description
+    assert "`content` summary" in description
+    assert "indexed content summaries" in query_description
+
+
 def test_delegate_and_office_guidance_preserves_task_boundaries():
     from app.llm.tools import tool_schemas
     from app.llm.tools.skills import BUNDLED_SKILLS
@@ -361,6 +374,10 @@ def test_delegate_and_office_guidance_preserves_task_boundaries():
     assert "same-deliverable repair" in delegate_text
     assert "Keep the same base kind" in delegate_text
     assert "Create a new `task_id` only when the work boundary is genuinely different" in delegate_text
+    assert "`tts` for speech, narration, persona voice, or requested TTS-file generation" in delegate_text
+    assert "Non-speech audio such as white noise" in delegate_text
+    assert "stays `code`" in delegate_text
+    assert "tts=audio" not in delegate_text
     assert "task_id_v2" not in delegate_text
     assert "kind=verify" not in delegate_text
 
@@ -436,9 +453,24 @@ def test_self_check_guidance_and_candidate_boundary(monkeypatch, tmp_path):
         length_hint="short",
         deliverables=[],
     )
-    asyncio.run(orchestrator._self_check_plan(plan, str(tmp_path), trace_id="test"))
+    candidates = asyncio.run(orchestrator._self_check_plan(plan, str(tmp_path), trace_id="test"))
 
-    assert plan.deliverables == ["最终报告.docx"]
+    assert candidates == ["最终报告.docx"]
+    assert plan.deliverables == []
+    candidate_plan = ResponsePlan(
+        intent="deliver report",
+        key_points=[],
+        tone="plain",
+        length_hint="short",
+        deliverables=[],
+    )
+    candidates = asyncio.run(orchestrator._self_check_plan(
+        candidate_plan,
+        str(tmp_path),
+        trace_id="test",
+    ))
+    assert candidates == ["最终报告.docx"]
+    assert candidate_plan.deliverables == []
     prompt = prompt_seen["system"]
     assert "clean final user-facing filename" in prompt
     assert "failed, partial, intermediate, or quality-blocked work" in prompt
@@ -462,8 +494,13 @@ def test_clean_helper_producer_boundary_requires_self_verified_outputs():
     }
     assert _helper_result_is_clean_producer_verified(clean) is True
     note = _clean_helper_boundary_note(clean)
-    assert "producer_self_verified=true" in note
-    assert "should not re-read helper-owned artifact bodies" in note
+    assert "output_self_verified=true" in note
+    assert "generated-content boundary" in note
+    assert "re-read generated artifact bodies" in note
+    assert "producer" not in note.lower()
+    assert "helper" not in note.lower()
+    assert "main process" not in note.lower()
+    assert "main thread" not in note.lower()
     assert "report.md" in note
 
     missing_verification = {
@@ -674,6 +711,18 @@ def test_dynamic_model_visible_injections_are_english_first(tmp_path):
     timeout_hint = StuckDetector("helper_timeout")
     timeout_hint.record("bash", '{"ok": false, "timed_out": true, "error": "timeout"}', {"command": "slow"})
 
+    dependency_strategy = StuckDetector("helper_dependency_strategy")
+    dependency_strategy.record(
+        "workspace",
+        '{"ok": false, "timed_out": true, "error": "timeout"}',
+        {"action": "run", "command": "python -m pip install edge-tts"},
+    )
+    dependency_strategy.record(
+        "workspace",
+        '{"ok": true}',
+        {"action": "run", "command": "python synth_voice.py"},
+    )
+
     compile_hint = StuckDetector("helper_compile")
     for _ in range(2):
         compile_hint.record("bash", '{"ok": false, "error": "fatal error: missing.h"}', {"command": "gcc main.c"})
@@ -733,6 +782,7 @@ def test_dynamic_model_visible_injections_are_english_first(tmp_path):
         _soft_hint("stuck.empty_edit", empty_edit),
         _soft_hint("stuck.no_product", no_product),
         _soft_hint("stuck.timeout", timeout_hint),
+        _soft_hint("stuck.dependency_strategy", dependency_strategy),
         _soft_hint("stuck.compile", compile_hint),
         _soft_hint("stuck.interface", interface_hint),
         _soft_hint("stuck.todo_batch", todo_batch),
@@ -1046,8 +1096,23 @@ def test_helper_prompts_match_filtered_tool_boundaries():
     tts_tools = _tool_names(_filter_tools_for_kind("tts", delegate._HELPER_TOOLS))
     tts_prompt = _select_helper_system("tts")
     assert {"tts", "workspace"} <= tts_tools
-    assert "Use only the `tts` tool" not in tts_prompt
+    assert {"todo_write", "todo_read", "search_files", "recall_thread", "progress_note", "read_skill"} & tts_tools == set()
+    assert "Use only the built-in/system `tts` tool" in tts_prompt
+    assert "requested speech, narration, persona voice, or TTS-file output" in tts_prompt
+    assert "Do not install, call, or mention alternate TTS engines" in tts_prompt
     assert "Other available tools" in tts_prompt
+    assert "Voice identity, timbre, reference audio" in tts_prompt
+    assert "Current-turn authorization and route fit were handled before this helper was started" in tts_prompt
+    assert "do not run another authorization or persona-fit refusal" in tts_prompt
+    assert "Report failure only for execution blockers" in tts_prompt
+    assert "do not choose, request, modify, or expose them" in tts_prompt
+    assert "preferred first action is to call `tts` directly" in tts_prompt
+    assert "reads, fetches, and workspace notes are only useful" in tts_prompt
+    assert "after a successful `tts` call, stop tool use" in tts_prompt
+
+    code_prompt = _select_helper_system("code")
+    assert "do not synthesize user-facing or persona speech/voice" in code_prompt
+    assert "Non-speech audio generation such as white noise" in code_prompt
 
 
 def test_model_visible_read_skill_examples_match_schema_style():

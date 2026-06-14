@@ -386,7 +386,7 @@ def register_helper_result(trace_id: str, task_id: str, result: dict[str, Any]) 
     summary = str(result.get("report") or terminal or ("ok" if ok else "failed"))[:1000]
     evidence = add_evidence(
         trace_id=trace_id,
-        source="helper",
+        source="background_work",
         status=status,
         summary=summary,
         task_id=task_id,
@@ -450,7 +450,7 @@ def register_helper_resource_request(
     request = request or {}
     add_evidence(
         trace_id=trace_id,
-        source="helper_resource_request",
+        source="background_work_resource_request",
         status=EVIDENCE_PARTIAL,
         summary=(report or request.get("blocked_reason") or request.get("reason") or "resource required")[:1000],
         task_id=task_id,
@@ -622,8 +622,8 @@ def structured_status(trace_id: str) -> dict[str, Any]:
         "artifacts_ready": list_artifacts(trace_id, status=ARTIFACT_READY, last_n=50),
         "artifacts_recent": artifacts_recent,
         "resource_requests": list_resource_requests(trace_id),
-        "blocked_helpers": list_resource_requests(trace_id, state=RESOURCE_WAITING),
-        "ready_to_resume_helpers": ready_to_resume(trace_id),
+        "blocked_work": list_resource_requests(trace_id, state=RESOURCE_WAITING),
+        "ready_to_resume_work": ready_to_resume(trace_id),
     }
 
 

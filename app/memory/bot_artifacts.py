@@ -13,7 +13,7 @@ from app.llm.tools import workspace as ws_tool
 
 
 def _clean_rel_path(value: str) -> str:
-    rel = str(value or "").replace("\\", "/").lstrip("/")
+    rel = str(value or "").split("?", 1)[0].split("#", 1)[0].replace("\\", "/").lstrip("/")
     parts = [p for p in rel.split("/") if p and p not in (".", "..")]
     return "/".join(parts)
 

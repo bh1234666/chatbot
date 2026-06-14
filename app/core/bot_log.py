@@ -42,21 +42,21 @@ def build_bot_log(
     if promoted_to_main:
         parts.append(f"in_main=[{','.join(promoted_to_main[:6])}]")
     if helper_status:
-        done_helpers = [task for task, state in helper_status.items() if state.get("status") == "done"]
-        running_helpers = [task for task, state in helper_status.items() if state.get("status") == "running"]
-        failed_helpers = [
+        done_units = [task for task, state in helper_status.items() if state.get("status") == "done"]
+        running_units = [task for task, state in helper_status.items() if state.get("status") == "running"]
+        failed_units = [
             task for task, state in helper_status.items()
             if state.get("status") in ("failed", "aborted", "stuck")
         ]
-        if done_helpers or running_helpers or failed_helpers:
+        if done_units or running_units or failed_units:
             segments = []
-            if done_helpers:
-                segments.append(f"done:[{','.join(done_helpers[:5])}]")
-            if running_helpers:
-                segments.append(f"running:[{','.join(running_helpers[:5])}]")
-            if failed_helpers:
-                segments.append(f"failed:[{','.join(failed_helpers[:5])}]")
-            parts.append("helpers={" + ",".join(segments) + "}")
+            if done_units:
+                segments.append(f"done:[{','.join(done_units[:5])}]")
+            if running_units:
+                segments.append(f"running:[{','.join(running_units[:5])}]")
+            if failed_units:
+                segments.append(f"failed:[{','.join(failed_units[:5])}]")
+            parts.append("processing_records={" + ",".join(segments) + "}")
     if internal_note and len(internal_note) > 5:
         parts.append(f"note={internal_note[:120]}")
     return " | ".join(parts)[:800]

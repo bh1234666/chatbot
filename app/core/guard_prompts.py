@@ -1,7 +1,7 @@
 """Central model-visible prompts for orchestrator-side guard and judge LLM calls.
 
 These short auxiliary prompts drive lightweight "guard / judge / converter"
-LLM calls inside the orchestrator (persona voice guard, escalation judge, plan
+LLM calls inside the orchestrator (escalation judge, plan
 completeness checker, prior-tier continuation note, ResponsePlan recovery
 converter, and narration/summary compression). They previously lived inline in
 ``orchestrator.py``; centralizing them keeps every model-visible prompt in a
@@ -13,24 +13,6 @@ constants; prompts with per-call data are ``.format()`` templates whose
 ``{placeholder}`` fields are filled at the call site.
 """
 from __future__ import annotations
-
-
-# ── Persona voice guard (final voice-reply permission) ────────────
-PERSONA_VOICE_GUARD_SYSTEM = (
-    "You are a persona guard. Decide whether the AI character permits sending the Round2 generated or "
-    "specified TTS content as this round's final voice reply. Judge persona permission only. "
-    "Tool resources, delivery mechanics, and text quality are handled elsewhere. Allow the voice reply when the persona has no explicit refusal. "
-    "Output strict JSON only.\n\n"
-    "人设守卫只判断角色是否硬性拒绝本次语音输出。"
-)
-
-PERSONA_VOICE_GUARD_USER_TEMPLATE = (
-    "# Persona\n{persona}\n\n"
-    "# User message\n{user_message}\n\n"
-    "# Candidate final voice reply content/file\n{voice_target}\n\n"
-    'Output format: {{"allow": true, "reason": "<=80 Chinese characters"}}\n\n'
-    "根据人设判断是否允许发出该语音。"
-)
 
 
 # ── Escalation judge (whether a stronger model would help) ────────

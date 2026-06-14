@@ -510,7 +510,7 @@ def test_resource_required_helper_creates_blocked_request():
     )
 
     assert evidence["status"] == agent_state.EVIDENCE_PARTIAL
-    blocked = agent_state.structured_status(trace_id)["blocked_helpers"]
+    blocked = agent_state.structured_status(trace_id)["blocked_work"]
     assert len(blocked) == 1
     assert blocked[0]["blocked_task_id"] == "report_edit"
     assert blocked[0]["requested_kind"] == "draw"
@@ -535,8 +535,8 @@ def test_in_progress_resource_request_is_visible_before_helper_final_result():
 
     assert request["state"] == agent_state.RESOURCE_WAITING
     status = agent_state.structured_status(trace_id)
-    assert status["blocked_helpers"][0]["blocked_task_id"] == "live_report_edit"
-    assert status["evidence_recent"][-1]["source"] == "helper_resource_request"
+    assert status["blocked_work"][0]["blocked_task_id"] == "live_report_edit"
+    assert status["evidence_recent"][-1]["source"] == "background_work_resource_request"
 
 
 def test_resource_request_can_be_refused_by_main_process():
@@ -559,7 +559,7 @@ def test_resource_request_can_be_refused_by_main_process():
     assert updated is not None
     assert updated["state"] == agent_state.RESOURCE_REFUSED
     assert "Source data" in updated["reason"]
-    assert agent_state.structured_status(trace_id)["blocked_helpers"] == []
+    assert agent_state.structured_status(trace_id)["blocked_work"] == []
 
 
 def test_completed_helper_files_become_ready_artifacts():
@@ -575,7 +575,7 @@ def test_completed_helper_files_become_ready_artifacts():
             "terminal_reason": "completed",
             "report": "Implemented and smoke-tested the game.",
             "files": [{"rel_path": "snake.html"}],
-            "outputs_check": {"outputs_complete": True},
+            "outputs_check": {"outputs_complete": True, "producer_self_verified": True},
         },
     )
 
@@ -584,7 +584,7 @@ def test_completed_helper_files_become_ready_artifacts():
     assert len(artifacts) == 1
     assert artifacts[0]["path"] == "snake.html"
     assert artifacts[0]["type"] == "code"
-    assert artifacts[0]["verified_by"] == "helper_outputs_check"
+    assert artifacts[0]["verified_by"] == "helper_producer_self_verified"
 
 
 def test_structured_status_reports_facts_newer_than_contract():
@@ -679,7 +679,7 @@ def test_env_read_project_file_fact_is_visible_to_delegate_guard_anchor():
             "Write the triage report.",
             [{"task_id": "write_triage_report", "kind": "edit", "prompt": "Create triage_report.txt"}],
         )
-        assert "Recent verified main-thread evidence" in anchor
+        assert "Recent verified main-thread and completed-helper evidence" in anchor
         assert "inbox/msg_01.txt" in anchor
         assert "total_lines=12" in anchor
         assert "do not by themselves prove" in anchor
@@ -779,7 +779,8 @@ async def test_agent_state_dispatch_contract_and_artifact_flow():
         user_id="user",
         workspace_dir="",
     )
-    assert '"artifacts_ready"' in artifact_raw
+    assert '"status_summary"' in artifact_raw
+    assert '"artifacts_ready_paths"' in artifact_raw
     assert "snake.html" in artifact_raw
 
 
@@ -803,8 +804,10 @@ async def test_delegate_status_includes_structured_agent_state():
     )
 
     raw = await _handle_delegate_status({}, main_owner=f"main:{trace_id}", trace_id=trace_id)
-    assert '"blocked_helpers"' in raw
-    assert '"ready_to_resume_helpers"' in raw
+    assert '"blocked_work"' in raw
+    assert '"ready_to_resume_work"' in raw
+    assert '"blocked_helpers"' not in raw
+    assert '"ready_to_resume_helpers"' not in raw
     assert '"fig1.png"' in raw
 
 

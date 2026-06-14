@@ -1,9 +1,16 @@
 """Primary orchestration entrypoint implementation."""
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import os
 import re
 
+from app.core import debug
 from app.core.orchestrator_utils import _is_internal_deliverable_file
+
+log = logging.getLogger(__name__)
 
 
 _ENV_PROJECT_PATH_RE = re.compile(
@@ -54,6 +61,40 @@ _USER_VISIBLE_INTERNAL_ACTION_RE = re.compile(
     r"<\s*(?:read|write|edit|glob|search|run|tool|env_[a-z_]+)\b",
     re.IGNORECASE,
 )
+_USER_VISIBLE_INTERNAL_WORKFLOW_RE = re.compile(
+    r"(?:" 
+    r"\b(?:read|code|edit|verify|tts|draw|inventory|project_map|file_summary|impact_review)\s+helper\b|"
+    r"\b(?:TTS|tts)\b|"
+    r"\b(?:persona[_ -]?guard|voice[_ -]?guard|guard[_ -]?refused|resource_required|quality_blocked)\b|"
+    r"\b(?:toolchain|tool\s+chain|internal\s+rule|system\s+rule|routing\s+decision|delivery\s+route)\b|"
+    r"(?:工具链|路由\s*LLM|路由模型|内部(?:规则|结构|流程|机制|helper)|系统规则|精准执行的规则|生成过程卡在|语音生成(?:流程|工具)|TTS|tts)|"
+    r"\bhelper\s+(?:report|task|sandbox|workspace|contract|handoff|copyback|delegate|delegation)\b|"
+    r"\bhelper\s+(?:said|says|reported|returned|completed|ran|created|produced|failed|timed\s*out|is\s+done)\b|"
+    r"\bhelper\s*(?:的)?\s*(?:存在|存在情况)\b|"
+    r"\b(?:helper|internal\s+helper)\s+exist(?:s|ed|ence)?\b|"
+    r"\bhelper\s*(?:开工|处理|生成|检查|执行|跑|干活|接手|继续)|"
+    r"\b(?:used|spawned|started|called|routed\s+to|delegated\s+to)\s+(?:an?\s+)?(?:read|code|edit|verify|tts|draw|inventory|project_map|file_summary|impact_review)?\s*helper\b|"
+    r"\b(?:internal|background|tool|execution|routing|producer|producing)\s+helpers?\b|"
+    r"(?:内部|后台|工具|执行|路由|调度)\s*helper|"
+    r"\bhelper\s*(?:已|已经|完成|报告|返回|产出|执行|失败|超时|还在|正在|在跑|运行|工作|阻塞|卡住|存在|可见)|"
+    r"(?:调用|派发|委派|启动|分配)(?:了|一个|了一个|给)?\s*(?:read|code|edit|verify|tts|draw)?\s*helper|"
+    r"(?:让|叫|安排|交给)(?:我)?\s*(?:read|code|edit|verify|tts|draw)?\s*helper\s*(?:开工|处理|生成|检查|执行|跑|干活|接手|继续)?|"
+    r"(?:子任务|子进程|子流程|后台流程|后台任务)\s*(?:已|已经|完成|返回|产出|执行|失败|超时|还在|正在)|"
+    r"(?:内部|后台)\s*(?:工具调用|工具链|执行链|调度流程|路由流程)|"
+    r"\bbackground\s+(?:tasks?|producers?|branches?|work)\b|"
+    r"\b(?:delegate|delegation)\s+(?:task|helper|sandbox|workspace)\b|"
+    r"\bhelpers?\s*[=:]\s*|\bhelpers_(?:still_running|completed)\b|"
+    r"\bwork\s+units?\s+(?:said|says|reported|returned|completed|ran|created|produced|failed|timed\s*out|is\s+done)\b|"
+    r"\bprocessing\s+records?\s+(?:said|says|reported|returned|completed|ran|created|produced|failed|timed\s*out|is\s+done)\b|"
+    r"\b(?:producer|available)\s+evidence\s+(?:said|says|reported|returned|completed|ran|created|produced|failed|timed\s*out|is\s+done)\b|"
+    r"\bproducer\s+evidence\b|\bproducer-owned\b|"
+    r"\bRound\s*[123]\b|\bround\s*[123]\b|"
+    r"\b(?:env|environment)_(?:run|read|fetch|apply|inventory|list_tree|search|diff)\b|"
+    r"(?:_delegate_|_helpers_shared/|internal_shared/|_env/|\.helper_[\w.-]+|\.helper_task_contract\.json)|"
+    r"\binternal_run_[\w.-]+\b|\bprocessing_records\b"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_user_visible_protocol_text(text: str) -> bool:
@@ -68,27 +109,113 @@ def _looks_like_user_visible_protocol_text(text: str) -> bool:
     value = str(text or "")
     if any(marker in value for marker in _USER_VISIBLE_PROTOCOL_MARKERS):
         return True
-    return bool(_USER_VISIBLE_INTERNAL_ACTION_RE.search(value))
+    return bool(
+        _USER_VISIBLE_INTERNAL_ACTION_RE.search(value)
+        or _USER_VISIBLE_INTERNAL_WORKFLOW_RE.search(value)
+    )
+
+
+def _sanitize_user_visible_internal_terms(text: str) -> str:
+    """Rewrite internal workflow terms before building a protocol-leak fallback."""
+    value = str(text or "")
+    value = re.sub(r"\b(?:TTS|tts)\b", "语音生成", value)
+    value = re.sub(r"\bpersona[_ -]?guard\b", "发送复核", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bvoice[_ -]?guard\b", "语音发送复核", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bguard[_ -]?refused\b", "没有通过复核", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bresource_required\b", "缺少必要条件", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bquality_blocked\b", "质量复核未通过", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:toolchain|tool\s+chain)\b", "处理过程", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:routing\s+decision|delivery\s+route)\b", "发送方式判断", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:internal|system)\s+rules?\b", "要求", value, flags=re.IGNORECASE)
+    value = re.sub(r"工具链", "处理过程", value)
+    value = re.sub(r"路由\s*LLM|路由模型", "发送方式判断", value)
+    value = re.sub(r"精准执行的规则|系统规则|内部规则", "要求", value)
+    value = re.sub(r"生成过程卡在", "生成没有可靠完成在", value)
+    value = re.sub(r"语音生成(?:流程|工具)", "语音生成", value)
+    value = re.sub(
+        r"(?:让|叫|安排|交给|调用|派发|委派|启动|分配)(?:了|一个|了一个|给|我)?\s*"
+        r"(?:read|code|edit|verify|tts|draw)?\s*helper\s*"
+        r"(?:开工|处理|生成|检查|执行|跑|干活|接手|继续)?",
+        "继续处理",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b(?:read|code|edit|verify|tts|draw|inventory|project_map|file_summary|impact_review)?\s*helper\s*"
+        r"(?:report|task|sandbox|workspace|contract|handoff|copyback|delegate|delegation|"
+        r"开工|处理|生成|检查|执行|跑|干活|接手|继续)?\b",
+        "处理记录",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(r"\bhelpers_(?:still_running|completed)\b", "处理状态", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bhelpers\s*([=:])", r"处理记录\1", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bhelper\s*(?:的)?\s*(?:存在|存在情况)\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:helper|internal\s+helper)\s+exist(?:s|ed|ence)?\b", "processing details", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bhelpers\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bhelper\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"处理记录\s*(?:said|says|reported|returned|completed|ran|created|produced|failed|timed\s*out|is\s+done)",
+        "处理记录",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\bprocessing\s+records?\s*(?:said|says|reported|returned|completed|ran|created|produced|failed|timed\s*out|is\s+done)?",
+        "处理记录",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(r"(?:内部|后台|工具|执行|路由|调度)\s*处理记录", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"处理记录\s*(?:在跑|运行|工作|阻塞|卡住|存在|可见)", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?:内部|后台)\s*(?:工具调用|工具链|执行链|调度流程|路由流程)", "处理过程", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:producer|producing)\s+处理记录\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bbackground\s+(?:tasks?|producers?|branches?)\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bwork\s+units?\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bprocessing\s+records?\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bbackground\s+work\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b(?:delegate|delegation)\s+(?:task|helper|sandbox|workspace)\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bavailable\s+evidence\b", "已有证据", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bproducer\s+evidence\b", "处理记录", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bproducer-owned\b", "已生成的", value, flags=re.IGNORECASE)
+    value = re.sub(r"(?<![A-Za-z0-9_])Round\s*[123](?![A-Za-z0-9_])", "处理阶段", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"\b(?:env|environment)_(?:run|read|fetch|apply|inventory|list_tree|search|diff)\b",
+        "项目操作",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = value.replace("_helpers_shared/", "处理材料/")
+    value = value.replace("internal_shared/", "处理材料/")
+    value = value.replace("_delegate_", "处理记录_")
+    value = value.replace("internal_run_", "处理记录_")
+    value = re.sub(r"\bprocessing_records\b", "处理记录", value, flags=re.IGNORECASE)
+    value = value.replace("_env/", "项目文件/")
+    value = re.sub(r"\.helper_[\w.-]+", "处理记录", value)
+    value = value.replace(".helper_task_contract.json", "处理任务记录")
+    return value
 
 
 def _plan_fallback_user_reply(plan) -> str:
     """Build a concise user-facing reply if Round3 leaks protocol markup."""
     parts: list[str] = []
-    intent = str(getattr(plan, "intent", "") or "").strip()
+    intent = _sanitize_user_visible_internal_terms(
+        str(getattr(plan, "intent", "") or "").strip()
+    )
     key_points = [
-        str(item).strip()
+        _sanitize_user_visible_internal_terms(str(item).strip())
         for item in (getattr(plan, "key_points", None) or [])
         if str(item).strip()
     ]
     deliverables = [
-        str(item).strip()
+        _sanitize_user_visible_internal_terms(str(item).strip())
         for item in (getattr(plan, "deliverables", None) or [])
-        if str(item).strip()
+        if str(item).strip() and not _is_internal_deliverable_file(str(item).strip())
     ]
     partials = [
-        str(item).strip()
+        _sanitize_user_visible_internal_terms(str(item).strip())
         for item in (getattr(plan, "delivery_partial", None) or [])
-        if str(item).strip()
+        if str(item).strip() and not _is_internal_deliverable_file(str(item).strip())
     ]
     if intent:
         parts.append(f"我完成了这轮处理：{intent}")
@@ -133,6 +260,145 @@ def _load_displayed_name_remap_for_delivery(*workspaces: str | None) -> dict[str
             if isinstance(key, str) and isinstance(value, str) and key and value:
                 merged[key] = value
     return merged
+
+
+def _round3_visible_file_label(
+    name: str,
+    *,
+    role: str = "file",
+    displayed_remap: dict[str, str] | None = None,
+    known_task_id_prefixes: list[str] | None = None,
+) -> str:
+    """Return a Round3-safe label for file facts without changing delivery."""
+    role_label = (role or "file").strip() or "file"
+    fallback = f"[{role_label}]"
+    raw = str(name or "").strip().strip("`'\"")
+    if not raw:
+        return fallback
+    normalized = raw.replace("\\", "/")
+    base = os.path.basename(normalized)
+
+    remap = displayed_remap or {}
+    for key in (raw, normalized, base):
+        mapped = remap.get(key)
+        if isinstance(mapped, str) and mapped.strip():
+            return mapped.strip()
+
+    if base.startswith("_voice_"):
+        return fallback
+    if _is_internal_deliverable_file(raw):
+        return fallback
+
+    for tid in known_task_id_prefixes or []:
+        tid = str(tid or "").strip()
+        if not tid:
+            continue
+        pfx = tid + "_"
+        if raw.startswith(pfx):
+            stripped = raw[len(pfx):]
+            if stripped:
+                return stripped
+        if base.startswith(pfx):
+            stripped = base[len(pfx):]
+            if stripped:
+                return stripped
+    return raw
+
+
+_ROUND3_VOICE_ARTIFACT_RE = re.compile(
+    r"(?<![\w.-])_voice_[\w.-]+\.(?:wav|mp3|ogg|m4a)\b",
+    re.IGNORECASE,
+)
+_ROUND3_INTERNAL_FILE_TOKEN_RE = re.compile(
+    r"(?<![\w.-])(?:\.helper_[\w.-]+|helper_[\w.-]+|_py_cmd_[\w.-]+)(?=\s|$|[,\].;:)])",
+    re.IGNORECASE,
+)
+
+
+def _round3_sanitize_file_mentions(
+    text: str,
+    *,
+    file_names: set[str] | None = None,
+    displayed_remap: dict[str, str] | None = None,
+    known_task_id_prefixes: list[str] | None = None,
+) -> str:
+    """Sanitize user-facing Round3 plan text while preserving factual content."""
+    value = str(text or "")
+    for name in sorted({str(n) for n in (file_names or set()) if str(n).strip()}, key=len, reverse=True):
+        _base = os.path.basename(name.replace("\\", "/"))
+        _role = "voice reply file" if _base.startswith("_voice_") else "file"
+        label = _round3_visible_file_label(
+            name,
+            role=_role,
+            displayed_remap=displayed_remap,
+            known_task_id_prefixes=known_task_id_prefixes,
+        )
+        variants = {
+            name,
+            name.replace("\\", "/"),
+            os.path.basename(name.replace("\\", "/")),
+        }
+        for token in sorted({v for v in variants if v and v != label}, key=len, reverse=True):
+            value = value.replace(token, label)
+    value = _ROUND3_VOICE_ARTIFACT_RE.sub("[voice reply file]", value)
+    value = _ROUND3_INTERNAL_FILE_TOKEN_RE.sub("[file]", value)
+    value = _sanitize_user_visible_internal_terms(value)
+    return value
+
+
+def _round3_visible_plan_and_files(
+    plan,
+    *,
+    files: list[tuple[str, str]] | None = None,
+    displayed_remap: dict[str, str] | None = None,
+    known_task_id_prefixes: list[str] | None = None,
+):
+    """Build a Round3-visible copy without changing delivery decisions."""
+    filename_candidates: set[str] = set()
+    filename_candidates.update(str(d) for d in (getattr(plan, "deliverables", None) or []) if str(d).strip())
+    filename_candidates.update(str(d) for d in (getattr(plan, "delivery_partial", None) or []) if str(d).strip())
+    filename_candidates.update(str(f) for f, _u in (files or []) if str(f).strip())
+
+    def _displayed_name(name: str, *, role: str = "file") -> str:
+        return _round3_visible_file_label(
+            name,
+            role=role,
+            displayed_remap=displayed_remap,
+            known_task_id_prefixes=known_task_id_prefixes,
+        )
+
+    def _sanitize_text(value: str) -> str:
+        return _round3_sanitize_file_mentions(
+            value,
+            file_names=filename_candidates,
+            displayed_remap=displayed_remap,
+            known_task_id_prefixes=known_task_id_prefixes,
+        )
+
+    visible_files = [(_displayed_name(f), u) for f, u in (files or [])] if files else None
+    plan_for_r3 = type(plan)(**plan.model_dump())
+    plan_for_r3.intent = _sanitize_text(plan_for_r3.intent or "")
+    if plan_for_r3.key_points:
+        plan_for_r3.key_points = [
+            _sanitize_text(str(p)) for p in plan_for_r3.key_points
+        ]
+    if plan_for_r3.avoid:
+        plan_for_r3.avoid = [
+            _sanitize_text(str(a)) for a in plan_for_r3.avoid
+        ]
+    if plan_for_r3.callbacks:
+        plan_for_r3.callbacks = [
+            _sanitize_text(str(c)) for c in plan_for_r3.callbacks
+        ]
+    if plan_for_r3.deliverables:
+        plan_for_r3.deliverables = [
+            _displayed_name(d) for d in plan_for_r3.deliverables
+        ]
+    if plan_for_r3.delivery_partial:
+        plan_for_r3.delivery_partial = [
+            _displayed_name(d, role="missing file") for d in plan_for_r3.delivery_partial
+        ]
+    return plan_for_r3, visible_files
 
 
 def _environment_project_tool_route(message: str) -> tuple[bool, bool, str]:
@@ -300,6 +566,20 @@ async def _review_explicit_deliverables_with_warnings(
             ),
         },
     ]
+    def _add_review_unavailable_fact(reason: str) -> None:
+        candidate_text = ", ".join(_round3_visible_file_label(name, role="candidate file") for name in selected) or "(none)"
+        decision_fact = (
+            "Delivery fact: selected deliverables had timing or boundary warnings, but review was unavailable; "
+            "they were kept only as unconfirmed candidate facts and were not attached automatically. "
+            f"Candidate files: {candidate_text}."
+        )
+        if reason:
+            decision_fact += f" Review status: {reason[:160]}"
+        existing_points = list(getattr(plan, "key_points", None) or [])
+        if decision_fact not in existing_points:
+            plan.key_points = existing_points + [decision_fact]
+        plan.deliverables = []
+
     try:
         from app.llm.model_pool import chat_json, resolve_task
         _spec = resolve_task("self_check_plan")
@@ -313,12 +593,15 @@ async def _review_explicit_deliverables_with_warnings(
             timeout=15.0,
         )
     except Exception as exc:
+        reason = f"{type(exc).__name__}: deliverable warning review unavailable"
         debug.log(
             "workspace.deliverable_warning_review.failed",
-            f"{type(exc).__name__}: keeping explicit plan.deliverables",
+            reason,
         )
+        _add_review_unavailable_fact(reason)
         return
     if not isinstance(raw, dict):
+        _add_review_unavailable_fact("invalid review response")
         return
     allowed = set(selected)
     reviewed: list[str] = []
@@ -328,6 +611,37 @@ async def _review_explicit_deliverables_with_warnings(
             reviewed.append(text)
     if not reviewed and raw.get("deliverables") not in ([], None):
         return
+    reason = str(raw.get("reason", "") or "").strip()[:300]
+    reason_for_plan = reason
+    def _safe_review_label(name: str) -> str:
+        return _round3_visible_file_label(name, role="reviewed file")
+
+    for fname in selected:
+        _base = os.path.basename(str(fname).replace("\\", "/"))
+        _text_flagged = _is_internal_deliverable_file(fname) or _base.startswith("_voice_")
+        if fname in reviewed and not _text_flagged:
+            continue
+        for token in {fname, os.path.basename(str(fname).replace("\\", "/"))}:
+            if token:
+                reason_for_plan = reason_for_plan.replace(token, "[flagged file]")
+    after_text = ", ".join(_safe_review_label(name) for name in reviewed) or "(none)"
+    if reviewed != selected:
+        dropped_count = max(0, len(selected) - len(reviewed))
+        decision_fact = (
+            "Delivery fact: after comparing the current request, file timing, and boundary facts, "
+            f"selected deliverables were revised; {dropped_count} flagged file(s) were not kept. "
+            f"Current deliverables: [{after_text}]."
+        )
+    else:
+        decision_fact = (
+            "Delivery fact: after comparing the current request, file timing, and boundary facts, "
+            f"selected deliverables remain [{after_text}]."
+        )
+    if reason_for_plan:
+        decision_fact += f" Reason: {reason_for_plan}"
+    existing_points = list(getattr(plan, "key_points", None) or [])
+    if decision_fact not in existing_points:
+        plan.key_points = existing_points + [decision_fact]
     if reviewed != selected:
         debug.log(
             "workspace.deliverable_warning_review.applied",
@@ -335,16 +649,99 @@ async def _review_explicit_deliverables_with_warnings(
             {
                 "before": selected,
                 "after": reviewed,
-                "reason": str(raw.get("reason", ""))[:300],
+                "reason": reason,
             },
         )
         plan.deliverables = reviewed
     else:
         debug.log(
             "workspace.deliverable_warning_review.kept",
-            str(raw.get("reason", "kept explicit deliverables"))[:300],
+            reason or "kept explicit deliverables",
             {"deliverables": reviewed},
         )
+
+
+async def _prepare_round2_voice_handoff_before_delivery(
+    plan,
+    *,
+    persona: str,
+    user_message: str,
+    workspace_dir: str,
+    files_before: set,
+    list_workspace_files=None,
+) -> tuple[str, str]:
+    """Prepare Round2 voice handoff before any ordinary attachment delivery.
+
+    ``voice_reply_file`` is a candidate for the final voice channel, not a
+    normal deliverable. Authorization for entering a TTS helper has already
+    happened before helper start; this step only enforces physical delivery
+    facts and prevents the same audio from also being attached as a normal file.
+    """
+    _round2_voice_reply_file = (getattr(plan, "voice_reply_file", "") or "").strip()
+    _round2_voice_reply_text = (getattr(plan, "voice_reply_text", "") or "").strip()
+    if not _round2_voice_reply_file and not _round2_voice_reply_text:
+        return "", ""
+
+    def _accept_voice_text_candidate() -> tuple[str, str]:
+        voice_text = (getattr(plan, "voice_reply_text", "") or "").strip()
+        if not voice_text:
+            return "", ""
+        debug.log(
+            "voice.round2_handoff.text",
+            f"accepting Round2 voice_reply_text len={len(voice_text)}; preflight owns authorization",
+        )
+        plan.key_points = [voice_text]
+        plan.length_hint = "短"
+        return "", voice_text
+
+    if _round2_voice_reply_file:
+        _vf_base = os.path.basename(_round2_voice_reply_file)
+        try:
+            if list_workspace_files is not None:
+                _all_ws_files = set(list_workspace_files(workspace_dir))
+            else:
+                from app.llm.tools import workspace as _ws_tool
+                _all_ws_files = set(_ws_tool.list_generated_files(workspace_dir))
+        except Exception:
+            _all_ws_files = set()
+        if _vf_base not in _all_ws_files:
+            debug.log("voice.round2_handoff.missing", f"voice_reply_file not found before delivery: {_vf_base!r}")
+            plan.voice_reply_file = ""
+            plan.deliverables = [
+                d for d in (getattr(plan, "deliverables", None) or [])
+                if os.path.basename(str(d)) != _vf_base
+            ]
+            return _accept_voice_text_candidate()
+
+        _files_before_norm = {
+            str(x).replace("\\", "/") for x in (files_before or set())
+        }
+        _vf_norm = _vf_base.replace("\\", "/")
+        _vf_preexisting = (
+            _vf_base in (files_before or set())
+            or _vf_norm in _files_before_norm
+            or os.path.basename(_vf_norm) in {os.path.basename(x) for x in _files_before_norm}
+        )
+        plan.voice_reply_file = _vf_base
+        plan.deliverables = [
+            d for d in (getattr(plan, "deliverables", None) or [])
+            if os.path.basename(str(d)) != _vf_base
+        ]
+        _vf_label = _round3_visible_file_label(_vf_base, role="voice reply file")
+        if _vf_preexisting:
+            _fact = f"语音回复文件按本轮计划复用，最终回复使用该语音：{_vf_label}"
+        else:
+            _fact = f"已生成语音回复，最终回复使用该语音：{_vf_label}"
+        if _fact not in (getattr(plan, "key_points", None) or []):
+            plan.key_points = [_fact]
+        plan.length_hint = "短"
+        debug.log(
+            "voice.round2_handoff.accepted",
+            f"file={_vf_base!r} preexisting={_vf_preexisting}; preflight owns authorization",
+        )
+        return _vf_base, ""
+
+    return _accept_voice_text_candidate()
 
 
 def _existing_environment_project_files(names: set[str]) -> set[str]:
@@ -478,8 +875,9 @@ async def orchestrate(
     # 2026-05-16 Round 14b: reset round3 parallel 决策 ContextVar
     # (ContextVar 通常 per-task 隔离, 但同进程 task 复用边界不确定, 显式清最稳)
     try:
-        from app.llm.voice_output import _round3_parallel_decision
+        from app.llm.voice_output import _round3_parallel_decision, _round3_voice_route_snapshot
         _round3_parallel_decision.set("")
+        _round3_voice_route_snapshot.set(None)
     except Exception:
         pass
     archive_row = None
@@ -543,11 +941,12 @@ async def orchestrate(
             archive_id=req.archive_id, group_id=req.group_id
         )
         ws_tool.archive_stale_artifacts(main_workspace_dir, max_age_days=14)
-        session_tag = (
-            f"{req.archive_id}:{req.group_id}:{req.user_id}:"
-            f"{hash(req.message) & 0xFFFFFFFF:08x}"
+        session_tag = f"{req.archive_id}:{req.group_id}:{req.user_id}:{trace_id}"
+        workspace_dir = ws_tool.ensure_temp_workspace(
+            main_workspace_dir,
+            session_tag=session_tag,
+            isolate_session=True,
         )
-        workspace_dir = ws_tool.ensure_temp_workspace(main_workspace_dir, session_tag=session_tag)
         group_key = f"{req.archive_id}:{req.group_id}"
         ws_tool.register_workspace(group_key, workspace_dir)
         try:
@@ -604,7 +1003,7 @@ async def orchestrate(
             debug.log("workspace_list_literal.maintenance_error", f"{type(e).__name__}: {e}")
         finally:
             try:
-                ws_tool.unregister_workspace(group_key)
+                ws_tool.unregister_workspace(group_key, workspace_dir)
             except Exception:
                 pass
         yield "complete", {
@@ -799,7 +1198,12 @@ async def orchestrate(
     except Exception:
         in_flight_others = []
 
-    inline_images = _scan_inline_images(req.archive_id, req.group_id)
+    inline_images = _annotate_inline_images(
+        _scan_inline_images(req.archive_id, req.group_id),
+        recent_group_msgs,
+        current_user_id=req.user_id,
+        current_user_name=req.user_name,
+    )
     _base_needs_static_context = (
         bool(needs_recall)
         or bool(needs_tools)
@@ -814,7 +1218,6 @@ async def orchestrate(
         or _td.get("测试", 0) > 0.7
         or _has_implicit_recall_intent(req.message)
         or _has_image_intent_in_msg(req.message)
-        or _audio_artifact_intent
     )
     if _base_needs_static_context:
         _ctx_hot_group = hot_group
@@ -888,6 +1291,7 @@ async def orchestrate(
             )
     base_msgs = ctx_build.build_base_context(
         user_name=req.user_name,
+        current_user_id=req.user_id,
         current_message=req.message,
         hot_user=hot_user,
         hot_group=_ctx_hot_group,
@@ -1000,6 +1404,7 @@ async def orchestrate(
     # 让 handle_delegate(spawn) 入口拿到 persona + user_message,启动并行守卫
     # 判断"角色是否同意做"。详见 tool_delegate._persona_consent_guard。
     _persona_excerpt_token = None
+    _tts_helper_persona_token = None
     _voice_instruct_token = None
     _voice_ref_token = None
     _user_msg_token = None
@@ -1007,10 +1412,11 @@ async def orchestrate(
         from app.llm.tools import registry as _tool_registry
         from app.llm.tools.delegate import (
             set_current_persona_excerpt as _set_persona,
+            set_current_tts_helper_persona as _set_tts_helper_persona,
             set_current_user_message as _set_user_msg,
         )
         _persona_excerpt_token = _set_persona(persona or "")
-        _tts_guard_token = _tool_registry.set_current_tts_guard_context(persona or "", req.message or "")
+        _tts_helper_persona_token = _set_tts_helper_persona(persona or "")
         from app.memory.persona_files import persona_voice_instruct_by_content
         _voice_instruct = persona_voice_instruct_by_content(
             persona or "",
@@ -1068,11 +1474,11 @@ async def orchestrate(
         )
     if _audio_artifact_intent:
         _task_fact_parts.append(
-            "The current user request asks for a user-facing audio artifact. "
-            "For spoken/random test voice, use the TTS audio-generation path with a short spoken test phrase when the user did not supply text. "
-            "Do not ask a TTS helper to write Python wave/noise scripts unless the user explicitly requested synthetic tones/noise instead of speech. "
+            "Observed current-turn text fact: the latest user message contains wording that may refer to a user-facing audio artifact rather than ordinary text chat. "
+            "Treat this as evidence, not a route decision. Decide helper kind and delivery from the current request, plan, and verified outputs. "
+            "Hard boundary: user-facing speech, narration, persona voice, or TTS-file generation belongs to the built-in/system TTS route; non-speech audio such as white noise, tones, beeps, music/signal synthesis, waveform processing, or audio analysis is code/signal work. "
             "Final deliverables should name the actual verified audio file path.\n"
-            "当前请求是面向用户的音频文件产物；随机测试语音优先用 TTS 合成可听语句，最终 deliverables 写真实已验证音频文件。"
+            "当前消息含有可能指向音频文件产物的措辞；这是给模型看的事实，不是代码替模型选路。硬边界仍然是：用户可见语音/TTS 文件走系统 TTS，非语音音频走 code/signal，最终 deliverables 只写真实已验证文件。"
         )
     _task_facts_text = "\n\n".join(_task_fact_parts)
 
@@ -1174,14 +1580,6 @@ async def orchestrate(
             "round1.safety_gate",
             f"P86: easy→medium + needs_tools=True (image content query, "
             f"Round 1 lite 漏判: 用户问图片内容但说 needs_tools=False)",
-        )
-
-    if not needs_tools and (not _tool_concept_intent) and _audio_artifact_intent:
-        complexity = "medium" if complexity == "easy" else complexity
-        needs_tools = True
-        debug.log(
-            "round1.safety_gate",
-            "easy→medium + needs_tools=True (audio artifact request; Round 1 treated it as simple reply)",
         )
 
     # ── 2026-05-04 Bug #4 + #11 修复:stop 命令硬路由 ──
@@ -1296,6 +1694,11 @@ async def orchestrate(
     generated_files: list[tuple[str, str, str]] = []  # (filename, url, local_path)
     _files_before: set[str] = set()  # Round 2 前已存在的文件（仅追踪本轮新增）
 
+    def _workspace_file_url(rel_path: str) -> str:
+        token = ws_tool.workspace_token(workspace_dir) if workspace_dir else ""
+        suffix = f"?workspace_token={token}" if token else ""
+        return f"/v1/chat/files/{req.archive_id}/{req.group_id}/{rel_path}{suffix}"
+
     if complexity != "easy":
         # 2026-05-03 Bug E 修:双层工作区
         # main_workspace = 持久化的核心成果(干净)
@@ -1306,9 +1709,14 @@ async def orchestrate(
         )
         # ── Opt 3: 归档超过 14 天的旧制品文件 ──
         ws_tool.archive_stale_artifacts(main_workspace_dir, max_age_days=14)
-        # 2026-05-07 Bug 4 fix: use trace_id as session_tag for cross-task _shared/ detection
-        _session_tag = f"{req.archive_id}:{req.group_id}:{req.user_id}:{hash(req.message) & 0xFFFFFFFF:08x}"
-        workspace_dir = ws_tool.ensure_temp_workspace(main_workspace_dir, session_tag=_session_tag)
+        # Use a trace-level session tag so "current turn" temp files cannot be
+        # shared by concurrent users in the same group.
+        _session_tag = f"{req.archive_id}:{req.group_id}:{req.user_id}:{trace_id}"
+        workspace_dir = ws_tool.ensure_temp_workspace(
+            main_workspace_dir,
+            session_tag=_session_tag,
+            isolate_session=True,
+        )
         _cap = ws_tool.enforce_workspace_capacity(
             workspace_dir,
             label="main_temp_workspace",
@@ -1407,7 +1815,7 @@ async def orchestrate(
             channel=_intermediate_feedback_channel,
         )
         debug.log(
-            "intermediate.preference",
+            "intermediate_feedback.preference",
             f"value={_intermediate_feedback_pref:.2f} channel={_intermediate_feedback_channel}",
         )
         guard.set_stage(req.archive_id, req.group_id, req.user_id, "round1")
@@ -1666,11 +2074,11 @@ async def orchestrate(
 
         # 扫描工作区中 AI 本轮新生成的文件，只推送 plan.deliverables 中列出的
         promoted_to_main_total: list[str] = []  # 累积自 promote_to_main,bot_log 用
+        _round2_voice_reply_file = (plan.voice_reply_file or "").strip()
+        _round2_voice_reply_text = (plan.voice_reply_text or "").strip()
         if workspace_dir:
-            # 兜底：模型常常忘了把交付物列入 plan.deliverables，导致前端收不到文件。
-            # 实测 case：用户说「帮我修代码」→ 模型修好 hello_fixed.c 编译验证通过 →
-            # plan.deliverables=[]（误以为 key_points/Round3 贴代码就够了）→ 用户没收到文件。
-            # 这里在 needs_tools=True 且 deliverables 空时按启发式补充。
+            # 旧 post-plan 硬补交付物路径已禁用。候选文件只作为 Round2 复核事实，
+            # 由 Round2 LLM 决定是否进入 plan.deliverables。
             try:
                 from app.core.runtime_mode import is_environment_mode as _is_environment_mode
                 _env_mode_for_deliverables = bool(_is_environment_mode())
@@ -1678,25 +2086,22 @@ async def orchestrate(
                 _env_mode_for_deliverables = False
             if _env_mode_for_deliverables:
                 debug.log(
-                    "round2.deliverables.autofix.skip",
-                    "environment mode uses project files as outputs; skip chat attachment autofix",
+                    "round2.deliverables.review.skip",
+                    "environment mode uses project files as outputs; skip chat attachment delivery review",
                 )
             else:
-                _autofix_deliverables(
-                    plan,
-                    user_message=req.message,
-                    needs_tools=needs_tools,
-                    workspace_dir=workspace_dir,
-                    files_before=_files_before,
+                debug.log(
+                    "round2.deliverables.review.skip",
+                    "post-plan hard deliverable mutation disabled; Round2 LLM delivery review owns candidate decisions",
                 )
 
-            # 2026-05-09 BUG FIX (trace 96c47298): autofix 看到工作区有 N 个产物 +
+            # 2026-05-09 BUG FIX (trace 96c47298): 当 LLM/审核已确认有 N 个产物 +
             # plan 是 fallback 状态(intent 含"降级"/internal_note 含"fallback") →
             # 改写 plan 让 Round 3 知道"实际有产出,只是 summarizer 失败了"。
             # 旧行为:Round 3 拿到 fallback intent="降级:JSON 重写失败" + key_points 占位
             # + 8 个 deliverables → 不知所措 → 生成 81 字"还没好你等等"骗用户。
             # 实际上 helper 干的活儿是真有产物的,只是主线程总结那一步崩了。
-            # 新行为:在 plan 已被 autofix 填进文件名后,若 plan 看起来还是 fallback
+            # 新行为:在 plan 已有 deliverables 后,若 plan 看起来还是 fallback
             # 形态,把 intent/key_points 改成"实事求是承认"模板:
             #   - 列出生成的文件(让 Round 3 用人设语言提及)
             #   - 明示"汇总环节崩了,但产物在工作区里"
@@ -1744,7 +2149,7 @@ async def orchestrate(
                 plan.tone = "坦诚、人设语气、简短"
                 plan.length_hint = "短"
                 plan.internal_note = (
-                    f"⚠ autofix 修补:原 plan 是 fallback,但工作区有 "
+                    f"⚠ delivery plan 修补:原 plan 是 fallback,但工作区有 "
                     f"{len(plan.deliverables)} 个产物。改写 plan 让 Round 3 诚实说"
                     f"'活干了大半,汇总崩了'。原 internal_note: "
                     f"{(plan.internal_note or '')[:80]}"
@@ -1760,6 +2165,15 @@ async def orchestrate(
             # 在 plan.deliverables 列出时可下载。后来的设计修订:可执行文件一律拒绝下载
             # (无论是否在 deliverables 里),因为"询问/警告"机制对真实威胁无效但伤害人设。
             # 见 app/api/chat.py:_BLOCKED_EXTENSIONS。
+
+            _round2_voice_reply_file, _round2_voice_reply_text = await _prepare_round2_voice_handoff_before_delivery(
+                plan,
+                persona=persona or "",
+                user_message=req.message or "",
+                workspace_dir=workspace_dir,
+                files_before=_files_before,
+                list_workspace_files=ws_tool.list_generated_files,
+            )
 
             want = set(plan.deliverables) if plan.deliverables else set()
             redeliver_existing = bool(want) and not any(f not in _files_before for f in want)
@@ -1804,16 +2218,22 @@ async def orchestrate(
                     if f in _files_before
                     or f.replace("\\", "/") in {str(x).replace("\\", "/") for x in _files_before}
                 }
-                if _preexisting_artifacts and not redeliver_existing:
-                    _kind = "audio " if _is_new_audio_file_request(req.message or "") else ""
-                    _deliverable_warning_facts.append(
-                        f"Delivery fact: the plan selected {_kind}file(s) that already existed before this round while other selected deliverable(s) are new: "
-                        + ", ".join(sorted(_preexisting_artifacts))
-                        + ". These files remain selected for model review; decide whether each is a final artifact for the current request or old/source/context material."
-                    )
+                if _preexisting_artifacts:
+                    if redeliver_existing:
+                        _deliverable_warning_facts.append(
+                            "Delivery fact: all selected file(s) already existed before this round: "
+                            + ", ".join(sorted(_preexisting_artifacts))
+                            + ". This can be a valid re-delivery only when the current user request explicitly asks to resend, reuse, inspect, or continue from those existing files, or when the maintained active plan links them to the current task. Otherwise they are historical/background files and should be dropped."
+                        )
+                    else:
+                        _deliverable_warning_facts.append(
+                            f"Delivery fact: the plan selected {_kind}file(s) that already existed before this round while other selected deliverable(s) are new: "
+                            + ", ".join(sorted(_preexisting_artifacts))
+                            + ". These files remain selected for model review; decide whether each is a final artifact for the current request or old/source/context material."
+                        )
                     debug.log(
                         "workspace.preexisting_artifact_flagged",
-                        "explicit deliverable(s) already existed before the round; kept and recorded fact",
+                        "explicit deliverable(s) already existed before the round; kept and recorded fact for model review",
                         sorted(_preexisting_artifacts),
                     )
 
@@ -1839,14 +2259,10 @@ async def orchestrate(
                     {"flagged": sorted(_internal_in_want)},
                 )
             if _deliverable_warning_facts:
-                existing_points = list(plan.key_points or [])
-                for _fact in _deliverable_warning_facts:
-                    if _fact not in existing_points:
-                        existing_points.append(_fact)
-                plan.key_points = existing_points
                 _note = (plan.internal_note or "").strip()
                 _warn_note = "deliverable boundary facts recorded for final response"
                 plan.internal_note = ((_note + " | " if _note else "") + _warn_note)[:300]
+                _kp_before_review = len(plan.key_points or [])
                 await _review_explicit_deliverables_with_warnings(
                     plan,
                     user_message=req.message,
@@ -1854,6 +2270,14 @@ async def orchestrate(
                     files_before=_files_before,
                     warning_facts=_deliverable_warning_facts,
                 )
+                if len(plan.key_points or []) == _kp_before_review:
+                    _safe_review_fact = (
+                        "Delivery fact: selected deliverables had timing or boundary warnings; "
+                        "use the reviewed current deliverables list and avoid exposing internal file names or paths."
+                    )
+                    existing_points = list(plan.key_points or [])
+                    if _safe_review_fact not in existing_points:
+                        plan.key_points = existing_points + [_safe_review_fact]
                 want = set(plan.deliverables) if plan.deliverables else set()
                 redeliver_existing = bool(want) and not any(f not in _files_before for f in want)
 
@@ -1891,7 +2315,7 @@ async def orchestrate(
                             )
                         else:
                             debug.log("workspace.redeliver", f"re-delivering modified file: {fname}")
-                url = f"/v1/chat/files/{req.archive_id}/{req.group_id}/{fname}"
+                url = _workspace_file_url(fname)
                 generated_files.append((fname, url, full_path))
             if _skipped_non_deliverable:
                 debug.log(
@@ -1925,9 +2349,14 @@ async def orchestrate(
                         if len(_candidates) == 1:
                             _resolved[_m] = _candidates[0]
                         elif len(_candidates) > 1:
+                            _candidate_labels = [
+                                _round3_visible_file_label(c, role="candidate file")
+                                for c in sorted(_candidates)[:8]
+                            ]
                             _ambiguous_resolve_facts.append(
-                                f"{_m}: multiple prefixed candidates exist; no automatic choice was made: "
-                                + ", ".join(sorted(_candidates)[:8])
+                                f"{_round3_visible_file_label(_m, role='planned file')}: "
+                                "multiple prefixed candidates exist; no automatic choice was made: "
+                                + ", ".join(_candidate_labels)
                             )
                             debug.log(
                                 "workspace.prefix_resolve.ambiguous",
@@ -1940,9 +2369,14 @@ async def orchestrate(
                                 if f.endswith(_suffix) and f not in delivered_names and f in _files_before
                             ]
                             if _preexisting_candidates and not redeliver_existing:
+                                _preexisting_labels = [
+                                    _round3_visible_file_label(c, role="candidate file")
+                                    for c in sorted(_preexisting_candidates)[:8]
+                                ]
                                 _ambiguous_resolve_facts.append(
-                                    f"{_m}: only pre-existing prefixed candidate(s) were found; no automatic re-delivery was made: "
-                                    + ", ".join(sorted(_preexisting_candidates)[:8])
+                                    f"{_round3_visible_file_label(_m, role='planned file')}: "
+                                    "only pre-existing prefixed candidate(s) were found; no automatic re-delivery was made: "
+                                    + ", ".join(_preexisting_labels)
                                 )
                                 debug.log(
                                     "workspace.prefix_resolve.preexisting_only",
@@ -1974,7 +2408,7 @@ async def orchestrate(
                                         "workspace.prefix_resolve.preexisting",
                                         f"resolved explicit deliverable to pre-existing artifact fact, still delivering: {_actual}",
                                     )
-                            _url = f"/v1/chat/files/{req.archive_id}/{req.group_id}/{_actual}"
+                            _url = _workspace_file_url(_actual)
                             generated_files.append((_actual, _url, _fp))
                         debug.log(
                             "workspace.prefix_resolve",
@@ -2037,7 +2471,10 @@ async def orchestrate(
                         f"移到 delivery_partial,改写 plan.intent 阻止 round3 说已发",
                         sorted(_missing_set),
                     )
-                    _miss_lines = "\n".join(f"  - {fn}" for fn in sorted(_missing_set))
+                    _miss_lines = "\n".join(
+                        f"  - {_round3_visible_file_label(fn, role='missing file')}"
+                        for fn in sorted(_missing_set)
+                    )
                     _orig_intent = (plan.intent or "")[:200]
                     _remaining_ok = len(plan.deliverables or []) + len(generated_files)
                     _missing_fact = (
@@ -2111,7 +2548,17 @@ async def orchestrate(
                 _warning_lines = []
                 for _fn, _ws in _validation_warnings:
                     if _ws:
-                        _warning_lines.append(f"{_fn}: " + "; ".join(str(w) for w in _ws[:3]))
+                        _label = _round3_visible_file_label(_fn, role="checked file")
+                        _warn_texts = []
+                        for _w in _ws[:3]:
+                            _w_text = str(_w)
+                            for _token in {_fn, os.path.basename(str(_fn).replace("\\", "/"))}:
+                                if _token:
+                                    _w_text = _w_text.replace(_token, _label)
+                            _warn_texts.append(_w_text)
+                        _warning_lines.append(
+                            f"{_label}: " + "; ".join(_warn_texts)
+                        )
                 if _warning_lines:
                     plan.key_points = list(plan.key_points or []) + [
                         "Delivery fact: structural inspection reported non-fatal warning(s), but the file(s) passed physical delivery checks: "
@@ -2142,7 +2589,13 @@ async def orchestrate(
                     _reason = _ws[0] if _ws else "未知问题"
                     # 去掉 ⚠️ 前缀,人设回复时不要带这个 emoji
                     _reason = _reason.replace("⚠️", "").strip()
-                    _fail_lines.append(f"  - {_fn}: {_reason}")
+                    _label = _round3_visible_file_label(_fn, role="failed file")
+                    for _token in {_fn, os.path.basename(str(_fn).replace("\\", "/"))}:
+                        if _token:
+                            _reason = _reason.replace(_token, _label)
+                    _fail_lines.append(
+                        f"  - {_label}: {_reason}"
+                    )
                 _orig_intent = (plan.intent or "")[:200]
                 # 当前剩余有效 deliverable 数 = generated_files 已被移除失败项后的长度
                 _remaining_ok_count = len(generated_files)
@@ -2263,6 +2716,7 @@ async def orchestrate(
                 )
                 if _zip_result is not None:
                     _zip_name, _zip_url, _zip_full = _zip_result
+                    _zip_url = _workspace_file_url(_zip_name)
                     debug.log(
                         "workspace.zip.replace",
                         f"deliverables {len(promoted_to_main_total)} > {_ZIP_THRESHOLD},"
@@ -2284,51 +2738,9 @@ async def orchestrate(
                     f"auto-zip failed: {type(_e_zip).__name__}: {_e_zip},降级为多文件交付"
                 )
 
-        # Round2 可显式指定:把 TTS 结果作为最终语音回复,而不是普通文件附件。
-        _round2_voice_reply_file = (plan.voice_reply_file or "").strip()
-        _round2_voice_reply_text = (plan.voice_reply_text or "").strip()
-        if _round2_voice_reply_file:
-            _vf_base = os.path.basename(_round2_voice_reply_file)
-            _all_ws_files = set(ws_tool.list_generated_files(workspace_dir)) if workspace_dir else set()
-            if _vf_base in _all_ws_files:
-                _allow_vf, _vf_reason = await _persona_voice_reply_guard(
-                    persona or "", req.message or "", _vf_base,
-                )
-                debug.log(
-                    "voice.round2_handoff.guard",
-                    f"file={_vf_base!r} allow={_allow_vf} reason={_vf_reason}",
-                )
-                if _allow_vf:
-                    plan.deliverables = [d for d in (plan.deliverables or []) if os.path.basename(d) != _vf_base]
-                    generated_files = [g for g in generated_files if os.path.basename(g[0]) != _vf_base]
-                    plan.key_points = [f"按 Round2 指定,最终回复使用已生成语音:{_vf_base}"]
-                    plan.length_hint = "短"
-                else:
-                    plan.voice_reply_file = ""
-                    _round2_voice_reply_file = ""
-                    plan.intent = "按人设拒绝把这段 TTS 作为最终语音回复"
-                    plan.key_points = [_vf_reason or "人设守卫拒绝语音最终输出"]
-                    plan.deliverables = [d for d in (plan.deliverables or []) if os.path.basename(d) != _vf_base]
-            else:
-                debug.log("voice.round2_handoff.missing", f"voice_reply_file not found: {_vf_base!r}")
-                plan.voice_reply_file = ""
-                _round2_voice_reply_file = ""
-        elif _round2_voice_reply_text:
-            _allow_vt, _vt_reason = await _persona_voice_reply_guard(
-                persona or "", req.message or "", _round2_voice_reply_text,
-            )
-            debug.log(
-                "voice.round2_handoff.guard",
-                f"text_len={len(_round2_voice_reply_text)} allow={_allow_vt} reason={_vt_reason}",
-            )
-            if _allow_vt:
-                plan.key_points = [_round2_voice_reply_text]
-                plan.length_hint = "短"
-            else:
-                plan.voice_reply_text = ""
-                _round2_voice_reply_text = ""
-                plan.intent = "按人设拒绝把这段 TTS 文本作为最终语音回复"
-                plan.key_points = [_vt_reason or "人设守卫拒绝语音最终输出"]
+        # Round2 voice_reply_file/text has passed the mechanical handoff check
+        # before ordinary attachment delivery. Keep this late stage side-effect
+        # free so a rejected candidate cannot already have been sent.
 
         # ── 3. Round 3：人设流式润色 ──
         # Bug 27 修（彻底版）：用 abort generation 号区分轮次。
@@ -2359,6 +2771,7 @@ async def orchestrate(
         _round3_buffer_until_safe = True
         _round3_buffer_limit = 1200
         _round3_buffer_flushed = False
+        _round3_late_protocol_tail = ""
         _gen_files_2tuple = [(f, u) for f, u, _ in generated_files] if generated_files else None
 
         # ── 2026-05-10 Patch 58 v2: round3 输入文件名去内部前缀 ──
@@ -2384,44 +2797,23 @@ async def orchestrate(
         except Exception:
             _known_task_id_prefixes = []
 
-        def _displayed_name(name: str) -> str:
-            """先查 mapping,再用 task_id 前缀剥(fallback)。"""
-            if name in _displayed_remap_for_r3:
-                return _displayed_remap_for_r3[name]
-            for tid in _known_task_id_prefixes:
-                pfx = tid + "_"
-                if name.startswith(pfx):
-                    stripped = name[len(pfx):]
-                    if stripped:
-                        return stripped
-            return name
-
-        if _gen_files_2tuple:
-            _gen_files_2tuple = [(_displayed_name(f), u) for f, u in _gen_files_2tuple]
         # 给 round3 用 plan 副本(避免修改主流程的 plan)
-        if (_displayed_remap_for_r3 or _known_task_id_prefixes) and (
-            plan.deliverables or plan.delivery_partial
-        ):
-            try:
-                _plan_for_r3 = type(plan)(**plan.model_dump())
-                if _plan_for_r3.deliverables:
-                    _plan_for_r3.deliverables = [
-                        _displayed_name(d) for d in _plan_for_r3.deliverables
-                    ]
-                if _plan_for_r3.delivery_partial:
-                    _plan_for_r3.delivery_partial = [
-                        _displayed_name(d) for d in _plan_for_r3.delivery_partial
-                    ]
+        try:
+            _plan_for_r3, _gen_files_2tuple = _round3_visible_plan_and_files(
+                plan,
+                files=_gen_files_2tuple,
+                displayed_remap=_displayed_remap_for_r3,
+                known_task_id_prefixes=_known_task_id_prefixes,
+            )
+            if _displayed_remap_for_r3 or _known_task_id_prefixes:
                 debug.log(
                     "round3.displayed_name_applied",
                     f"P58 v2: round3 输入文件名已去前缀 "
                     f"(mapping={len(_displayed_remap_for_r3)} 条, "
                     f"task_id 前缀={len(_known_task_id_prefixes)} 个)",
                 )
-            except Exception:
-                log.exception("P58 v2 plan copy failed (non-fatal); using original plan")
-                _plan_for_r3 = plan
-        else:
+        except Exception:
+            log.exception("P58 v2 plan copy failed (non-fatal); using original plan")
             _plan_for_r3 = plan
 
         # ── 2026-05-02 part9 加:Round 2 期间已 abort → Round 3 不发 LLM 请求 ──
@@ -2614,16 +3006,21 @@ async def orchestrate(
                     if len(_prefix) >= _round3_buffer_limit:
                         _round3_buffer_until_safe = False
                         _round3_buffer_flushed = True
+                        _round3_late_protocol_tail = _prefix[-240:]
                         yield "token", {"text": _prefix}
                 else:
-                    if _looks_like_user_visible_protocol_text(tok):
+                    _late_probe = (_round3_late_protocol_tail + tok)[-500:]
+                    if _looks_like_user_visible_protocol_text(_late_probe):
                         debug.warn(
                             "round3.protocol_leak.blocked_late",
                             "blocked late abort-summary Round3 token containing hidden tool protocol",
-                            tok[:500],
+                            _late_probe[:500],
                         )
+                        if final_text_parts and final_text_parts[-1] == tok:
+                            final_text_parts.pop()
                         break
                     yield "token", {"text": tok}
+                    _round3_late_protocol_tail = (_round3_late_protocol_tail + tok)[-240:]
                 # 流式期间又来新 abort → 立即停(用户连按两次)
                 if abort_ch.gen > round3_start_gen:
                     debug.log(
@@ -2695,9 +3092,9 @@ async def orchestrate(
                 # 2026-05-06: 有未验证 helper 产出时,在前面插入警告条目
                 if all_verification_needed:
                     _excerpts_for_r3.append({
-                        "task_id": "⚠️ 验证警告",
+                        "task_id": "verification_warning",
                         "excerpt": (
-                            f"以下 helper 报告**未经独立验证**,可能包含未发现的 bug。"
+                            f"以下工作证据**未经独立验证**,可能包含未发现的问题。"
                             f"用户追问准确性时,应说明结果尚未独立验证,不要当作确凿事实引用。"
                             f"验证相关事实: {all_verification_advice[:300]}"
                         ),
@@ -2738,16 +3135,21 @@ async def orchestrate(
                     if len(_prefix) >= _round3_buffer_limit:
                         _round3_buffer_until_safe = False
                         _round3_buffer_flushed = True
+                        _round3_late_protocol_tail = _prefix[-240:]
                         yield "token", {"text": _prefix}
                 else:
-                    if _looks_like_user_visible_protocol_text(tok):
+                    _late_probe = (_round3_late_protocol_tail + tok)[-500:]
+                    if _looks_like_user_visible_protocol_text(_late_probe):
                         debug.warn(
                             "round3.protocol_leak.blocked_late",
                             "blocked late Round3 token containing hidden tool protocol",
-                            tok[:500],
+                            _late_probe[:500],
                         )
+                        if final_text_parts and final_text_parts[-1] == tok:
+                            final_text_parts.pop()
                         break
                     yield "token", {"text": tok}
+                    _round3_late_protocol_tail = (_round3_late_protocol_tail + tok)[-240:]
                 # gen-based 兜底：流式期间 abort_ch.gen 上涨说明有新 abort 到达。
                 # 此时 abort_event 也会被 signal() 设置,_round3 内的 is_set() 检查
                 # 也会终止循环;这里再补一道,确保即使 _round3 还没读到也能停。
@@ -2772,6 +3174,14 @@ async def orchestrate(
                 "emitted non-LLM fallback reply"
             )
             yield "token", {"text": final_text}
+        if final_text.strip() and _looks_like_user_visible_protocol_text(final_text):
+            debug.warn(
+                "round3.protocol_leak.final_sanitized",
+                "final Round3 text still contained internal workflow terms; using user-facing fallback for downstream delivery",
+                final_text[:1000],
+            )
+            final_text = _plan_fallback_user_reply(_plan_for_r3 if '_plan_for_r3' in locals() else plan)
+            final_text_parts = [final_text]
         debug.log("round3.done", f"len={len(final_text)}", final_text)
         _mark("round3_done")
 
@@ -2789,7 +3199,7 @@ async def orchestrate(
                 if os.path.isfile(_vp):
                     voice_reply_file = (
                         _vf,
-                        f"/v1/chat/files/{req.archive_id}/{req.group_id}/{_vf}",
+                        _workspace_file_url(_vf),
                         _vp,
                     )
                     voice_suppress_text = True
@@ -2814,6 +3224,12 @@ async def orchestrate(
                         persona=persona or "",
                         voice_preference=_voice_pref,
                     )
+                debug.log(
+                    "voice.delivery_decision",
+                    f"use_voice={decision.use_voice} "
+                    f"llm_decision_available={getattr(decision, 'llm_decision_available', True)} "
+                    f"reason={decision.reason}",
+                )
 
                 if decision.too_long and _is_voice_demanded(req.message or ""):
                     # 用户要求语音但回复太长 → 注入"太长"信息,让下次对话知晓
@@ -2859,12 +3275,12 @@ async def orchestrate(
                                 max_age_days=14,
                             )
                             _session_tag = (
-                                f"{req.archive_id}:{req.group_id}:{req.user_id}:"
-                                f"{hash(req.message) & 0xFFFFFFFF:08x}:voice"
+                                f"{req.archive_id}:{req.group_id}:{req.user_id}:{trace_id}:voice"
                             )
                             workspace_dir = ws_tool.ensure_temp_workspace(
                                 main_workspace_dir,
                                 session_tag=_session_tag,
+                                isolate_session=True,
                             )
                             ws_tool.register_workspace(group_key, workspace_dir)
                             debug.log(
@@ -2908,16 +3324,6 @@ async def orchestrate(
                         # 模型多份占爆显存/内存。
                         from app.llm.tools.registry import _async_semaphore, _GPU_SEMAPHORE as _shared_gpu_sem
                         from app.llm.tools.registry import _TTS_SEMAPHORE as _shared_tts_sem
-                        from app.llm.tools.registry import tts_persona_guard as _tts_persona_guard
-                        _guard_ok, _guard_reason = await _tts_persona_guard(
-                            speak_text,
-                            purpose="round3/final voice reply",
-                        )
-                        debug.log("voice.persona_guard", f"allow={_guard_ok} reason={_guard_reason}")
-                        if not _guard_ok:
-                            decision.use_voice = False
-                            debug.log("voice.persona_guard.refused", _guard_reason or "persona refused voice TTS")
-                            raise RuntimeError("persona_guard_refused_tts")
                         from app.llm.tools.tts_bridge import tts_clone
                         _tts_func = tts_clone if _voice_ref_audio else tts_design
                         _tts_kwargs = {
@@ -3016,7 +3422,7 @@ async def orchestrate(
                         except OSError:
                             pass
                         if r.ok and r.paths:
-                            voice_url = f"/v1/chat/files/{req.archive_id}/{req.group_id}/{voice_fname}"
+                            voice_url = _workspace_file_url(voice_fname)
                             voice_reply_file = (voice_fname, voice_url, voice_path)
                             voice_suppress_text = True
                             debug.log("voice.reply",
@@ -3454,12 +3860,12 @@ async def orchestrate(
             if '_persona_excerpt_token' in locals() and _persona_excerpt_token is not None:
                 from app.llm.tools.delegate import reset_current_persona_excerpt as _rp
                 _rp(_persona_excerpt_token)
+            if '_tts_helper_persona_token' in locals() and _tts_helper_persona_token is not None:
+                from app.llm.tools.delegate import reset_current_tts_helper_persona as _rtp
+                _rtp(_tts_helper_persona_token)
             if '_voice_instruct_token' in locals() and _voice_instruct_token is not None:
                 from app.llm.tools.registry import reset_current_voice_instruct as _rv
                 _rv(_voice_instruct_token)
-            if '_tts_guard_token' in locals() and _tts_guard_token is not None:
-                from app.llm.tools.registry import reset_current_tts_guard_context as _rtg
-                _rtg(_tts_guard_token)
             if '_voice_ref_token' in locals() and _voice_ref_token is not None:
                 from app.llm.tools.registry import reset_current_voice_ref_audio as _rr
                 _rr(_voice_ref_token)

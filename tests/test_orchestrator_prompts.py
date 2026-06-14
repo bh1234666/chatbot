@@ -326,7 +326,10 @@ def test_progress_message_prompt_hides_internal_ocr_by_default():
     assert "persona feedback preference" in payload_src
     assert "Use outcome-level wording" in prompt_src
     assert "turn internal workflow into user-facing progress wording" in prompt_src
-    assert "Preserve technical task ids" in prompt_src
+    assert "Do not expose internal process labels" in prompt_src
+    assert "private orchestration names" in prompt_src
+    assert "helper, delegate, toolchain, agent_state" not in prompt_src
+    assert "Preserve technical task labels" in prompt_src
     assert "判断是否需要中途回复" in prompt_src
 
 
@@ -365,15 +368,78 @@ def test_round3_prompt_rewrites_internal_process_terms_to_deliverable_language()
         plan,
         "用户",
         "图里写了什么",
-        helper_reports_excerpt=[{"task_id": "ocr#1", "excerpt": "可确认内容: alpha"}],
+        helper_reports_excerpt=[
+            {"task_id": "ocr#1", "excerpt": "可确认内容: alpha"},
+            {
+                "task_id": "read_page",
+                "excerpt": (
+                    "helper report from _helpers_shared/fetch/page.txt says beta is uncertain; "
+                    "producer-owned output from main process is producer_self_verified"
+                ),
+            },
+        ],
     )
     system_text = msgs[0]["content"]
-    assert "Internal terms such as OCR, TTS, helper" in system_text
+    assert "Internal terms such as OCR, TTS, routing labels" in system_text
     assert "outcome-level language" in system_text and "image text" in system_text
+    assert "private evidence and transform them into natural persona-consistent wording" in system_text
     assert "Concept questions" in system_text and "OCR" in system_text
     user_text = "\n".join(m["content"] for m in msgs if m["role"] == "user")
-    assert "Real helper/tool evidence for this reply" in user_text
-    assert "helper 和工具结果是证据来源" in user_text
+    assert "Real work/tool evidence for this reply" in user_text
+    assert "工作证据和工具结果是证据来源" in user_text
+    assert "Current tool evidence source 1" in user_text
+    assert "Work evidence source 2" in user_text
+    assert "Evidence excerpt: read_page" not in user_text
+    assert "read_page" not in user_text
+    assert "ocr#1" not in user_text
+    assert "Producer evidence" not in user_text
+    assert "producer" not in user_text.lower()
+    assert "main process" not in user_text.lower()
+    assert "main thread" not in user_text.lower()
+    assert "output_self_verified" in user_text
+    assert "helper" not in user_text.lower()
+    assert "_helpers_shared" not in user_text
+
+
+def test_round3_plan_rendering_sanitizes_voice_internal_status_terms():
+    from app.core import context
+    from app.schemas.api import ResponsePlan
+
+    plan = ResponsePlan(
+        intent="tts_persona_guard blocked Round3 helper delivery",
+        key_points=[
+            "json.voice_delivery_final_review said helper/delegate voice_guard resource_required",
+            "push=true is unsupported by the tts tool; do not automatically send voice",
+        ],
+        tone="自然",
+        length_hint="短",
+        avoid=["Do not expose task-quality guard or _helpers_shared/voice/report.txt"],
+        callbacks=["Round2 delegate returned persona_guard"],
+    )
+
+    msgs = context.round3_messages(
+        "你是一个自然说话的测试人设。",
+        plan,
+        "用户",
+        "用语音回复我",
+    )
+    user_text = "\n".join(m["content"] for m in msgs if m["role"] == "user")
+
+    forbidden = [
+        "tts_persona_guard",
+        "voice_delivery_final_review",
+        "helper/delegate",
+        "voice_guard",
+        "persona_guard",
+        "task-quality guard",
+        "_helpers_shared",
+        "json.",
+        "Round2",
+        "Round3",
+    ]
+    for term in forbidden:
+        assert term not in user_text
+    assert "voice/style check" in user_text or "voice delivery check" in user_text
 
 
 def test_round3_prompt_distinguishes_data_aliases_from_schema_errors():
@@ -557,7 +623,8 @@ def test_round3_no_delivery_does_not_hide_workspace_write_facts():
     )
     user_text = "\n".join(m["content"] for m in msgs if m["role"] == "user")
 
-    assert "workspace_write#1" in user_text
+    assert "Current tool evidence source 1" in user_text
+    assert "workspace_write#1" not in user_text
     assert "A workspace file was written in this turn: evidence.txt" in user_text
     assert "No file will be sent to the user" in user_text
     assert "do not claim no files were modified" in user_text
@@ -645,7 +712,7 @@ def test_round3_prompt_anchors_to_current_user_request_over_old_topic():
     assert "Topic Anchor" in system_text
     assert "The current request has priority" in system_text
     assert "别继续上个话题" in msgs[1]["content"]
-    assert "History, shared conversation, and helper reports are evidence sources" in system_text
+    assert "History, shared conversation, and background evidence are evidence sources" in system_text
     assert "not automatic current deliverables" in system_text
 
 
@@ -784,6 +851,9 @@ def test_round2_prompt_preserves_structured_evidence_in_key_points():
     assert "project-relative paths, labels, and numeric values" in prompt
     assert "keep intermediate items as well as the first and last items" in prompt
     assert "keep paths at their evidence granularity" in prompt
+    assert "user-facing plan inputs for Round3" in prompt
+    assert "without internal routing labels" in prompt
+    assert "helper/delegate/producer/background work" in prompt
 
 
 def test_round2_prompt_does_not_force_weak_audit_findings():
@@ -822,6 +892,30 @@ def test_round3_prompt_preserves_source_proper_nouns_when_localizing():
     assert "keep source proper nouns" in prompt
     assert "labels, IDs, quoted strings, command names, and numeric fields" in prompt
     assert "Use a localized label only when the evidence provides that localized label" in prompt
+
+
+def test_round3_prompt_rewrites_tts_guard_status_to_user_visible_result():
+    from app.core.round_prompts import ROUND3_EVIDENCE_PRESENTATION_RULES
+
+    prompt = ROUND3_EVIDENCE_PRESENTATION_RULES
+
+    assert "persona_guard/voice_guard" in prompt
+    assert "resource_required" in prompt
+    assert "Use them only as hidden evidence" in prompt
+    assert "was not sent as voice" in prompt
+    assert "do not render the internal mechanism name" in prompt
+
+
+def test_round3_prompt_requires_persona_consistent_internal_fact_rendering():
+    from app.core.round_prompts import ROUND3_EVIDENCE_PRESENTATION_RULES
+
+    prompt = ROUND3_EVIDENCE_PRESENTATION_RULES
+
+    assert "would make sense for the assistant's persona" in prompt
+    assert "helper, guard, Round, candidate, push flag, schema, JSON field" in prompt
+    assert "voice_reply_file" in prompt
+    assert "Replace routing/system words" in prompt
+    assert "If voice generation failed or was skipped" in prompt
 
 
 def test_round2_prompt_keeps_main_thread_as_contract_manager_for_long_source_material():
@@ -1058,17 +1152,21 @@ def test_round3_evidence_intro_prefers_later_main_thread_facts():
     from app.core.round_prompts import round3_helper_evidence_intro
 
     prompt = round3_helper_evidence_intro()
-    assert "later main-thread apply, run, or verification facts" in prompt
-    assert "以后续主线程事实表示当前状态" in prompt
+    assert "later apply, run, or verification facts" in prompt
+    assert "以后续事实表示当前状态" in prompt
 
 
 def test_round2_prompt_requires_new_tts_for_audio_generation_requests():
     from app.core import context
 
     prompt = context.ROUND2_SYSTEM_TEMPLATE
-    assert "Generate wav/mp3/TTS/audio attachment" in prompt
+    assert "Speech/narration/TTS/persona-voice requests" in prompt
     assert "create a fresh file for this turn" in prompt
-    assert "voice identity and delivery configuration are controlled outside the LLM" in prompt
+    assert "built-in/system TTS route" in prompt
+    assert "external TTS engines such as gTTS, edge-tts, pyttsx3" in prompt
+    assert "Non-speech audio generation such as white noise" in prompt
+    assert "remains code/signal work, not TTS" in prompt
+    assert "Voice identity, timbre, reference audio" in prompt
 
 
 def test_round2_prompt_keeps_main_process_in_charge_of_resource_helpers():

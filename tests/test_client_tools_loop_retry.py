@@ -744,6 +744,9 @@ def test_runtime_fact_merge_preserves_real_tool_success():
     assert parsed["warnings"] == ["browser_reproduction_evidence_missing_before_edit"]
     assert parsed["runtime_facts"][0]["blocked_until_browser_evidence"] is False
     assert "allowed to execute" in parsed["runtime_facts"][0]["fact"]
+    serialized = json.dumps(parsed["runtime_facts"][0], ensure_ascii=False).lower()
+    for forbidden in ("helper", "delegate", "委派", "background work delegation"):
+        assert forbidden not in serialized
 
 
 def test_browser_pre_edit_predecision_guidance_is_factual():
@@ -756,6 +759,9 @@ def test_browser_pre_edit_predecision_guidance_is_factual():
     assert "not a forced decision" in hint
     assert "Source reads" in hint
     assert "当前任务要求浏览器" in hint
+    lowered = hint.lower()
+    for forbidden in ("helper", "delegate", "委派", "background work delegation"):
+        assert forbidden not in lowered
 
 
 def test_browser_evidence_detection_recognizes_browser_automation_not_plain_http():
@@ -1500,6 +1506,9 @@ async def test_main_project_discovery_injects_source_path_handoff_fact(monkeypat
         assert "service/render.py" in joined
         assert "delegate prompt 不粘贴" in joined
         assert "do not paste complete source-code blocks" in joined
+        assert "focused code helper" not in joined
+        assert "helper can read source bodies" not in joined
+        assert "helper-owned reading" not in joined
         calls["saw_hint"] = True
         return (
             _Resp(choices=[_Choice(message=_Msg(
@@ -1740,7 +1749,8 @@ async def test_main_text_material_handoff_fact_after_compact_listing(monkeypatch
         assert "inbox/01.txt" in joined
         assert "prefs.yaml" in joined
         assert "not a forced decision" in joined
-        assert "one focused read/edit/code helper" in joined
+        assert "one focused reading/implementation step" in joined
+        assert "focused read/edit/code helper" not in joined
         calls["saw_hint"] = True
         return (
             _Resp(choices=[_Choice(message=_Msg(
@@ -1818,8 +1828,13 @@ async def test_main_helper_handoff_overwork_fact_after_repeated_direct_work(monk
             args = {"path": "verify_results.py"} if tool == "env_read" else {"command": "python probe.py"}
             if tool == "workspace":
                 args = {"action": "write", "path": "probe.py", "content": "print('probe')\n"}
+            if calls["n"] == 2:
+                joined = "\n".join(str(m.get("content") or "") for m in kwargs["msgs"])
+                assert "processing_handoff_fact" in joined
+                assert "helper_handoff_fact" not in joined
             if calls["n"] == 5:
                 joined = "\n".join(str(m.get("content") or "") for m in kwargs["msgs"])
+                assert "main_processing_handoff_overwork_fact" not in joined
                 assert "main_helper_handoff_overwork_fact" not in joined
             return (
                 _Resp(choices=[_Choice(message=_Msg(
@@ -1831,10 +1846,14 @@ async def test_main_helper_handoff_overwork_fact_after_repeated_direct_work(monk
             )
         if calls["n"] == 7:
             joined = "\n".join(str(m.get("content") or "") for m in kwargs["msgs"])
-            assert "main_helper_handoff_overwork_fact" in joined
+            assert "main_processing_handoff_overwork_fact" in joined
+            assert "main_helper_handoff_overwork_fact" not in joined
             assert "users.db" in joined
             assert "verify_results.py" in joined
             assert "not a forced decision" in joined
+            assert "focused-step input paths" in joined
+            assert "focused helper" not in joined
+            assert "helper-suitable" not in joined
             calls["saw_hint"] = True
             return (
                 _Resp(choices=[_Choice(message=_Msg(
@@ -1891,6 +1910,16 @@ async def test_main_helper_handoff_overwork_fact_after_repeated_direct_work(monk
     assert calls["saw_hint"] is True
     assert calls["n"] >= 8
     assert json.loads(content)["intent"] == "delegated after overwork fact"
+    delegate_tool_contents = [
+        m.get("content", "")
+        for m in _msgs
+        if m.get("role") == "tool" and "results_returned" in str(m.get("content", ""))
+    ]
+    assert delegate_tool_contents
+    delegate_tool_text = "\n".join(str(x) for x in delegate_tool_contents).lower()
+    assert "helpers_completed" not in delegate_tool_text
+    assert "helpers_still_running" not in delegate_tool_text
+    assert "helper" not in delegate_tool_text
 
 
 @pytest.mark.asyncio
@@ -2035,6 +2064,47 @@ def test_large_tool_result_uses_structured_summary_before_truncation():
     assert parsed["result_items"][0]["task_id"] == "read_big_source"
     assert parsed["result_items"][0]["files"] == ["read_big_source_extracted.txt"]
     assert "full evidence line\nfull evidence line\nfull evidence line\nfull evidence line" not in summary
+
+
+def test_large_tool_result_preserves_tts_voice_candidate_fields():
+    from app.llm.client_tools_loop import _summarize_large_tool_result
+
+    payload = {
+        "ok": True,
+        "task_ok": True,
+        "helpers_completed": 1,
+        "results": [
+            {
+                "task_id": "voice_reply",
+                "kind": "tts",
+                "ok": True,
+                "terminal_reason": "completed",
+                "report": "VERDICT: PASS\n" + "speech generated\n" * 300,
+                "voice_reply_file_candidate": "reply.wav",
+                "deliverable_candidate": "reply.wav",
+                "delivery_guidance": "use voice_reply_file when it is the final spoken reply",
+                "outputs_check": {
+                    "outputs_complete": True,
+                    "producer_self_verified": True,
+                },
+                "files": ["reply.wav"],
+            }
+        ],
+    }
+
+    summary = _summarize_large_tool_result(
+        "delegate",
+        json.dumps(payload, ensure_ascii=False),
+        1800,
+    )
+
+    assert summary is not None
+    parsed = json.loads(summary.split("\n[structured summary shortened]", 1)[0])
+    item = parsed["result_items"][0]
+    assert item["kind"] == "tts"
+    assert item["voice_reply_file_candidate"] == "reply.wav"
+    assert item["deliverable_candidate"] == "reply.wav"
+    assert "final spoken reply" in item["delivery_guidance"]
 
 
 def test_large_tool_result_spills_long_stdout_to_file(tmp_path):
@@ -2668,6 +2738,43 @@ def test_retryable_delegate_facts_include_resource_required():
     assert len(facts) == 1
     assert facts[0]["task_id"] == "paper_edit"
     assert facts[0]["terminal_reason"] == "resource_required"
+
+
+def test_tts_resource_required_is_gap_fact_not_retry_blocker():
+    from app.llm.client_tools_loop import (
+        _delegate_gap_facts_from_result,
+        _retryable_delegate_facts_from_result,
+    )
+
+    payload = {
+        "ok": True,
+        "task_ok": False,
+        "results": [{
+            "task_id": "catgirl_voice_reply",
+            "ok": False,
+            "kind": "tts",
+            "terminal_reason": "resource_required",
+            "resource_required": {
+                "matching_helper_kind": "tts",
+                "suggested_helper_kind": "tts",
+                "blocked_reason": "voice generation authorization context unavailable",
+            },
+            "outputs_check": {
+                "outputs_complete": False,
+                "outputs_missing": ["catgirl_voice_reply.wav"],
+            },
+        }],
+    }
+
+    raw = json.dumps(payload, ensure_ascii=False)
+    retry_facts = _retryable_delegate_facts_from_result(raw)
+    gap_facts = _delegate_gap_facts_from_result(raw)
+
+    assert retry_facts == []
+    assert len(gap_facts) == 1
+    assert gap_facts[0]["task_id"] == "catgirl_voice_reply"
+    assert gap_facts[0]["nonblocking_tts_generation_fact"] is True
+    assert gap_facts[0]["gap_kind"] == "tts_generation_not_completed"
 
 
 def test_retryable_delegate_facts_include_plain_incomplete_failure():
@@ -3384,7 +3491,7 @@ def test_tool_result_signal_marks_delegate_incomplete_as_failure():
     ok, summary = _tool_result_signal(json.dumps(payload, ensure_ascii=False))
 
     assert ok is False
-    assert "delegate blocked" in summary
+    assert "processing blocked" in summary
     assert "resource_required=1" in summary
 
 
@@ -3408,7 +3515,7 @@ def test_delegate_running_snapshot_is_not_workflow_error_status():
     event_status, event_ok = _workflow_event_status_for_tool_result("delegate", result, "error")
 
     assert loop_ok is False
-    assert "delegate blocked" in summary
+    assert "processing blocked" in summary
     assert event_status == "running"
     assert event_ok is True
 
@@ -3854,6 +3961,37 @@ def test_delegate_workflow_result_summary_separates_returned_from_success():
     }
 
 
+def test_delegate_workflow_summary_preserves_tts_voice_candidate_lane():
+    from app.llm.client_tools_loop import _delegate_workflow_result_summary
+
+    summary = _delegate_workflow_result_summary({
+        "task_ok": True,
+        "helpers_completed": 1,
+        "helpers_still_running": 0,
+        "success_count": 1,
+        "results": [{
+            "task_id": "voice_reply",
+            "kind": "tts",
+            "ok": True,
+            "terminal_reason": "completed",
+            "voice_reply_file_candidate": "reply.wav",
+            "deliverable_candidate": "reply.wav",
+            "delivery_guidance": "use voice_reply_file when final spoken reply",
+            "outputs_check": {
+                "outputs_complete": True,
+                "producer_self_verified": True,
+            },
+            "files": ["reply.wav"],
+        }],
+    })
+
+    item = summary["result_items"][0]
+    assert item["kind"] == "tts"
+    assert item["voice_reply_file_candidate"] == "reply.wav"
+    assert item["deliverable_candidate"] == "reply.wav"
+    assert item["delivery_guidance"] == "use voice_reply_file when final spoken reply"
+
+
 def test_publish_main_tool_event_preserves_project_mutation_summary(monkeypatch):
     from app.llm import client_tools_loop
 
@@ -3946,8 +4084,8 @@ def test_delegate_completion_checkpoint_extracts_clean_helper_evidence_only():
     assert checkpoint is not None
     assert checkpoint["files"] == ["db_index_paper.docx"]
     assert "outputs_complete=true" in checkpoint["facts"]
-    assert "helper reported recommend: no" in checkpoint["facts"]
-    assert "helper report includes Output files" in checkpoint["facts"]
+    assert "available evidence includes recommend: no" in checkpoint["facts"]
+    assert "available evidence includes Output files" in checkpoint["facts"]
     assert checkpoint["warning_count"] == 0
 
 
@@ -4684,3 +4822,171 @@ def test_final_plan_content_by_reference_detected_as_self_assessment():
         "length_hint": "short",
     })
     assert _looks_like_final_plan_self_assessment(normal) is False
+
+
+def test_round3_visible_protocol_guard_detects_internal_helper_structure():
+    from app.core.orchestrator_entry import _looks_like_user_visible_protocol_text
+
+    assert _looks_like_user_visible_protocol_text(
+        "The read helper report says the page content was fetched."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "I copied results from _helpers_shared/fetch_page/page.txt."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "helpers_still_running=0 and helpers_completed=1."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "The work unit reported the page content was fetched."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "The processing record reported the page content was fetched."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "Background work reported the file was generated."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "Available evidence reported the file is ready."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "The producer evidence says the file is ready."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "The helper task contract is complete."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "The helper reported the file was generated successfully."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "This exposed the helper existence to the user."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "An internal helper exists for this task."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "helper 已经完成并返回了文件。"
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "这句话暴露了 helper 的存在情况。"
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "内部 helper 在跑，等它完成后我再回复。"
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "后台工具链已经把网页内容抓到了。"
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "内部工具调用返回了页面内容。"
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "I delegated to a helper to inspect the page."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "选好了我马上让helper开工喵！"
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "后台任务已经完成并返回了文件。"
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "A background task reported the file was generated."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "Background producers returned the requested evidence."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "The producer-owned artifact is ready."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "The producing helper handled validation."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "Producer helpers returned the requested files."
+    )
+    assert _looks_like_user_visible_protocol_text(
+        "我调用了 helper 来检查页面。"
+    )
+    assert not _looks_like_user_visible_protocol_text(
+        "I used the available evidence to summarize the page."
+    )
+    assert not _looks_like_user_visible_protocol_text(
+        "Ask a human helper to review this later."
+    )
+
+
+def test_round3_late_protocol_guard_uses_rolling_tail():
+    from pathlib import Path
+    from app.core.orchestrator_entry import _looks_like_user_visible_protocol_text
+
+    assert not _looks_like_user_visible_protocol_text("The read hel")
+    assert _looks_like_user_visible_protocol_text("The read helper report says")
+
+    src = Path("app/core/orchestrator_entry.py").read_text(encoding="utf-8")
+    assert "_round3_late_protocol_tail + tok" in src
+    assert "final_text_parts.pop()" in src
+
+
+def test_round3_protocol_fallback_sanitizes_internal_helper_terms():
+    from app.core.orchestrator_entry import _plan_fallback_user_reply
+    from app.schemas.api import ResponsePlan
+
+    plan = ResponsePlan(
+        intent="待用户确认方向后派 helper 生成材料",
+        key_points=[
+            "helper report says the document can be generated",
+            "background task writer failed and producer-owned output was partial",
+            "I copied results from _helpers_shared/fetch_page/page.txt.",
+            "helpers_still_running=0; the processing record reported success from available evidence.",
+            "Producer helpers returned a draft.",
+            "This exposed the helper existence to the user.",
+            "内部 helper 在跑，后台工具链返回了草稿。",
+            "这句话暴露了 helper 的存在情况。",
+        ],
+        tone="plain",
+        length_hint="short",
+        deliverables=[".helper_fetch_full_report.txt", "final_report.docx"],
+    )
+
+    text = _plan_fallback_user_reply(plan)
+
+    assert "helper" not in text.lower()
+    assert "helpers_still_running" not in text
+    assert "work unit" not in text.lower()
+    assert "processing record" not in text.lower()
+    assert "background task" not in text.lower()
+    assert "background work" not in text.lower()
+    assert "producer-owned" not in text.lower()
+    assert "producer evidence" not in text.lower()
+    assert "producer helper" not in text.lower()
+    assert "producer helpers" not in text.lower()
+    assert "helper existence" not in text.lower()
+    assert "internal helper" not in text.lower()
+    assert "producer" not in text.lower()
+    assert "available evidence" not in text.lower()
+    assert "内部 helper" not in text
+    assert "helper 的存在情况" not in text
+    assert "后台工具链" not in text
+    assert "内部工具调用" not in text
+    assert "_helpers_shared" not in text
+    assert ".helper_" not in text
+    assert "final_report.docx" in text
+
+
+def test_round3_gap_fact_helpers_are_neutralized_before_final_plan():
+    from app.llm.client_tools_loop import _neutral_round3_gap_text, _round3_gap_missing_items
+
+    text = _neutral_round3_gap_text(
+        "helper_gap from background work: producer-owned helper report in _helpers_shared/fetch/page.txt"
+    )
+
+    lowered = text.lower()
+    for forbidden in ("helper", "background work", "producer-owned", "_helpers_shared"):
+        assert forbidden not in lowered
+    assert "processing" in lowered
+
+    missing = _round3_gap_missing_items([
+        "_helpers_shared/fetch/page.txt",
+        ".helper_fetch_full_report.txt",
+        "final_report.docx",
+    ])
+
+    assert missing == ["final_report.docx"]

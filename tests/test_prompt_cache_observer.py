@@ -46,6 +46,23 @@ def test_tendency_block_uses_sorted_json_keys() -> None:
     assert left.index('"complexity"') < left.index('"needs_tools"') < left.index('"parallelizable"')
 
 
+def test_toolchain_cache_sanitizer_does_not_create_internal_aliases() -> None:
+    from app.core.toolchain_cache import _sanitize_model_visible_toolchain_text
+
+    text = _sanitize_model_visible_toolchain_text(
+        "delegate wrote _helpers_shared/fetch/page.txt then _delegate_fetch resumed; "
+        "internal_shared/old/page.txt and internal_run_123 were historical.",
+        500,
+    )
+
+    assert "_helpers_shared" not in text
+    assert "internal_shared" not in text
+    assert "_delegate_" not in text
+    assert "internal_run" not in text
+    assert "work material" in text
+    assert "processing_record" in text
+
+
 def test_tool_schema_hash_is_stable_for_key_order() -> None:
     messages = [{"role": "system", "content": "stable"}, {"role": "user", "content": "x"}]
     tools_a = [
@@ -697,8 +714,15 @@ def test_environment_tools_preserve_chat_tool_prefix() -> None:
     chat_tools = tools_for_runtime_mode("chat")
     env_tools = tools_for_runtime_mode("environment")
 
-    assert env_tools[:len(chat_tools)] == chat_tools
-    assert _tool_schema_summary(chat_tools) == _tool_schema_summary(env_tools[:len(chat_tools)])
+    chat_by_name = {tool["function"]["name"]: tool for tool in chat_tools}
+    env_names = [tool["function"]["name"] for tool in env_tools]
+    shared_names = [tool["function"]["name"] for tool in chat_tools if tool["function"]["name"] in env_names]
+
+    assert shared_names
+    assert [name for name in env_names if name in chat_by_name] == shared_names
+    assert _tool_schema_summary([chat_by_name[name] for name in shared_names]) == _tool_schema_summary(env_tools[:len(shared_names)])
+    assert "recall_thread" not in env_names
+    assert "expand_warm" not in env_names
     assert any(tool["function"]["name"] == "delegate_inventory" for tool in env_tools[len(chat_tools):])
 
 
@@ -1380,7 +1404,9 @@ def test_round3_plan_and_evidence_do_not_change_system_prefix() -> None:
     assert shape_a["messages_hash"] != shape_b["messages_hash"]
     assert "Summarize project A" not in system_a
     assert "Summarize project A" in user_a
-    assert "Helper report: read_a" in user_a
+    assert "Work evidence source 1" in user_a
+    assert "A evidence" in user_a
+    assert "Producer evidence" not in user_a
     assert "report_a.md" not in system_a
     assert "report_a.md" in user_a
     assert "Alice" not in system_a
@@ -1552,6 +1578,19 @@ def test_voice_delivery_classifier_dynamic_facts_do_not_change_system_prefix() -
             "content": aux_prompts.VOICE_DELIVERY_CLASSIFIER_USER_TEMPLATE.format(
                 plan_intent="answer a short greeting",
                 plan_length="short",
+                plan_tone="friendly",
+                plan_key_points="- greet briefly",
+                plan_avoid="(none)",
+                plan_deliverables="(none)",
+                projected_reply_shape="length_hint=short; key_points=1; deliverables=0",
+                projected_reply_shape_facts=(
+                    "length_hint=short; key_point_count=1; deliverable_count=0; "
+                    "partial_delivery_count=0; has_user_facing_files=no"
+                ),
+                candidate_output_previews="- voice candidate preview (partial, chars=3): hi",
+                delivery_state="no",
+                persona_context="persona A",
+                recent_context="user: hi",
                 user_message="用语音回复我",
                 voice_preference=0.8,
                 preference_hint="prefer voice",
@@ -1565,6 +1604,19 @@ def test_voice_delivery_classifier_dynamic_facts_do_not_change_system_prefix() -
             "content": aux_prompts.VOICE_DELIVERY_CLASSIFIER_USER_TEMPLATE.format(
                 plan_intent="deliver a long structured report",
                 plan_length="long",
+                plan_tone="direct",
+                plan_key_points="- summarize findings\n- include table",
+                plan_avoid="(none)",
+                plan_deliverables="- report.xlsx",
+                projected_reply_shape="length_hint=long; key_points=2; deliverables=1",
+                projected_reply_shape_facts=(
+                    "length_hint=long; key_point_count=2; deliverable_count=1; "
+                    "partial_delivery_count=0; has_user_facing_files=yes; likely_readable=yes"
+                ),
+                candidate_output_previews="- voice candidate preview (partial, chars=120): long structured report",
+                delivery_state="yes",
+                persona_context="persona B",
+                recent_context="user: report please",
                 user_message="文字回复，附表格",
                 voice_preference=0.2,
                 preference_hint="prefer text",

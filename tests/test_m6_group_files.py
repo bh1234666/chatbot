@@ -125,7 +125,7 @@ check("context has ## 群组文件 section", "群组文件" in ctx_src)
 check("context shows download_status pending", 'pending' in ctx_src and ('下载中' in ctx_src or 'pending files are not fetchable' in ctx_src))
 check("context shows download_status failed",
       'failed' in ctx_src and ('下载失败' in ctx_src or 'failed files are unavailable' in ctx_src))
-check("context shows fetch_group_file hint", "fetch_group_file" in ctx_src)
+check("context shows indexed file fetch hint", "fetch_indexed_file" in ctx_src or "fetch_group_file" in ctx_src)
 check("context shows file metadata fields",
       "filename" in ctx_src and "uploader_name" in ctx_src and "file_size" in ctx_src)
 
@@ -153,7 +153,7 @@ check("registry handler calls fetch_group_file",
       "fetch_group_file(" in reg_src)
 # 工具描述提到 download_status
 check("registry tool desc mentions download_status",
-      "下载" in reg_src.split("FETCH_GROUP_FILE_SCHEMA")[-1][:3000]
+      "pending entries are not fetchable" in reg_src.split("FETCH_GROUP_FILE_SCHEMA")[-1][:3000]
       if "FETCH_GROUP_FILE_SCHEMA" in reg_src else True)
 
 # ── api 端点 ──────────────────────────────────────────────────

@@ -78,17 +78,130 @@ def _extract_recent_bot_logs(base: list[dict], *, limit: int = 5) -> str:
     返回拼接后的字符串(无 bot_log 时返回空)。"""
     import re as _re_mod
     _BOT_LOG_RE = _re_mod.compile(r"<bot_log>(.*?)</bot_log>", _re_mod.DOTALL)
+    _BOT_LOG_BRIEF_RE = _re_mod.compile(r"<bot_log_brief>(.*?)</bot_log_brief>", _re_mod.DOTALL)
     found: list[str] = []
-    # base 第一条是 system, 后面是 user/assistant 交错; 找含 "## 对话历史" 的 user 块
+
+    def _sanitize_private_work_note(text: str) -> str:
+        value = str(text or "")
+        value = _re_mod.sub(r"\b_delegate_[\w.-]+\b", "work item", value)
+        value = _re_mod.sub(r"\binternal_run_[\w.-]+\b", "work item", value)
+        replacements = (
+            ("INCOMPLETE_HELPER_RESULT", "INCOMPLETE_WORK_RESULT"),
+            ("completed-helper", "completed work step"),
+            ("helpers=", "work_status="),
+            ("helper=", "work_item="),
+            ("helper report", "available evidence"),
+            ("helper reports", "available evidence"),
+            ("helper/tool evidence", "work/tool evidence"),
+            ("helper output facts", "output facts"),
+            ("helper task", "work step"),
+            ("helper-owned", "generated"),
+            ("helper_producer_self_verified", "output_self_verified"),
+            ("producer_self_verified", "output_self_verified"),
+            ("producer-owned", "generated"),
+            ("producer evidence", "available evidence"),
+            ("producer helpers", "work steps"),
+            ("producer helper", "work step"),
+            ("producer step", "generation step"),
+            ("main process", "coordinator"),
+            ("main thread", "coordinator"),
+            ("_helpers_shared/", "work material/"),
+            ("internal_shared/", "work material/"),
+            ("_delegate_", "work_item_"),
+            ("internal_run_", "work_item_"),
+            ("clean_helper_batch", "clean work batch"),
+            ("processing_records", "work_status"),
+            ("processing record", "work item"),
+        )
+        for old, new in replacements:
+            value = value.replace(old, new)
+            value = value.replace(old.capitalize(), new.capitalize())
+        value = _re_mod.sub(r"\bhelpers_(?:still_running|completed)\b", "work_status", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bhelpers\s*([=:])", r"work_status\1", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bbackground_work\s*([=:])", r"work_status\1", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bbackground\s+work\b", "work status", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bprocessing_records\b", "work_status", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bprocessing\s+records\b", "work status", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bprocessing\s+record\b", "work item", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bhelpers\b", "work items", value, flags=_re_mod.IGNORECASE)
+        value = _re_mod.sub(r"\bhelper\b", "work item", value, flags=_re_mod.IGNORECASE)
+        return value
+
+    def _count_status_items(value: str) -> int:
+        raw = str(value or "").strip()
+        if not raw:
+            return 0
+        if raw.isdigit():
+            return int(raw)
+        stripped = raw.strip("[]{} ")
+        if not stripped:
+            return 0
+        return len([item for item in stripped.split(",") if item.strip()])
+
+    def _summarize_private_work_status(key: str, value: str) -> str:
+        key_l = str(key or "").lower()
+        raw = str(value or "")
+        if key_l == "helpers_still_running":
+            return f"running:{_count_status_items(raw)}"
+        if key_l == "helpers_completed":
+            return f"done:{_count_status_items(raw)}"
+
+        counts: dict[str, int] = {}
+        for label, body in _re_mod.findall(r"\b(done|running|failed|stuck|aborted)\s*:\s*\[([^\]]*)\]", raw, flags=_re_mod.IGNORECASE):
+            items = [item.strip() for item in body.split(",") if item.strip()]
+            normalized = "failed" if label.lower() in {"failed", "stuck", "aborted"} else label.lower()
+            counts[normalized] = counts.get(normalized, 0) + len(items)
+        if not counts and raw.strip():
+            counts["present"] = _count_status_items(raw)
+        if not counts:
+            counts["present"] = 0
+        order = ("done", "running", "failed", "present")
+        return ",".join(f"{label}:{counts[label]}" for label in order if label in counts)
+
+    def _compact_bot_log(inner: str) -> str:
+        parts: list[str] = []
+        for kv in (inner or "").split(" | "):
+            kv_strip = kv.strip()
+            if kv_strip.startswith((
+                "intent=", "key_points=", "deliverables=", "delivery_partial=",
+                "in_main=", "helpers=", "helpers_still_running=", "helpers_completed=",
+                "background_work=", "processing_records=", "note=", "aborted=", "complexity=",
+            )):
+                if "=" in kv_strip:
+                    key, value = kv_strip.split("=", 1)
+                    value = value[:200] + ("..." if len(value) > 200 else "")
+                    if key in {
+                        "helpers", "helpers_still_running", "helpers_completed",
+                        "background_work", "processing_records",
+                    }:
+                        parts.append(f"work_status={_summarize_private_work_status(key, value)}")
+                        continue
+                    else:
+                        key = _sanitize_private_work_note(key)
+                    parts.append(f"{key}={_sanitize_private_work_note(value)}")
+                else:
+                    parts.append(_sanitize_private_work_note(kv_strip))
+        return f"<bot_log_brief>{' | '.join(parts)}</bot_log_brief>" if parts else ""
+
+    # base 第一条是 system, 后面是 user/assistant 交错; 找历史 user 块。
+    # 新版 context 使用英文 "Conversation History"，旧版/部分测试可能仍是中文标题。
     for m in base:
         content = m.get("content") if isinstance(m, dict) else None
         if not isinstance(content, str):
             continue
-        if "## 对话历史" not in content:
+        if "## 对话历史" not in content and "## Conversation History" not in content:
             continue
-        # 抽出 [机器人] 块下的 bot_log
+        matches: list[tuple[int, str]] = []
         for match in _BOT_LOG_RE.finditer(content):
-            found.append(match.group(0))
+            compacted = _compact_bot_log(match.group(1))
+            if compacted:
+                matches.append((match.start(), compacted))
+        for match in _BOT_LOG_BRIEF_RE.finditer(content):
+            inner = _sanitize_private_work_note(match.group(1).strip())
+            if inner:
+                matches.append((match.start(), f"<bot_log_brief>{inner}</bot_log_brief>"))
+        for _, compacted in sorted(matches, key=lambda item: item[0]):
+            found.append(compacted)
     # 取最近 limit 条
     if not found:
         return ""

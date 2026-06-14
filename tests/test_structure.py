@@ -95,7 +95,7 @@ for a in expected_args:
     check(f"build_base_context has '{a}'", a in ctx_args)
 # Shared Files section
 ctx_src = (ROOT / "core/context.py").read_text(encoding="utf-8")
-for kw in ["Shared Files", "file_index", "download_status", "fetch_group_file"]:
+for kw in ["Shared Files", "file_index", "download_status", "fetch_indexed_file"]:
     check(f"context has '{kw}'", kw in ctx_src)
 
 # ── core.orchestrator ──

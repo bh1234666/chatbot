@@ -58,7 +58,7 @@ for kw in [
     "EXPAND_KB_SCHEMA", "FETCH_GROUP_FILE_SCHEMA", "ROUND2_TOOLS",
     'name": "python"', 'name": "expand_warm"',
     'name": "expand_cold"', 'name": "expand_kb"',
-    'name": "fetch_group_file"',
+    'name": "fetch_indexed_file"',
 ]:
     check(f"registry/tool_schemas has {kw}", kw in _tools_src)
 

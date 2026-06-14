@@ -67,7 +67,9 @@ def test_build_bot_log_records_execution_facts():
     assert "aborted=true" in text
     assert "deliverables=[report.md]" in text
     assert "delivery_partial=[chart.png]" in text
-    assert "helpers={done:[h1],failed:[h2]}" in text
+    assert "processing_records={done:[h1],failed:[h2]}" in text
+    assert "background_work" not in text
+    assert "helper" not in text.lower()
 
 
 def test_build_bot_log_keeps_easy_mode_when_only_main_delivery_or_partial_exists():
@@ -197,6 +199,17 @@ def test_round3_auto_voice_tts_uses_workspace_cwd():
     assert "_tts_func," in src
     assert 'voice_instruct or "female, moderate pitch"' not in src
     assert "voice.profile_missing" in src
+
+
+def test_round3_auto_voice_tts_does_not_run_post_authorization_guard():
+    import inspect
+    from app.core import orchestrator_entry
+
+    src = inspect.getsource(orchestrator_entry.orchestrate)
+    assert "tts_persona_guard" not in src
+    assert "set_current_tts_delivery_context" not in src
+    assert "reset_current_tts_delivery_context" not in src
+    assert "persona_guard_refused_tts" not in src
 
 
 def test_progress_tool_summary_hides_internal_resource_names():

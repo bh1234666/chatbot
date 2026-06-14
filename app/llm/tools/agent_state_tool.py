@@ -137,7 +137,7 @@ async def handle_agent_state(args: dict) -> str:
                     if isinstance(item, dict)
                 ][:16],
                 "contracts": len(snapshot.get("contracts") or []),
-                "blocked_helpers": len(snapshot.get("blocked_helpers") or []),
+                "blocked_work": len(snapshot.get("blocked_work") or []),
             },
         }, ensure_ascii=False)
 

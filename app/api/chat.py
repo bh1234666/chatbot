@@ -72,7 +72,8 @@ SSE_RESPONSE_HEADERS = {"Content-Type": "text/event-stream; charset=utf-8"}
 #
 # Cache entry shape:
 #   (trace_id, ts, done_payload | None, complete_payload | None, token_text)
-# Replay emits meta, cached token text, cached done when available, and complete.
+# Replay emits meta, cached token text when it remains user-visible, cached done
+# when available, and complete.
 _IDEMPOTENCY_TTL = settings.idempotency_ttl_sec
 _IDEMPOTENCY_MAX = settings.idempotency_max_entries
 _idempotency_cache: "OrderedDict[tuple, tuple[str, float, dict | None, dict | None, str]]" = OrderedDict()
@@ -411,13 +412,23 @@ async def chat_stream(req: ChatRequest):
                 await asyncio.sleep(0.1)
             entry = _idempotency_cache.get(_key) or (duplicate_trace, 0, None, None, "")
             _, _, done_p, complete_p, cached_text = entry
-            if cached_text:
+            suppress_cached_text = bool(
+                isinstance(done_p, dict)
+                and done_p.get("voice_reply")
+                and done_p.get("_suppress_text")
+            )
+            if cached_text and not suppress_cached_text:
                 yield {
                     "event": "token",
                     "data": json.dumps(
                         {"text": cached_text, "duplicate": True}, ensure_ascii=False,
                     ),
                 }
+            elif cached_text and suppress_cached_text:
+                debug.log(
+                    "chat.duplicate.voice_text_suppressed",
+                    "duplicate replay skipped cached text because original done event delivered voice",
+                )
             if done_p is not None:
                 yield {
                     "event": "done",
@@ -940,23 +951,40 @@ async def get_chat_stage(archive_id: str, group_id: str, user_id: str):
 
 
 @router.get("/files/{archive_id}/{group_id}/{filename:path}")
-async def download_file(archive_id: str, group_id: str, filename: str):
+async def download_file(archive_id: str, group_id: str, filename: str, workspace_token: str = ""):
     # Download an allowed generated workspace file.
     # Prefer the persistent workspace; fall back to active/temp workspaces.
     group_key = f"{archive_id}:{group_id}"
-    ws_dir = ws_tool.get_workspace(group_key)
     persistent = ws_tool.get_persistent_workspace_path(archive_id, group_id)
 
     candidates: list[str] = []
-    if os.path.isdir(persistent):
-        candidates.append(persistent)
-    if ws_dir and ws_dir not in candidates:
-        candidates.append(ws_dir)
+    seen_candidates: set[str] = set()
+    def _add_candidate(path: str | None) -> None:
+        if not path or not os.path.isdir(path):
+            return
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen_candidates:
+            return
+        seen_candidates.add(key)
+        candidates.append(path)
+
+    registered = ws_tool.get_registered_workspaces(group_key)
+    if workspace_token:
+        registered = [
+            ws_dir for ws_dir in registered
+            if ws_tool.token_matches_workspace(ws_dir, workspace_token)
+        ]
+        for ws_dir in registered:
+            _add_candidate(ws_dir)
+        _add_candidate(persistent)
+    else:
+        _add_candidate(persistent)
+        for ws_dir in registered:
+            _add_candidate(ws_dir)
     # Include .temp when deliverables have not yet been promoted.
-    if persistent:
+    if persistent and not workspace_token:
         temp_path = os.path.join(persistent, ".temp")
-        if os.path.isdir(temp_path) and temp_path not in candidates:
-            candidates.append(temp_path)
+        _add_candidate(temp_path)
 
     if not candidates:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "no active workspace for this group")
@@ -993,15 +1021,39 @@ async def download_file(archive_id: str, group_id: str, filename: str):
 
 
 @router.get("/file-preview/{archive_id}/{group_id}/{filename:path}")
-async def preview_workspace_file(archive_id: str, group_id: str, filename: str, max_chars: int = 120000):
+async def preview_workspace_file(
+    archive_id: str,
+    group_id: str,
+    filename: str,
+    max_chars: int = 120000,
+    workspace_token: str = "",
+):
     group_key = f"{archive_id}:{group_id}"
-    ws_dir = ws_tool.get_workspace(group_key)
     persistent = ws_tool.get_persistent_workspace_path(archive_id, group_id)
     candidates: list[str] = []
-    if os.path.isdir(persistent):
-        candidates.append(persistent)
-    if ws_dir and ws_dir not in candidates:
-        candidates.append(ws_dir)
+    seen_candidates: set[str] = set()
+    def _add_candidate(path: str | None) -> None:
+        if not path or not os.path.isdir(path):
+            return
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen_candidates:
+            return
+        seen_candidates.add(key)
+        candidates.append(path)
+
+    registered = ws_tool.get_registered_workspaces(group_key)
+    if workspace_token:
+        registered = [
+            ws_dir for ws_dir in registered
+            if ws_tool.token_matches_workspace(ws_dir, workspace_token)
+        ]
+        for ws_dir in registered:
+            _add_candidate(ws_dir)
+        _add_candidate(persistent)
+    else:
+        _add_candidate(persistent)
+        for ws_dir in registered:
+            _add_candidate(ws_dir)
     for cand in candidates:
         try:
             resolved = ws_tool._safe_resolve(cand, filename)

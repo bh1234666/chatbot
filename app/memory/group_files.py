@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import time
+import filecmp
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -24,6 +25,10 @@ import ulid
 from app.config import settings
 from app.db.pool import pool
 from app.core import debug
+from app.core.source_attribution import (
+    current_user_source_match,
+    current_user_source_relation,
+)
 from app.core.sanitize import sanitize_headline, sanitize_summary
 from app.core.bg_tasks import schedule
 from app.llm.tools.workspace import (
@@ -63,6 +68,18 @@ _IN_FLIGHT_TIMEOUT = 300.0  # 5 分钟无进展即认为已死，允许重试
 #   debug 记录,避免 NapCat 不返回下载 URL 时刷控制台。
 _recent_url_failures: dict[tuple[str, str, int], float] = {}
 _URL_FAILURE_COOLDOWN = 600.0  # 10 分钟内不再重试同物理签名
+
+
+def _same_file_content(path_a: str | os.PathLike, path_b: str | os.PathLike) -> bool:
+    try:
+        return (
+            os.path.isfile(path_a)
+            and os.path.isfile(path_b)
+            and os.path.getsize(path_a) == os.path.getsize(path_b)
+            and filecmp.cmp(path_a, path_b, shallow=False)
+        )
+    except OSError:
+        return False
 
 
 @dataclass
@@ -444,6 +461,7 @@ async def _create_pending_kb_node(
         "archive_id": archive_id,
         "group_id": group_id,
         "upload_time": item.upload_time,
+        "uploader_uin": item.uploader_uin,
         "uploader_name": item.uploader_name,
         "file_size": item.file_size,
         "napcat_file_id": item.file_id,
@@ -862,6 +880,7 @@ async def _bg_download_and_index(
             "archive_id": archive_id,
             "group_id": group_id,
             "upload_time": item.upload_time,
+            "uploader_uin": item.uploader_uin,
             "uploader_name": item.uploader_name,
             "file_size": item.file_size,
             "napcat_file_id": item.file_id,
@@ -1005,8 +1024,58 @@ async def _mark_download_failed(
 
 # ── 按需提取到工作区 ───────────────────────────────────────────
 
+def _row_value(row, key: str, default=None):
+    try:
+        value = row[key]
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+def _fetch_source_attribution(
+    *,
+    kb_node_id: str,
+    filename: str,
+    meta: dict,
+    row,
+    current_user_id: str = "",
+    current_user_name: str = "",
+) -> dict:
+    uploader_id = str(
+        meta.get("uploader_uin")
+        or meta.get("uploader_user_id")
+        or _row_value(row, "uploader_uin", "")
+        or ""
+    )
+    uploader_name = str(meta.get("uploader_name") or _row_value(row, "uploader_name", "") or "")
+    current_user_match = current_user_source_match(
+        current_user_id=current_user_id,
+        current_user_name=current_user_name,
+        uploader_id=uploader_id,
+        uploader_name=uploader_name,
+    )
+    relation = current_user_source_relation(current_user_match)
+    return {
+        "scope": "shared_group_file",
+        "kb_node_id": kb_node_id,
+        "filename": filename,
+        "uploader_id": uploader_id,
+        "uploader_name": uploader_name,
+        "upload_time": int(meta.get("upload_time") or _row_value(row, "upload_time", 0) or 0),
+        "file_size": int(meta.get("file_size") or _row_value(row, "file_size", 0) or 0),
+        "current_user_match": current_user_match,
+        "current_user_relation": relation,
+    }
+
+
 async def fetch_group_file(
-    kb_node_id: str, archive_id: str, group_id: str, workspace_dir: str,
+    kb_node_id: str,
+    archive_id: str,
+    group_id: str,
+    workspace_dir: str,
+    *,
+    current_user_id: str = "",
+    current_user_name: str = "",
 ) -> dict:
     """将已下载的群文件提取到当前工作区。返回 {ok, path?, error?}。
 
@@ -1041,7 +1110,8 @@ async def fetch_group_file(
         # 文件名怎么改、磁盘上文件怎么挪都不影响这条路径的稳定性。
         row = await conn.fetchrow(
             """
-            SELECT sf.workspace_path, sf.file_id, sf.busid, sf.file_name
+            SELECT sf.workspace_path, sf.file_id, sf.busid, sf.file_name,
+                   sf.file_size, sf.upload_time, sf.uploader_uin, sf.uploader_name
             FROM synced_files sf
             WHERE sf.archive_id = $1
               AND sf.group_id = $2
@@ -1050,11 +1120,31 @@ async def fetch_group_file(
             archive_id, group_id, kb_node_id,
         )
     if not row:
-        return {"ok": False, "error": f"文件节点不存在：{kb_node_id}"}
+        filename = cn_meta.get("filename") or "unknown"
+        return {
+            "ok": False,
+            "error": f"文件节点不存在：{kb_node_id}",
+            "source_attribution": _fetch_source_attribution(
+                kb_node_id=kb_node_id,
+                filename=filename,
+                meta=cn_meta,
+                row=None,
+                current_user_id=current_user_id,
+                current_user_name=current_user_name,
+            ),
+        }
 
     meta = cn_meta
     download_status = meta.get("download_status", "unknown")
     filename = meta.get("filename") or row["file_name"] or "unknown"
+    source_attribution = _fetch_source_attribution(
+        kb_node_id=kb_node_id,
+        filename=filename,
+        meta=meta,
+        row=row,
+        current_user_id=current_user_id,
+        current_user_name=current_user_name,
+    )
 
     # 找到源文件路径（先精确，再扫描重名变体）
     ws_root = _get_workspace_root()
@@ -1076,6 +1166,7 @@ async def fetch_group_file(
                 "Retry later or ask for another available source file.\n"
                 "共享文件尚未下载完成，稍后重试或改用可用来源。"
             ),
+            "source_attribution": source_attribution,
         }
 
     if download_status == "failed" and not file_on_disk:
@@ -1087,6 +1178,7 @@ async def fetch_group_file(
                 "Use another available file or retry after the shared-file backend recovers.\n"
                 "共享文件下载失败，改用其它可用文件或等待后台恢复后重试。"
             ),
+            "source_attribution": source_attribution,
         }
 
     # 文件不在磁盘且状态正常 → 重新下载
@@ -1100,6 +1192,7 @@ async def fetch_group_file(
                     "Use another available source, or ask the user to upload/provide the file again.\n"
                     "共享文件缺少本地副本和 file_id，需要其它来源或用户重新提供。"
                 ),
+                "source_attribution": source_attribution,
             }
         local = await _download_file(
             GroupFileItem(
@@ -1121,6 +1214,7 @@ async def fetch_group_file(
                     "Use another available source, or ask the user to upload/provide the file again.\n"
                     "共享文件重新下载失败，需要其它来源或用户重新提供。"
                 ),
+                "source_attribution": source_attribution,
             }
         src_path = Path(local)
         file_on_disk = True
@@ -1160,7 +1254,7 @@ async def fetch_group_file(
     # → hello_from_group_from_group.c 这种无意义副本链。
     primary_dst = os.path.join(workspace_dir, filename)
     try:
-        if os.path.isfile(primary_dst) and os.path.getsize(primary_dst) == os.path.getsize(str(src_path)):
+        if _same_file_content(primary_dst, str(src_path)):
             debug.log(
                 "group_files.fetch.reuse",
                 f"fetch_group_file: {filename} already in workspace, reusing",
@@ -1168,6 +1262,7 @@ async def fetch_group_file(
             return {
                 "ok": True, "path": filename, "filename": filename,
                 "note": "already in workspace, reused existing copy",
+                "source_attribution": source_attribution,
             }
     except OSError:
         pass
@@ -1182,7 +1277,7 @@ async def fetch_group_file(
         candidate_path = os.path.join(workspace_dir, candidate)
         # 二级幂等：_from_group 版本已存在且大小一致 → 复用
         try:
-            if os.path.isfile(candidate_path) and os.path.getsize(candidate_path) == os.path.getsize(str(src_path)):
+            if _same_file_content(candidate_path, str(src_path)):
                 debug.log(
                     "group_files.fetch.reuse",
                     f"fetch_group_file: {filename} already in workspace as {candidate}, reusing",
@@ -1190,6 +1285,7 @@ async def fetch_group_file(
                 return {
                     "ok": True, "path": candidate, "filename": filename,
                     "note": "already in workspace, reused existing copy",
+                    "source_attribution": source_attribution,
                 }
         except OSError:
             pass
@@ -1216,7 +1312,12 @@ async def fetch_group_file(
     log.debug("fetch_group_file: %s → %s", filename, dst)
     # 返回工作区相对路径——下游 read_file / edit_file / inspect_file 都拒绝绝对路径
     # （沙箱安全机制）。直接传文件名即可，因为 dst 就在 workspace_dir 根下。
-    return {"ok": True, "path": dst_filename, "filename": filename}
+    return {
+        "ok": True,
+        "path": dst_filename,
+        "filename": filename,
+        "source_attribution": source_attribution,
+    }
 
 
 # ── 下载工具函数 ───────────────────────────────────────────────

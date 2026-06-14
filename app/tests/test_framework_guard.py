@@ -530,6 +530,9 @@ async def test_code_helper_large_project_source_write_requests_segmentation(tmp_
     assert "small skeleton or interface" in result["recovery_facts"]["available_authoring_shapes"]
     assert "focused edit_file/multi_edit/insert_in_file steps" in result["recovery_facts"]["available_authoring_shapes"]
     assert "isolated python execution is not a workspace file IO substitute" in result["recovery_facts"]["workspace_io_fact"]
+    assert "helper" not in result["recovery_facts"]["workspace_io_fact"].lower()
+    assert "producer contract" in result["recovery_facts"]["acceptance_fact"]
+    assert "helper" not in result["recovery_facts"]["acceptance_fact"].lower()
     assert not (tmp_path / "_env" / "src" / "generated_big_module.py").exists()
 
 
@@ -590,7 +593,7 @@ async def test_main_thread_project_framework_write_requests_delegate(tmp_path):
     assert result["retry_same_tool"] is False
     assert result["recommended_tools"] == ["delegate"]
     assert result["recovery_facts"]["same_goal"] is True
-    assert "helper-owned staged output" in result["recovery_facts"]["helper_prompt_fact"]
+    assert "producer-owned staged output" in result["recovery_facts"]["helper_prompt_fact"]
     assert "internal handoff" in result["recovery_facts"]["helper_prompt_fact"]
     assert not (tmp_path / "db_index_project" / "_shared" / "CONTRACT.md").exists()
 

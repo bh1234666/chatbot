@@ -12,6 +12,7 @@ from app.core.intermediate_feedback import (
     intermediate_feedback_event_sink,
     publish_feedback_workflow_event,
     summarize_workflow_feedback_event,
+    _public_progress_event_facts,
     _intermediate_feedback_user_payload,
     validate_intermediate_feedback_message,
 )
@@ -22,6 +23,14 @@ def test_intermediate_feedback_preference_zero_stays_silent():
     gate.start_at = time.monotonic() - 1000
     gate.last_emit_at = gate.start_at
     assert gate.allow_consideration("helper_done") is False
+
+
+def test_intermediate_feedback_log_tag_is_not_final_voice_preference():
+    from pathlib import Path
+
+    src = Path("app/core/orchestrator_entry.py").read_text(encoding="utf-8")
+    assert '"intermediate_feedback.preference"' in src
+    assert '"intermediate.preference"' not in src
 
 
 def test_intermediate_feedback_agent_preference_one_always_considers_key_node():
@@ -59,7 +68,11 @@ def test_intermediate_feedback_user_payload_is_stable_compact_json():
     )
 
     assert payload.startswith('{"current_event_facts":')
-    assert "\n" in json.loads(payload)["current_event_facts"]
+    facts = json.loads(payload)["current_event_facts"]
+    assert "\n" in facts
+    assert "event_fact=work_started" in facts
+    assert "work_label=read_a" in facts
+    assert "helper" not in facts.lower()
     assert "\n" not in payload
     assert '"preference":1.0' in payload
 
@@ -90,6 +103,29 @@ async def test_generate_intermediate_feedback_uses_stable_system_prompt(monkeypa
     assert seen["messages"][0] == {"role": "system", "content": INTERMEDIATE_FEEDBACK_SYSTEM}
     assert seen["messages"][1]["role"] == "user"
     assert seen["messages"][1]["content"].startswith('{"current_event_facts":')
+    facts = json.loads(seen["messages"][1]["content"])["current_event_facts"]
+    assert "event_fact=work_started" in facts
+    assert "helper_task" not in facts
+    assert "helper" not in facts.lower()
+
+
+def test_intermediate_feedback_public_facts_hide_internal_workflow_terms():
+    public = _public_progress_event_facts("\n".join([
+        "event_fact=helper_started",
+        "state=running",
+        "helper_task=fetch_page",
+        "helper_kind=read",
+        "visible_work=read helper report from _helpers_shared/fetch/page.txt and _delegate_fetch",
+        "truth_scope=this helper has started; no result is available from this event yet",
+    ]))
+
+    assert "event_fact=work_started" in public
+    assert "work_label=fetch_page" in public
+    assert "work_type=read" in public
+    assert "_helpers_shared" not in public
+    assert "_delegate_" not in public
+    assert "helper" not in public.lower()
+    assert "work branch has started" in public or "work branch" in public
 
 
 def test_intermediate_feedback_chat_is_time_gated():
@@ -466,7 +502,7 @@ def test_intermediate_validator_rejects_technical_novel_mistranslation():
 
 
 def test_intermediate_feedback_prompt_preserves_technical_labels():
-    assert "Preserve technical task ids, filenames, paths, and domain terms exactly" in INTERMEDIATE_FEEDBACK_SYSTEM
+    assert "Preserve technical task labels, filenames, paths, and domain terms exactly" in INTERMEDIATE_FEEDBACK_SYSTEM
     assert "do not reinterpret opaque labels" in INTERMEDIATE_FEEDBACK_SYSTEM
     assert "技术" in INTERMEDIATE_FEEDBACK_SYSTEM
 
@@ -513,6 +549,76 @@ def test_intermediate_validator_rejects_internal_workflow_terms():
 
     assert ok is False
     assert reason == "internal_workflow_term_exposed"
+
+
+def test_intermediate_validator_rejects_internal_helper_exposure():
+    ok, reason = validate_intermediate_feedback_message(
+        message="helper 已经开始处理，正在读取 _helpers_shared/fetch/page.txt。",
+        recent_work="\n".join([
+            "event_fact=helper_started",
+            "state=running",
+            "helper_task=fetch_page",
+            "truth_scope=this helper has started; no result is available from this event yet",
+        ]),
+        event="helper_start",
+    )
+
+    assert ok is False
+    assert reason == "internal_workflow_term_exposed"
+
+
+def test_intermediate_validator_rejects_internal_producer_background_terms():
+    for message in (
+        "producer evidence 已经返回。",
+        "background_work 正在继续。",
+        "processing_records 显示文件已生成。",
+    ):
+        ok, reason = validate_intermediate_feedback_message(
+            message=message,
+            recent_work="\n".join([
+                "event_fact=helper_progress",
+                "state=running",
+                "truth_scope=describe visible progress only",
+            ]),
+            event="routine",
+        )
+
+        assert ok is False
+        assert reason == "internal_workflow_term_exposed"
+
+
+@pytest.mark.asyncio
+async def test_generate_intermediate_feedback_repairs_internal_helper_terms(monkeypatch):
+    from app.core import intermediate_feedback
+
+    calls = []
+
+    async def fake_chat_json(messages, *, model_spec=None, **kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            return {"should_reply": True, "message": "helper 开始跑了，稍等。"}
+        return {"should_reply": True, "message": "我开始核对页面内容，稍等。"}
+
+    monkeypatch.setattr(intermediate_feedback.llm, "chat_json", fake_chat_json)
+
+    msg = await generate_intermediate_feedback(
+        persona="bot",
+        user_request="看这个网页",
+        recent_work="\n".join([
+            "event_fact=helper_started",
+            "state=running",
+            "helper_task=fetch_page",
+            "visible_work=inspect the requested webpage",
+        ]),
+        event="helper_start",
+        preference=1.0,
+        stage="round2",
+        iteration=1,
+    )
+
+    assert msg == "我开始核对页面内容，稍等。"
+    assert len(calls) == 2
+    assert "internal_workflow_term_exposed" in calls[1][1]["content"]
 
 
 def test_progress_callback_uses_message_snapshot(monkeypatch):

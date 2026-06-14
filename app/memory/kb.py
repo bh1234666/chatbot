@@ -281,9 +281,10 @@ async def load_file_index(
     文件节点 salience=0.5，在大量 KB 节点中可能被挤出 top-N。
     此函数单独加载全部文件节点，保证用户在问文件时一定能被模型看到。
 
-    去重：同一个 (filename, uploader_name) 多次上传/同步可能产生多个节点
-    （历史 sync 重试、用户重传等都会触发）。SQL 已按 created_at DESC 排序，
-    Python 层按 (filename, uploader_name) 保留最新的一个，其余跳过——
+    去重：同一个 (filename, uploader_id) 多次上传/同步可能产生多个节点
+    （历史 sync 重试、用户重传等都会触发）。QQ 昵称不唯一，所以有 uploader_uin
+    时必须按稳定 ID 去重；缺少 ID 时才回退到昵称。SQL 已按 created_at DESC 排序，
+    Python 层保留最新的一个，其余跳过——
     避免模型看到 `hello.c` × 3 个节点而并行 fetch 浪费工具调用。
     不同上传者上传的同名文件分别保留（可能内容不同）。
     """
@@ -307,7 +308,9 @@ async def load_file_index(
             archive_id, group_id, limit, viewer_user_id or "",
         )
     items: list[dict] = []
-    seen: set[tuple[str, str]] = set()
+    version_counts: dict[tuple[str, str], int] = {}
+    total_version_counts: dict[tuple[str, str], int] = {}
+    max_versions_per_uploader_filename = 3
     # 2026-05-09 Patch 38 + Patch 43: KB 文件索引污染过滤
     # 病因(trace 779bbcf0):42 个文件中 16 个是 0B + 4 个含 .temp/.prev/_helpers_shared
     # 路径 + 12 个 NapCat file_id 失效(download_status=failed 永久错误)。这些
@@ -348,6 +351,7 @@ async def load_file_index(
                 pass
         filename = meta.get("filename", "") or ""
         uploader = meta.get("uploader_name", "") or ""
+        uploader_id = str(meta.get("uploader_uin", "") or meta.get("uploader_user_id", "") or "")
         file_size = meta.get("file_size", 0) or 0
         workspace_path = meta.get("workspace_path", "") or ""
         download_status = meta.get("download_status", "done")
@@ -379,13 +383,24 @@ async def load_file_index(
         if _is_placeholder_content(r.get("headline"), r.get("content")):
             _filtered_placeholder += 1
             continue
-        # 去重 key:同 filename + 同 uploader 视为重复(保留最新——SQL DESC 第一个)
+        # Version key: same filename + same stable uploader ID.
+        # Keep a few recent versions instead of collapsing to one. Same-user
+        # same-name reuploads may be distinct source candidates in follow-up
+        # wording, while still capping noisy sync duplicates.
+        # 没有 uploader ID 时才回退到昵称；同昵称不同 QQ 用户的同名文件要同时保留。
         # 空 filename 不去重(可能是异常节点,让模型看到)
+        version_key = None
+        version_rank = 0
         if filename:
-            dedup_key = (filename, uploader)
-            if dedup_key in seen:
+            # QQ nicknames are not unique; prefer the stable uploader ID so
+            # same-name users' same-name files remain separate candidates.
+            version_key = (filename, uploader_id or f"name:{uploader}")
+            total_version_counts[version_key] = total_version_counts.get(version_key, 0) + 1
+            version_rank = total_version_counts[version_key]
+            kept_count = version_counts.get(version_key, 0)
+            if kept_count >= max_versions_per_uploader_filename:
                 continue
-            seen.add(dedup_key)
+            version_counts[version_key] = kept_count + 1
         items.append({
             "id": r["id"],
             "type": r["node_type"],
@@ -394,6 +409,7 @@ async def load_file_index(
             "avoid_mention": bool(r["avoid_mention"]),
             "filename": filename,
             "uploader_name": uploader,
+            "uploader_uin": uploader_id,
             "file_size": file_size,
             "workspace_path": workspace_path,
             "download_status": download_status,
@@ -401,7 +417,20 @@ async def load_file_index(
             "eff_salience": float(r["eff_salience"] or 0),
             # 2026-05-10 Patch 80 v2: 加 upload_time 字段供"本会话强时效"识别
             "upload_time": int(meta.get("upload_time", 0)) if meta else 0,
+            "same_name_version_rank": version_rank,
+            "same_name_version_count": 0,
         })
+
+    for item in items:
+        filename = str(item.get("filename") or "")
+        if not filename:
+            continue
+        uploader_id = str(item.get("uploader_uin") or "")
+        uploader = str(item.get("uploader_name") or "")
+        version_key = (filename, uploader_id or f"name:{uploader}")
+        count = total_version_counts.get(version_key, 0)
+        if count > 1:
+            item["same_name_version_count"] = count
 
     if (_filtered_zero_size or _filtered_temp_path or _filtered_helper_artifact
             or _filtered_perm_failed or _filtered_placeholder):
@@ -914,6 +943,10 @@ async def search_files(
             "workspace_path": meta.get("workspace_path", ""),
             "archive_id": meta.get("archive_id", ""),
             "group_id": meta.get("group_id", ""),
+            "uploader_name": meta.get("uploader_name", ""),
+            "uploader_uin": str(meta.get("uploader_uin", "") or meta.get("uploader_user_id", "") or ""),
+            "upload_time": meta.get("upload_time", 0),
+            "download_status": meta.get("download_status", ""),
         })
     if _filtered_placeholder:
         try:

@@ -389,7 +389,7 @@ class _IdleDetector:
             return None
         self.last_warned_at_iter = it
         return (
-            f"Idle workflow warning: the last {self.consecutive_idle_iters} iterations only called processes.list.\n"
+            f"Idle Penalty: the last {self.consecutive_idle_iters} iterations only called processes.list.\n"
             "Choose a productive next step: call delegate(action='poll/collect/wait_any') to collect helper results, "
             "spawn another useful helper, or finish with the required JSON when the work is complete.\n"
             "Repeated idle listing is recorded as inefficient tool use and may influence later routing decisions.\n\n"
@@ -745,6 +745,7 @@ from app.llm.message_utils import (  # noqa: E402,F401
     _thinking_extra_body,
     _build_continuation_prefix_message,
     _summarize_tool_history,
+    _sanitize_delegate_fold_text,
     _tool_result_signal,
     _inject_tool_timestamps,
     _serialize_assistant_message,
@@ -2423,7 +2424,10 @@ def _fold_old_tool_messages(
                     )
                     _folded_data = {
                         "ok": True, "_folded": True,
-                        "summary": str(summary)[:120],
+                        "summary": (
+                            _sanitize_delegate_fold_text(str(summary)[:120])
+                            if _is_delegate_result else str(summary)[:120]
+                        ),
                     }
                     # delegate result 加保留字段
                     if _is_delegate_result:
@@ -2436,7 +2440,9 @@ def _fold_old_tool_messages(
                         if "resource_required_count" in r:
                             _folded_data["resource_required_count"] = r.get("resource_required_count")
                         if "_evidence_policy" in r:
-                            _folded_data["_evidence_policy"] = r.get("_evidence_policy")
+                            _folded_data["_evidence_policy"] = _sanitize_delegate_fold_text(
+                                r.get("_evidence_policy")
+                            )
                         if r.get("task_id"):
                             _folded_data["task_id"] = r["task_id"]
                         if r.get("terminal_reason"):
@@ -2460,6 +2466,8 @@ def _fold_old_tool_messages(
                     new_content = stable_prompt_json(_folded_data)
                 elif ok is False:
                     err = str(r.get("error", "?"))[:120]
+                    if _is_delegate_result:
+                        err = _sanitize_delegate_fold_text(err)
                     _folded_data = {
                         "ok": False, "_folded": True, "error": err,
                     }

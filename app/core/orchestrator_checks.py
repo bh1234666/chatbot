@@ -1,4 +1,4 @@
-"""orchestrator 校验/自动修复 helpers(macro 升级信号 / autofix deliverables / sibling 文件检查)。
+"""orchestrator checks (macro escalation signals / delivery candidate collection).
 2026-05-20 从 orchestrator.py 抽出;re-export 兼容。
 """
 from __future__ import annotations
@@ -254,13 +254,13 @@ def _has_workspace_files_produced(
     return False
 
 
-# ── deliverables 兜底 ────────────────────────────────────────
+# ── deliverable candidate facts ────────────────────────────────────────
 # 设计动机:模型常忘了把交付物列入 plan.deliverables(把 key_points/round3 回复
-# 贴代码当成"已经给用户了"),导致用户拿不到文件。这里按启发式补充,只在:
+# 贴代码当成"已经给用户了"),导致用户拿不到文件。这里只收集候选事实交给 Round2 复核,只在:
 #   - needs_tools=True
 #   - plan.deliverables 为空
 #   - 工作区有本轮新生成的非临时文件
-# 三个条件都满足时触发。
+# 三个条件都满足时收集候选。生产路径不在这里突变 plan.deliverables。
 _AUTOFIX_DELIVERY_EXTS = {
     # 用户日常关注的产物类型(非临时脚本)
     ".c", ".cpp", ".h", ".hpp",
@@ -332,21 +332,211 @@ _AUTOFIX_FINAL_DELIVERABLE_EXTS = {
 }
 
 
+def _deliverable_name_from_value(value: object) -> str:
+    text = str(value or "").strip().strip("`'\"")
+    if not text:
+        return ""
+    norm = text.replace("\\", "/")
+    base = os.path.basename(norm)
+    if not base:
+        return ""
+    ext = os.path.splitext(base)[1].lower()
+    if ext not in _AUTOFIX_DELIVERY_EXTS:
+        return ""
+    if _is_internal_deliverable_file(norm):
+        return ""
+    return base
+
+
+def _current_round_production_evidence_files(messages: list[dict] | None) -> set[str]:
+    """Return files backed by current tool production/commit evidence.
+
+    Directory diffs in the group workspace are not enough: other users can create
+    files while this turn is still running. This set is a provenance boundary for
+    candidate collection only; the model can still explicitly list deliverables in its plan.
+    """
+    evidence: set[str] = set()
+    if not messages:
+        return evidence
+
+    try:
+        from app.llm.client_tools_loop import _recent_verified_files_from_tools
+        for item in _recent_verified_files_from_tools(messages, limit=120):
+            name = _deliverable_name_from_value(item)
+            if name:
+                evidence.add(name)
+    except Exception:
+        pass
+
+    production_actions = {
+        "write", "append", "replace", "replace_block",
+        "edit_file", "multi_edit", "insert_in_file",
+        "commit_to_main", "env_apply_create", "env_apply_replace",
+        "tts",
+    }
+    path_keys = (
+        "path", "workspace_path", "output_path", "saved_path",
+        "file", "filename", "voice_reply_file",
+        "voice_reply_file_candidate", "deliverable_candidate",
+    )
+    list_keys = ("promoted", "committed_files", "outputs", "delivered_files", "paths")
+
+    def _add(value: object) -> None:
+        name = _deliverable_name_from_value(value)
+        if name:
+            evidence.add(name)
+
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        content = str(msg.get("content", "") or "")
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            parsed = None
+        if not isinstance(parsed, dict):
+            continue
+        if parsed.get("ok") is False:
+            continue
+        action = str(parsed.get("action") or parsed.get("tool") or "").lower()
+        if action not in production_actions and not any(k in parsed for k in ("promoted", "committed_files")):
+            continue
+        for key in path_keys:
+            if key in parsed:
+                _add(parsed.get(key))
+        for key in list_keys:
+            value = parsed.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    _add(item)
+    return evidence
+
+
+def _collect_voice_reply_file_candidates(messages: list[dict] | None) -> list[str]:
+    """Collect current-turn generated speech files for Round2 voice-channel review.
+
+    These are candidate facts only. Round2 decides whether a candidate is the
+    final spoken reply (`voice_reply_file`), a normal audio attachment
+    (`deliverables`), or unrelated to the current answer.
+    """
+    if not messages:
+        return []
+
+    candidates: list[str] = []
+
+    def _add(value: object) -> None:
+        name = _deliverable_name_from_value(value)
+        if not name:
+            return
+        if os.path.splitext(name)[1].lower() not in {".wav", ".mp3", ".ogg", ".m4a"}:
+            return
+        if name not in candidates:
+            candidates.append(name)
+
+    def _is_clean_tts_item(item: dict) -> bool:
+        kind = str(item.get("kind") or item.get("helper_kind") or "").strip().lower()
+        if kind != "tts":
+            return False
+        outputs_check = item.get("outputs_check") if isinstance(item.get("outputs_check"), dict) else {}
+        if item.get("quality_blocked") or outputs_check.get("quality_blocked"):
+            return False
+        if outputs_check.get("outputs_missing") or item.get("outputs_missing"):
+            return False
+        if outputs_check.get("outputs_complete") is False or item.get("ok") is False:
+            return False
+        terminal = str(item.get("terminal_reason") or "").strip().lower()
+        if terminal in {
+            "failed", "interrupted", "stuck", "timeout", "crashed",
+            "resource_required", "quality_blocked", "outputs_missing",
+        }:
+            return False
+        return bool(
+            item.get("ok") is True
+            or outputs_check.get("outputs_complete") is True
+            or outputs_check.get("producer_self_verified") is True
+        )
+
+    def _handle_tts_item(item: dict) -> None:
+        if not _is_clean_tts_item(item):
+            return
+        for key in ("voice_reply_file_candidate", "deliverable_candidate", "voice_reply_file"):
+            _add(item.get(key))
+        for key in ("user_visible_files", "workspace_files", "main_available_files", "files", "paths"):
+            value = item.get(key)
+            if isinstance(value, list):
+                for path in value:
+                    _add(path)
+
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        content = str(msg.get("content", "") or "")
+        try:
+            parsed = json.loads(content)
+        except Exception:
+            continue
+        if not isinstance(parsed, dict) or parsed.get("ok") is False:
+            continue
+
+        for key in ("voice_reply_file_candidate", "voice_reply_file"):
+            _add(parsed.get(key))
+
+        action = str(parsed.get("action") or parsed.get("tool") or "").strip().lower()
+        if action == "tts":
+            paths = parsed.get("paths")
+            if isinstance(paths, list):
+                for path in paths:
+                    _add(path)
+
+        results = parsed.get("results")
+        if isinstance(results, dict):
+            iterable = results.values()
+        elif isinstance(results, list):
+            iterable = results
+        else:
+            iterable = ()
+        for item in iterable:
+            if isinstance(item, dict):
+                _handle_tts_item(item)
+
+        result_items = parsed.get("result_items")
+        if isinstance(result_items, list):
+            for item in result_items:
+                if isinstance(item, dict):
+                    _handle_tts_item(item)
+
+    return candidates[:8]
+
+
+def _has_current_production_evidence(fname: str, evidence_files: set[str] | None) -> bool:
+    if evidence_files is None:
+        return True
+    if not evidence_files:
+        return False
+    norm = str(fname or "").replace("\\", "/")
+    base = os.path.basename(norm)
+    return norm in evidence_files or base in evidence_files
+
+
 def _check_sibling_files(
     plan: ResponsePlan,
     workspace_dir: str,
     files_before: set,
-) -> None:
-    """P91: 检查 plan.deliverables 是否漏了"兄弟文件"——同前缀同扩展的同类文件。
+    evidence_files: set[str] | None = None,
+) -> list[str]:
+    """P91: Collect sibling files that may belong with existing deliverables.
 
     规则:
       1. 把 plan.deliverables 中文件按 (前缀, 扩展名) 分组
       2. 若某组有 ≥2 个文件 → 这是一个"系列"
-      3. 工作区里同模式的新文件如果不在 plan.deliverables → 自动加进去
+      3. 工作区里同模式的新文件如果不在 plan.deliverables → 作为候选
+
+    This function only returns candidate facts. Round2 decides whether
+    candidates are final deliverables.
 
     实测 trace(00:45 排序论文): plan 列了 results_quick/merge/heap/timsort/acms.csv 5 个,
     但漏 results_insertion.csv。前缀 "results", 扩展 ".csv" 是同一系列, insertion helper
-    已成功产出, 应自动补。
+    已成功产出, 应作为候选交给 Round2 复核。
     """
     import re as _re_p91
     import os as _os_p91
@@ -364,20 +554,21 @@ def _check_sibling_files(
     # 没有 ≥2 文件的系列 → 不做任何事 (避免误判单文件)
     _series = {k: v for k, v in _patterns.items() if len(v) >= 2}
     if not _series:
-        return
+        return []
 
     # 看工作区有哪些新文件
     try:
         _all_ws = ws_tool.list_generated_files(workspace_dir)
     except Exception:
-        return
+        return []
     _new_ws_files = [f for f in _all_ws if f not in files_before]
     if not _new_ws_files:
-        return
+        return []
 
     # 对每个系列, 找漏掉的兄弟
     _existing_names = {_os_p91.path.basename(f).replace("\\", "/") for f in plan.deliverables}
     _added: list[str] = []
+    _added_bases: list[str] = []
     for (_prefix, _ext), _siblings in _series.items():
         # 模式: <prefix>_<word>.<ext>, 仅匹配 "prefix_" 开头加任意单词然后扩展名
         _pattern = _re_p91.compile(
@@ -399,45 +590,50 @@ def _check_sibling_files(
             # 排除中间脚本前缀
             if any(_base_low.startswith(p) for p in _AUTOFIX_INTERMEDIATE_SCRIPT_PREFIXES):
                 continue
-            # 找到漏掉的兄弟 — 加进去
-            plan.deliverables.append(_wf)
+            if not _has_current_production_evidence(_wf, evidence_files):
+                continue
+            # 找到漏掉的兄弟。只收集候选，不突变 plan。
             _existing_names.add(_base)
-            _added.append(_base)
+            _added.append(_wf)
+            _added_bases.append(_base)
 
     if _added:
         debug.log(
-            "round2.deliverables.sibling_autofix",
-            f"P91: plan.deliverables 漏了兄弟文件 {_added} — 已自动补加 "
-            f"(原 plan 已有同模式 {sum(len(v) for v in _series.values())} 个文件)",
+            "round2.deliverables.sibling_candidates",
+            f"P91: sibling delivery candidates collected for Round2 review: {_added_bases}",
             {"added": _added, "series": {f"{k[0]}_*{k[1]}": v for k, v in _series.items()}},
         )
+    return _added
 
 
 def _add_mentioned_existing_deliverables(
     plan: ResponsePlan,
     workspace_dir: str,
     files_before: set,
-) -> None:
-    """Add files explicitly mentioned by the plan text when they exist in workspace.
+    evidence_files: set[str] | None = None,
+) -> list[str]:
+    """Collect files explicitly mentioned by the plan text when they exist.
 
-    This is intentionally narrower than the empty-plan autofix: it does not scan
+    This is intentionally narrower than the empty-plan candidate collection: it does not scan
     for arbitrary workspace outputs. It only closes contradictions where the
     model says a file was generated/sent in intent/key_points/internal_note but
     forgot to include that exact file in deliverables.
+
+    This function only returns candidate facts for the same Round2 plan to review.
     """
     if not workspace_dir:
-        return
+        return []
     plan_text = "\n".join([
         str(plan.intent or ""),
         "\n".join(str(x) for x in (plan.key_points or [])),
         str(plan.internal_note or ""),
     ])
     if not plan_text.strip():
-        return
+        return []
     try:
         all_files = ws_tool.list_generated_files(workspace_dir)
     except Exception:
-        return
+        return []
     existing_by_base = {os.path.basename(f): f for f in all_files}
     current = {os.path.basename(str(f)) for f in (plan.deliverables or [])}
     added: list[str] = []
@@ -470,41 +666,49 @@ def _add_mentioned_existing_deliverables(
             continue
         if rel_norm.startswith(upload_prefixes):
             continue
+        if not _has_current_production_evidence(rel, evidence_files):
+            continue
         full = os.path.join(workspace_dir, rel)
         try:
             if os.path.getsize(full) == 0:
                 continue
         except OSError:
             continue
-        plan.deliverables.append(rel)
         current.add(base)
-        added.append(base)
+        added.append(rel)
         if len(added) >= 12:
             break
     if added:
         debug.log(
-            "round2.deliverables.mentioned_autofix",
-            f"added files mentioned in plan text but missing from deliverables: {added}",
+            "round2.deliverables.mentioned_candidates",
+            f"mentioned delivery candidates collected for Round2 review: {added}",
             {"added": added},
         )
+    return added
 
 
-def _autofix_deliverables(
+def _collect_deliverable_candidates(
     plan: ResponsePlan,
     *,
     user_message: str,
     needs_tools: bool,
     workspace_dir: str,
     files_before: set,
-) -> None:
-    """plan.deliverables 为空时按启发式补充。原地修改 plan。
+    current_tool_messages: list[dict] | None = None,
+    require_current_evidence: bool = False,
+) -> list[str]:
+    """Collect candidate deliverables for Round2 LLM review.
 
-    保守策略——只在三种情况下补:
-      1. 用户消息含明显的"要文件"信号(输出/给我/修代码 等)
-      2. 工作区有命名带 fixed/final/output 等"产物"暗示的文件
-      3. 工作区有图表/文档/压缩包/可执行等"非纯源码"产物(用户场景下罕见做但不交付)
+    This function never mutates ``plan.deliverables``. It only returns candidate
+    facts for the same Round2 context to accept or reject.
 
-    源码文件(.c/.py/.js 等)默认 NOT 自动补,**除非**满足 1 或 2——
+    保守候选策略——空 deliverables 时,必须先有当前请求的文件/产物意图。
+    工作区里出现新文件只说明工具链产生过文件,不代表本轮用户要交付文件；
+    查看网页、分析状态、语音回复等任务可能产生截图、缓存、音频或中间文件。
+    若 plan 文本已经明确提到某文件,由 _add_mentioned_existing_deliverables
+    单独收集候选并交给 Round2 复核。
+
+    源码文件(.c/.py/.js 等)默认不作为候选,**除非**满足 1 或 2——
     防止把测试脚本误推送给用户。
 
     2026-05-15 P91: 即使 plan.deliverables 非空, 也补"漏掉的兄弟文件"。
@@ -512,35 +716,64 @@ def _autofix_deliverables(
     merge/heap/timsort/acms), 但忘了 results_insertion.csv (insertion helper 已成功
     完成)。论文里提 6 个算法, 但只交付 5 个 CSV — 用户拿到不完整数据。
     """
+    evidence_files = (
+        _current_round_production_evidence_files(current_tool_messages)
+        if require_current_evidence
+        else None
+    )
     # 2026-05-15 P91: 即使 plan.deliverables 非空, 检查命名模式有没有漏掉的兄弟
     if plan.deliverables and workspace_dir:
+        extra_candidates: list[str] = []
         try:
-            _check_sibling_files(plan, workspace_dir, files_before)
+            extra_candidates.extend(
+                _check_sibling_files(
+                    plan, workspace_dir, files_before, evidence_files,
+                )
+            )
         except Exception:
             log.exception("P91 sibling check failed")
         try:
-            _add_mentioned_existing_deliverables(plan, workspace_dir, files_before)
+            extra_candidates.extend(
+                _add_mentioned_existing_deliverables(
+                    plan, workspace_dir, files_before, evidence_files,
+                )
+            )
         except Exception:
-            log.exception("mentioned deliverable autofix failed")
+            log.exception("mentioned deliverable candidate collection failed")
+        if extra_candidates:
+            out: list[str] = []
+            seen_extra: set[str] = set()
+            for item in extra_candidates:
+                if item not in seen_extra:
+                    seen_extra.add(item)
+                    out.append(item)
+            return out
     if plan.deliverables:
-        return  # 模型已经填了, 不再做空 → 补的兜底
+        return []  # 模型已经填了, 不再做空 → 补的兜底
     if not needs_tools:
-        return
+        return []
     if not workspace_dir:
-        return
+        return []
 
     try:
         all_files = ws_tool.list_generated_files(workspace_dir)
     except Exception:
-        return
+        return []
     new_files = [f for f in all_files if f not in files_before]
     candidate_source = list(new_files)
     if not candidate_source:
-        return
+        return []
 
     # 用户消息暗示要交付文件吗?(中文/小写都查)
     msg_low = user_message.lower()
     has_file_intent = any(kw in msg_low for kw in _AUTOFIX_FILE_INTENT_KEYWORDS)
+    if not has_file_intent:
+        debug.log(
+            "round2.deliverables.candidates.no_file_intent",
+            "empty-plan delivery candidate scan skipped: current user request has no file/artifact intent",
+            {"all_new_files": new_files[:30]},
+        )
+        return []
 
     candidates: list[tuple[int, str]] = []
     for fname in candidate_source:
@@ -549,6 +782,12 @@ def _autofix_deliverables(
         if _is_ocr_intermediate_image(fname_low):
             continue
         if _is_internal_deliverable_file(fname):
+            continue
+        if not _has_current_production_evidence(fname, evidence_files):
+            debug.log(
+                "round2.deliverables.candidates.skipped",
+                f"{fname}: no current production evidence",
+            )
             continue
 
         # 临时文件直接跳过
@@ -577,8 +816,8 @@ def _autofix_deliverables(
                 continue
 
         # 2026-05-12 P15.F: 内部元数据文件硬黑名单(无论 score 多高都跳过)
-        # 实测 trace 23:46+: auto-added 8 个全是 .rewrite_count.json 等内部文件,
-        # 用户拿到一堆垃圾。这些文件**绝对**不该出现在 deliverables 里。
+        # 实测 trace 23:46+: 旧硬补曾选出 8 个 .rewrite_count.json 等内部文件,
+        # 用户拿到一堆垃圾。这些文件**绝对**不该进入交付候选。
         if _is_internal_file(fname_low):
             continue
 
@@ -624,7 +863,7 @@ def _autofix_deliverables(
             candidates.append((score, fname))
 
     if not candidates:
-        return
+        return []
 
     # 2026-05-04 v19: 同分时,docx/pptx/xlsx/pdf 等"最终交付物扩展名"优先级高于源码
     # 实测 trace 1fbb00b6: 排序算法汇报.pptx 和 sort_ppt_chart_*.png 同 4 分,
@@ -639,15 +878,15 @@ def _autofix_deliverables(
     # 2026-05-04 v19: 上限 6 → 8(原 3 → v18 改 6 → v19 改 8)
     # 大型研究任务(论文+PPT+Excel+图表+源码)合理 deliverable 可达 10+,
     # 6 仍可能漏掉源码或 chart。8 给足空间,极端噪声场景 LLM 自己应该填 plan.deliverables。
-    auto_picks = [f for _, f in candidates[:8]]
+    candidate_picks = [f for _, f in candidates[:8]]
 
-    plan.deliverables = list(auto_picks)
     debug.log(
-        "round2.deliverables.autofix",
-        f"plan.deliverables was empty → auto-added {auto_picks}",
+        "round2.deliverables.candidates",
+        f"candidate delivery facts collected for LLM review: {candidate_picks}",
         {
             "all_new_files": new_files,
             "scored_candidates": [(s, f) for s, f in candidates],
             "user_msg_intent": has_file_intent,
         },
     )
+    return candidate_picks

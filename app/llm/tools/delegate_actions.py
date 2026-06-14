@@ -483,6 +483,36 @@ def _keep_guard_result_after_fact_attachment(guard_result, helper_specs: list[di
     return guard_result
 
 
+def _non_tts_guard_specs(helper_specs: list[dict]) -> list[dict]:
+    """Return helper specs that still need the generic delegation guard.
+
+    TTS helpers are an execution channel for a voice route already selected by
+    the main process/route model. Running the generic task-quality guard again
+    inside that channel adds latency and can turn a simple synthesis request
+    into a second authorization/persona review. Wrong attempts to synthesize
+    speech through code/external engines are still guarded before they become
+    TTS work because their helper kind is not `tts`.
+    """
+    return [
+        spec
+        for spec in (helper_specs or [])
+        if str((spec or {}).get("kind") or (spec or {}).get("helper_kind") or "").strip().lower() != "tts"
+    ]
+
+
+def _guard_specs_brief(helper_specs: list[dict], *, limit: int = 6) -> list[dict]:
+    out: list[dict] = []
+    for spec in (helper_specs or [])[:limit]:
+        if not isinstance(spec, dict):
+            continue
+        out.append({
+            "task_id": spec.get("task_id"),
+            "kind": spec.get("kind") or spec.get("helper_kind"),
+            "mode": spec.get("mode"),
+        })
+    return out
+
+
 async def _run_hard_pair_preflight_guard(
     args: dict,
     helper_specs: list[dict],
@@ -503,12 +533,28 @@ async def _run_hard_pair_preflight_guard(
     """
     _sync_delegate_globals()
     _paired_task_map = args.get("_paired_task_map") or {}
-    _has_pairing = bool(_paired_task_map) or any(s.get("paired_with") for s in helper_specs)
-    _has_hard_helper = any(str(s.get("mode") or "").strip().lower() == "hard" for s in helper_specs)
-    if not (_has_pairing or _has_hard_helper) or not helper_specs:
+    helper_specs_for_guard = _non_tts_guard_specs(helper_specs)
+    if helper_specs and not helper_specs_for_guard:
+        debug.log(
+            "delegate.hard_resource.preflight_guard.tts_skipped",
+            f"skip generic hard-resource guard for {len(helper_specs)} tts helper(s); "
+            "tts route authorization already happened before helper start",
+            {"tasks": _guard_specs_brief(helper_specs)},
+        )
+        return None
+    _has_pairing = bool(_paired_task_map) or any(s.get("paired_with") for s in helper_specs_for_guard)
+    _has_hard_helper = any(str(s.get("mode") or "").strip().lower() == "hard" for s in helper_specs_for_guard)
+    if not (_has_pairing or _has_hard_helper) or not helper_specs_for_guard:
         return None
     try:
-        _guard_specs = args.get("_guard_task_specs") or helper_specs
+        _guard_specs = _non_tts_guard_specs(args.get("_guard_task_specs") or helper_specs_for_guard)
+        if not _guard_specs:
+            debug.log(
+                "delegate.hard_resource.preflight_guard.tts_skipped",
+                "skip generic hard-resource guard after filtering tts helper specs",
+                {"tasks": _guard_specs_brief(helper_specs)},
+            )
+            return None
         _guard_specs = [
             {
                 "task_id": s.get("task_id"),
@@ -548,7 +594,7 @@ async def _run_hard_pair_preflight_guard(
             _payload["preflight_guard"] = True
             _publish_helper_blocked_event(
                 _payload,
-                helper_specs,
+                _guard_specs,
                 trace_id=_effective_trace,
                 archive_id=archive_id,
                 group_id=group_id,
@@ -562,6 +608,7 @@ async def _run_hard_pair_preflight_guard(
         debug.log(
             "delegate.hard_resource.preflight_passed",
             f"guard passed for {len(_guard_specs)} primary task(s) before hard helper start",
+            {"tasks": _guard_specs_brief(_guard_specs)},
         )
         return None
     except Exception as exc:
@@ -597,7 +644,23 @@ async def _run_delegate_preflight_guard(
         )
         return None
     try:
-        _guard_specs = args.get("_guard_task_specs") or helper_specs
+        helper_specs_for_guard = _non_tts_guard_specs(helper_specs)
+        if not helper_specs_for_guard:
+            debug.log(
+                "delegate.preflight_guard.tts_skipped",
+                f"skip generic task-quality guard for {len(helper_specs)} tts helper(s); "
+                "tts route authorization already happened before helper start",
+                {"tasks": _guard_specs_brief(helper_specs)},
+            )
+            return None
+        _guard_specs = _non_tts_guard_specs(args.get("_guard_task_specs") or helper_specs_for_guard)
+        if not _guard_specs:
+            debug.log(
+                "delegate.preflight_guard.tts_skipped",
+                "skip generic task-quality guard after filtering tts helper specs",
+                {"tasks": _guard_specs_brief(helper_specs)},
+            )
+            return None
         _guard_specs = [
             {
                 "task_id": s.get("task_id"),
@@ -637,7 +700,7 @@ async def _run_delegate_preflight_guard(
             _payload["preflight_guard"] = True
             _publish_helper_blocked_event(
                 _payload,
-                helper_specs,
+                _guard_specs,
                 trace_id=_effective_trace,
                 archive_id=archive_id,
                 group_id=group_id,
@@ -651,6 +714,7 @@ async def _run_delegate_preflight_guard(
         debug.log(
             "delegate.preflight_guard.passed",
             f"guard passed for {len(_guard_specs)} primary task(s) before helper start",
+            {"tasks": _guard_specs_brief(_guard_specs)},
         )
         return None
     except Exception as exc:
@@ -2631,8 +2695,8 @@ async def _handle_delegate_status(
         for e in _recent
     ]
     structured_state = agent_state.structured_status(trace_id)
-    blocked_helpers = structured_state.get("blocked_helpers") or []
-    ready_to_resume_helpers = structured_state.get("ready_to_resume_helpers") or []
+    blocked_work = structured_state.get("blocked_work") or []
+    ready_to_resume_work = structured_state.get("ready_to_resume_work") or []
     artifacts_ready = structured_state.get("artifacts_ready") or []
     verified_evidence_recent = structured_state.get("verified_evidence_recent") or []
     return json.dumps({
@@ -2644,23 +2708,23 @@ async def _handle_delegate_status(
             "done_failed": n_done_failed,
             "recently_completed_total": len(_recent),  # 1.A
             "total_active": n_running + n_done,
-            "blocked_waiting_resource": len(blocked_helpers),
-            "ready_to_resume": len(ready_to_resume_helpers),
+            "blocked_waiting_resource": len(blocked_work),
+            "ready_to_resume": len(ready_to_resume_work),
             "ready_artifacts": len(artifacts_ready),
         },
         "running": helpers_running,
         "done_pending_collect": helpers_pending,
         "active_helpers": helpers_running,
         "completed_helpers": helpers_pending,
-        "blocked_helpers": blocked_helpers,
-        "ready_to_resume_helpers": ready_to_resume_helpers,
+        "blocked_work": blocked_work,
+        "ready_to_resume_work": ready_to_resume_work,
         "resource_requests": structured_state.get("resource_requests") or [],
         "artifacts_ready": artifacts_ready,
         "verified_evidence_recent": verified_evidence_recent,
         "contracts": structured_state.get("contracts") or [],
         "recently_completed": recently_completed,  # 1.A: ledger 历史
         "resource_hint": (
-            "Ready-to-resume helpers should be resumed with the same task_id, "
+            "Ready-to-resume work items should be resumed with the same task_id, "
             "resume=true, and concrete satisfied_by resource paths. Blocked "
             "helpers are not factual task output; satisfy or refuse their "
             "resource requests before final delivery.\n\n"

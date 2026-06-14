@@ -19,23 +19,24 @@ INTERMEDIATE_FEEDBACK_SYSTEM = (
     "You decide whether to send a short mid-task update while work is still running. "
     "The update is visible to the user and will be remembered with the final answer.\n\n"
     "## Truth Priority\n"
-    "Use current_event_facts as the source of truth. The user_request is only background. "
+    "Use current_event_facts as the source of truth. They are public-level work facts, not private implementation details. The user_request is only background. "
     "Name only work items whose state is explicit in the facts. "
     "Mention work items from the original request only when the facts name them in the current state. "
-    "Preserve technical task ids, filenames, paths, and domain terms exactly when you name them; "
+    "Preserve technical task labels, filenames, paths, and domain terms exactly when you name them; "
     "do not reinterpret opaque labels or translate identifier components into unrelated meanings. "
     "If a label is not user-friendly, describe the visible work area neutrally without changing its meaning. "
-    "For helper_started or running facts, use started/running wording. "
-    "For helper_process_exited facts, say the branch returned or left the active list; completion is unknown until delegate_result confirms it. "
-    "For completed helper facts inside delegate_result, use finished/returned-result wording for that helper only. "
-    "For helper_blocked_before_start facts, say those helpers were blocked before startup and the plan is being adjusted; describe only confirmed running, finished, or active work as such. "
+    "For work_started or running facts, use started/running wording. "
+    "For work_branch_returned facts, say the branch returned for status checking; completion is unknown until work_result_summary confirms it. "
+    "For completed work facts inside work_result_summary, use finished/returned-result wording only for those labels. "
+    "For work_blocked_before_start facts, say those branches were blocked before startup and the plan is being adjusted; describe only confirmed running, finished, or active work as such. "
     "If current_event_facts include next_direction, reflect that direction instead of the original unstarted task list. "
-    "A finished helper branch is not the same as the whole user task being finished.\n\n"
+    "A finished work branch is not the same as the whole user task being finished.\n\n"
     "## Decision\n"
     "Speak when the update helps the user understand progress, recovery, waiting, or a reached milestone. "
     "Keep persona voice and turn internal workflow into user-facing progress wording unless the user is explicitly watching workflow details. "
     "Use outcome-level wording such as reading material, checking files, verifying results, preparing a report, or applying changes. "
-    "Reserve whole-task completion for the final answer; helper completion may be named only when the facts say that helper finished.\n\n"
+    "Do not expose internal process labels, private orchestration names, or private workspace paths in the user-visible message. "
+    "Reserve whole-task completion for the final answer; branch completion may be named only when the facts say that branch finished.\n\n"
     "## Output\n"
     "Return strict JSON: {\"should_reply\": true|false, \"message\": \"...\"}. "
     "When should_reply is true, message must be one short Chinese line, normally under 45 characters.\n\n"
@@ -466,11 +467,14 @@ def _summarize_delegate_result_payload(result: dict) -> str:
     if isinstance(structured_summary, dict):
         result = {**result, **structured_summary}
     action = str(result.get("action") or "").strip().lower()
-    requested = result.get("helpers_requested", result.get("helpers_initially_spawned", 0))
-    returned = result.get("helpers_returned", result.get("helpers_completed", 0))
+    requested = result.get(
+        "background_work_requested",
+        result.get("helpers_requested", result.get("background_work_started", result.get("helpers_initially_spawned", 0))),
+    )
+    returned = result.get("results_returned", result.get("helpers_returned", result.get("helpers_completed", 0)))
     success = result.get("success_count", 0)
-    running = result.get("helpers_still_running", 0)
-    unavailable = result.get("helpers_unavailable", 0)
+    running = result.get("background_work_running", result.get("helpers_still_running", 0))
+    unavailable = result.get("background_work_unavailable", result.get("helpers_unavailable", 0))
     task_ok = result.get("task_ok")
     error = str(result.get("error") or result.get("error_kind") or "").strip()
     reason = str(result.get("reason") or result.get("error_summary") or "").strip()
@@ -656,6 +660,20 @@ _STRUCTURED_FACT_KEYS = (
     "event_focus_task_ids",
 )
 _INTERNAL_USER_VISIBLE_TERMS = (
+    "helper",
+    "delegate",
+    "producer",
+    "producer-owned",
+    "background_work",
+    "background work",
+    "processing_records",
+    "processing record",
+    "_helpers_shared",
+    "_delegate_",
+    ".helper_",
+    "agent_state",
+    "toolchain",
+    "后台任务",
     "round1",
     "round2",
     "round3",
@@ -707,6 +725,108 @@ def _main_milestone_public_fact(milestone: str, message: str) -> tuple[str, str,
     if "round" in clean_message.lower() or "veryhard" in clean_message.lower():
         clean_message = "A workflow milestone changed."
     return ("main_milestone", "milestone", clean_message[:300])
+
+
+def _sanitize_progress_visible_text(text: str, *, limit: int = 500) -> str:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value:
+        return ""
+    replacements = (
+        (r"_helpers_shared[/\\][^\s,;，。]+", "shared work evidence"),
+        (r"_delegate_[^\s,;，。]+", "work branch"),
+        (r"\.helper_[^\s,;，。]+", "work record"),
+        (r"\bhelper\b", "work branch"),
+        (r"\bdelegate\b", "work coordination"),
+        (r"\bagent_state\b", "task ledger"),
+        (r"\btoolchain\b", "tool workflow"),
+        (r"\bRound\s*[123]\b", "workflow stage"),
+        (r"\bround\s*[123]\b", "workflow stage"),
+        (r"\bveryhard\b", "harder planning mode"),
+        (r"\bmedium_coding\b", "implementation planning mode"),
+    )
+    for pattern, repl in replacements:
+        value = re.sub(pattern, repl, value, flags=re.IGNORECASE)
+    if len(value) > limit:
+        value = value[:limit].rstrip() + "..."
+    return value
+
+
+def _public_progress_event_facts(recent_work: str) -> str:
+    """Convert structured workflow facts into model-visible progress facts.
+
+    The raw lifecycle facts are still used by local validation. The generation
+    LLM only needs user-level state, visible work, and truth boundaries.
+    """
+
+    lines: list[str] = []
+    for raw_line in (recent_work or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            if line.endswith(":"):
+                label = line[:-1].strip()
+                if label == "delegate_result":
+                    lines.append("work_result_summary:")
+                elif label == "todo_result":
+                    lines.append("plan_checklist_summary:")
+                else:
+                    lines.append(_sanitize_progress_visible_text(line, limit=300))
+            else:
+                lines.append(_sanitize_progress_visible_text(line, limit=300))
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        sanitized = _sanitize_progress_visible_text(value)
+        if key == "event_fact":
+            mapping = {
+                "helper_started": "work_started",
+                "helper_process_exited": "work_branch_returned",
+                "helper_blocked_before_start": "work_blocked_before_start",
+                "helper_progress": "work_progress",
+                "helper_runaway_or_stuck": "work_branch_needs_recovery",
+            }
+            lines.append(f"event_fact={mapping.get(value, value)}")
+        elif key == "helper_task":
+            lines.append(f"work_label={sanitized}")
+        elif key == "helper_kind":
+            lines.append(f"work_type={sanitized}")
+        elif key == "blocked_task_ids":
+            lines.append(f"blocked_work_labels={sanitized}")
+        elif key == "blocked_helper_kinds":
+            lines.append(f"blocked_work_types={sanitized}")
+        elif key == "completed_task_ids":
+            lines.append(f"completed_work_labels={sanitized}")
+        elif key == "failed_task_ids":
+            lines.append(f"failed_work_labels={sanitized}")
+        elif key == "running_task_ids":
+            lines.append(f"running_work_labels={sanitized}")
+        elif key == "event_focus_task_ids":
+            lines.append(f"event_focus_work_labels={sanitized}")
+        elif key == "delegate_result":
+            lines.append(f"work_result_summary={sanitized}")
+        elif key == "tool":
+            tool = sanitized
+            if tool == "delegate":
+                tool = "work coordination"
+            elif tool == "todo_write":
+                tool = "plan checklist"
+            lines.append(f"operation={tool}")
+        elif key == "recent_tools":
+            lines.append(f"recent_operations={sanitized}")
+        elif key == "workflow_kind":
+            lines.append(f"workflow_event={sanitized}")
+        elif key == "label_policy":
+            lines.append("label_policy=technical labels, filenames, paths, and domain terms are stable labels; preserve them if named")
+        elif key == "truth_scope":
+            lines.append(f"truth_scope={sanitized}")
+        elif key == "wording_hint":
+            lines.append(f"wording_hint={sanitized}")
+        else:
+            lines.append(f"{key}={sanitized}")
+    public_facts = "\n".join(line for line in lines if line.strip())
+    return public_facts[:1800]
 
 
 def _structured_labels_from_text(text: str) -> set[str]:
@@ -920,7 +1040,7 @@ def _intermediate_feedback_user_payload(
             "\n\n根据人设、进度、运行时长和上次回复时间判断是否需要中途回复。"
         )
     payload = {
-        "current_event_facts": (recent_work or "")[:1800],
+        "current_event_facts": _public_progress_event_facts(recent_work or ""),
         "decision_instruction": decision_instruction,
         "event": event or "scheduled",
         "event_hint": event_hint,
@@ -1000,7 +1120,7 @@ async def generate_intermediate_feedback(
             repair_payload = json.loads(base_user_payload)
             repair_payload["consistency_repair"] = (
                 f"The previous candidate conflicted with the event facts: {reason}. "
-                "Regenerate one truthful line from current_event_facts only. "
+                "Regenerate one truthful line from public current_event_facts only. "
                 "If a truthful useful line cannot be written, return {\"should_reply\": false, \"message\": \"\"}."
             )
             messages = [

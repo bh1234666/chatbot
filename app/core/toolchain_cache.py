@@ -28,6 +28,56 @@ _MAX_TOOL_DESCRIPTION_CHARS = 120
 _MAX_PROPERTY_DESCRIPTION_CHARS = 70
 
 
+def _sanitize_model_visible_toolchain_text(value: Any, max_chars: int = 220) -> str:
+    text = str(value or "").replace("\n", " ")
+    replacements = (
+        ("_helpers_shared/", "work material/"),
+        ("internal_shared/", "work material/"),
+        ("_delegate_", "processing_record_"),
+        ("internal_run_", "processing_record_"),
+        ("delegate", "processing_records"),
+        ("helper reports", "available evidence"),
+        ("helper report", "available evidence"),
+        ("background_work", "processing_records"),
+        ("background work", "processing records"),
+        ("helper_producer_self_verified", "output_self_verified"),
+        ("producer_self_verified", "output_self_verified"),
+        ("main process", "coordinator"),
+        ("main thread", "coordinator"),
+        ("helpers", "processing records"),
+        ("helper", "processing record"),
+        ("producer-owned", "generated"),
+        ("producer owned", "generated"),
+        ("producer evidence", "evidence"),
+        ("producers", "processing records"),
+        ("producer", "processing record"),
+    )
+    for old, new in replacements:
+        text = text.replace(old, new)
+    text = re.sub(r"\bbackground_work\b", "processing_records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bbackground\s+(?:tasks?|work|producers?|branches?)\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhelpers\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhelper\b", "processing record", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:helper|producer)[-_ ]owned\b", "generated", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\s+evidence\b", "evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bmain\s+process\b", "coordinator", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bmain\s+thread\b", "coordinator", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducers\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\b", "processing record", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) <= max_chars:
+        return text
+    keep_suffixes: list[str] = []
+    if "output_self_verified" in text:
+        keep_suffixes.append("output_self_verified")
+    suffix = ""
+    if keep_suffixes:
+        suffix = " " + " ".join(dict.fromkeys(keep_suffixes))
+    if suffix and len(suffix) < max_chars:
+        return text[: max_chars - len(suffix)].rstrip() + suffix
+    return text[:max_chars]
+
+
 def _safe_segment(value: str) -> str:
     value = str(value or "default").strip() or "default"
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value)[:120]
@@ -78,7 +128,7 @@ def _compact_entries(entries: list[dict[str, Any]], max_chars: int = MAX_CACHE_C
         if not text:
             continue
         if len(text) > MAX_ENTRY_CHARS:
-            text = text[: MAX_ENTRY_CHARS - 220] + "\n\n[entry truncated by toolchain cache]"
+            text = text[: MAX_ENTRY_CHARS - 220] + "\n\n[entry truncated by prior-work cache]"
         clean.append({
             "trace_id": str(entry.get("trace_id") or "")[:64],
             "created_at": float(entry.get("created_at") or time.time()),
@@ -108,9 +158,9 @@ def _compact_entries(entries: list[dict[str, Any]], max_chars: int = MAX_CACHE_C
             "created_at": time.time(),
             "source": "cache_compaction",
             "text": (
-                f"[toolchain cache compaction]\n"
-                f"Older {dropped} cached toolchain entr{'y' if dropped == 1 else 'ies'} "
-                f"were omitted to keep the continuation cache under {max_chars} chars. "
+                f"[prior work cache compaction]\n"
+                f"Older {dropped} cached prior-work entr{'y' if dropped == 1 else 'ies'} "
+                f"were omitted to keep the continuation context under {max_chars} chars. "
                 "Use the retained recent entries as the authoritative continuation context."
             ),
         }
@@ -133,12 +183,13 @@ def summarize_messages(
     pending: dict[str, tuple[str, str]] = {}
     skip_ids: set[str] = set()
     lines: list[str] = []
+    retained_any = False
 
     if user_message:
         lines.append("[current user request]")
         lines.append(str(user_message).strip()[:1200])
         lines.append("")
-    lines.append("[current toolchain summary]")
+    lines.append("[current prior-work summary]")
 
     step = 0
     for message in messages:
@@ -146,7 +197,13 @@ def summarize_messages(
             continue
         role = message.get("role")
         if role == "assistant":
-            for tc in _tool_call_items(message):
+            tool_calls = _tool_call_items(message)
+            if not tool_calls:
+                plan_summary = _summarize_assistant_plan_content(message.get("content"))
+                if plan_summary:
+                    retained_any = True
+                    lines.append(plan_summary)
+            for tc in tool_calls:
                 tcid = str(tc.get("id") or "")
                 fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
                 name = str(fn.get("name") or "?")
@@ -162,7 +219,12 @@ def summarize_messages(
                 if tcid:
                     pending[tcid] = (name, args_preview)
                 step += 1
-                lines.append(f"{step}. call {name}: {args_preview}")
+                retained_any = True
+                display_name = "processing_records" if name == "delegate" else name
+                lines.append(
+                    f"{step}. call {display_name}: "
+                    f"{_sanitize_model_visible_toolchain_text(args_preview, 260)}"
+                )
         elif role == "tool":
             tcid = str(message.get("tool_call_id") or "")
             if tcid in skip_ids:
@@ -170,9 +232,10 @@ def summarize_messages(
             name, _args = pending.pop(tcid, ("?", ""))
             content = message.get("content") or ""
             result_summary = _summarize_tool_result(content)
-            lines.append(f"   -> {name}: {result_summary}")
+            display_name = "processing_records" if name == "delegate" else name
+            lines.append(f"   -> {display_name}: {result_summary}")
 
-    if step == 0:
+    if step == 0 and not retained_any:
         lines.append("(no retained tool calls)")
 
     state_summary = _summarize_agent_state(trace_id)
@@ -183,8 +246,46 @@ def summarize_messages(
 
     text = "\n".join(lines).strip()
     if len(text) > max_chars:
-        return text[: max_chars - 180] + "\n\n[current toolchain summary truncated]"
+        return text[: max_chars - 180] + "\n\n[current prior-work summary truncated]"
     return text
+
+
+def _summarize_assistant_plan_content(content: Any) -> str:
+    raw = str(content or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+
+    bits: list[str] = []
+    intent = parsed.get("intent")
+    if intent:
+        bits.append(f"intent={_sanitize_model_visible_toolchain_text(intent, 220)}")
+    deliverables = parsed.get("deliverables")
+    if isinstance(deliverables, list):
+        clean = [
+            _sanitize_model_visible_toolchain_text(item, 160)
+            for item in deliverables[:12]
+            if str(item or "").strip()
+        ]
+        if clean:
+            bits.append("deliverables=" + json.dumps(clean, ensure_ascii=False))
+    key_points = parsed.get("key_points")
+    if isinstance(key_points, list):
+        clean_points = [
+            _sanitize_model_visible_toolchain_text(item, 180)
+            for item in key_points[:6]
+            if str(item or "").strip()
+        ]
+        if clean_points:
+            bits.append("key_points=" + " | ".join(clean_points))
+    if not bits:
+        return ""
+    return "assistant_plan: " + " | ".join(bits)
 
 
 def _summarize_agent_state(trace_id: str) -> list[str]:
@@ -204,34 +305,34 @@ def _summarize_agent_state(trace_id: str) -> list[str]:
             goal = str(item.get("goal") or "").replace("\n", " ")[:180]
             stage = str(item.get("current_stage") or "")
             parts.append(f"{item.get('task_id') or '?'}:{stage}:{goal}")
-        lines.append("contracts=" + " | ".join(parts))
+        lines.append("contracts=" + _sanitize_model_visible_toolchain_text(" | ".join(parts), 900))
     evidence = status.get("verified_evidence_recent") or []
     if evidence:
         parts = []
         for item in evidence[-8:]:
             summary = str(item.get("summary") or "").replace("\n", " ")[:160]
             parts.append(f"{item.get('task_id') or item.get('source') or '?'}:{summary}")
-        lines.append("verified_evidence=" + " | ".join(parts))
+        lines.append("verified_evidence=" + _sanitize_model_visible_toolchain_text(" | ".join(parts), 900))
     artifacts = status.get("artifacts_ready") or []
     if artifacts:
         parts = []
         for item in artifacts[-12:]:
             parts.append(f"{item.get('path') or '?'}({item.get('type') or 'file'})")
-        lines.append("ready_artifacts=" + ", ".join(parts))
-    blocked = status.get("blocked_helpers") or []
+        lines.append("ready_artifacts=" + _sanitize_model_visible_toolchain_text(", ".join(parts), 900))
+    blocked = status.get("blocked_work") or status.get("blocked_helpers") or []
     if blocked:
         parts = []
         for item in blocked[-8:]:
             needed = ",".join(str(x) for x in (item.get("needed_outputs") or [])) or "unspecified"
             parts.append(f"{item.get('blocked_task_id') or '?'}->{item.get('requested_kind') or '?'}:{needed}")
-        lines.append("blocked_helpers=" + " | ".join(parts))
-    ready = status.get("ready_to_resume_helpers") or []
+        lines.append("blocked_work=" + _sanitize_model_visible_toolchain_text(" | ".join(parts), 900))
+    ready = status.get("ready_to_resume_work") or status.get("ready_to_resume_helpers") or []
     if ready:
         parts = []
         for item in ready[-8:]:
             paths = ",".join(str(x) for x in (item.get("satisfied_by") or [])) or "ready"
             parts.append(f"{item.get('blocked_task_id') or '?'}:{paths}")
-        lines.append("ready_to_resume=" + " | ".join(parts))
+        lines.append("ready_to_resume_work=" + _sanitize_model_visible_toolchain_text(" | ".join(parts), 900))
     return lines
 
 
@@ -248,20 +349,42 @@ def _summarize_tool_result(content: Any) -> str:
         parts.append(f"ok={parsed.get('ok')}")
     if parsed.get("error"):
         parts.append(f"error={str(parsed.get('error'))[:220]}")
+
+    source_attr = parsed.get("source_attribution")
+    if isinstance(source_attr, dict):
+        attr_bits: list[str] = []
+        for key in (
+            "scope",
+            "filename",
+            "uploader_name",
+            "uploader_id",
+            "current_user_relation",
+        ):
+            val = source_attr.get(key)
+            if val not in (None, ""):
+                attr_bits.append(f"{key}={str(val).replace(chr(10), ' ')[:80]}")
+        if source_attr.get("current_user_match") is not None:
+            attr_bits.append(f"current_user_match={source_attr.get('current_user_match')}")
+        if attr_bits:
+            parts.append("source_attribution=[" + "; ".join(attr_bits) + "]")
+
     for key in ("action", "summary", "note", "path", "stdout", "test_summary"):
         val = parsed.get(key)
         if val:
-            parts.append(f"{key}={str(val).replace(chr(10), ' ')[:220]}")
+            parts.append(f"{key}={_sanitize_model_visible_toolchain_text(val, 220)}")
     if parsed.get("results") and isinstance(parsed["results"], list):
-        helper_bits: list[str] = []
+        work_bits: list[str] = []
         for item in parsed["results"][:6]:
             if isinstance(item, dict):
                 tid = item.get("task_id") or "?"
                 status = item.get("status") or item.get("terminal_reason") or "?"
-                report = str(item.get("report") or item.get("summary") or "")[:120]
-                helper_bits.append(f"{tid}:{status}:{report}")
-        if helper_bits:
-            parts.append("helpers=[" + "; ".join(helper_bits) + "]")
+                report = _sanitize_model_visible_toolchain_text(
+                    item.get("report") or item.get("summary") or "",
+                    120,
+                )
+                work_bits.append(f"{tid}:{status}:{report}")
+        if work_bits:
+            parts.append("processing_records=[" + "; ".join(work_bits) + "]")
     if not parts:
         parts.append(raw.replace("\n", " ")[:500])
     return " | ".join(parts)[:900]
@@ -330,13 +453,13 @@ def continue_chain(
             created_at = entry.get("created_at") or 0
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(created_at)))
             text_parts.append(
-                f"## cached toolchain {idx} ({ts}, trace={entry.get('trace_id') or '?'})\n"
+                f"## cached prior work {idx} ({ts}, trace={entry.get('trace_id') or '?'})\n"
                 f"{entry.get('text') or ''}"
             )
         combined = "\n\n".join(text_parts).strip()
         if len(combined) > max_chars:
             combined = combined[-max_chars:]
-            combined = "[leading cached toolchain text omitted by max_chars]\n" + combined
+            combined = "[leading cached prior-work text omitted by max_chars]\n" + combined
         _write_cache(path, {"version": 1, "entries": []})
 
     debug.log(
@@ -351,7 +474,7 @@ def continue_chain(
         "chars": len(combined),
         "cache_cleared": True,
         "reason": reason[:500],
-        "continued_toolchain_prefix": combined or "(no cached toolchain was available)",
+        "continued_toolchain_prefix": combined or "(no cached prior work was available)",
         "next_step": (
             "Treat continued_toolchain_prefix as prior tool evidence. "
             "Use it as the starting point, then continue the current task. "

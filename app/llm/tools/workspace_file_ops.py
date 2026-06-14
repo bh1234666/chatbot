@@ -7,6 +7,7 @@ import hashlib
 
 from app.core.filesystem import FileKind, FileRegistry, FileStatus, PathZone, classify_path
 from app.llm.tools.output_spill import write_tool_output_spill
+from app.llm.tools.workspace_utils import _derive_permanent_root
 
 
 def _sync_workspace_globals() -> None:
@@ -1786,9 +1787,8 @@ async def handle_read_file(
         # helper push 到 main, 主线程在 .temp 读不到。Critical 架构 bug 修复:
         # ws_dir 找不到时, 自动 fallback 到永久根 (ws_dir 的父目录, 即 main_workspace)。
         # 这覆盖 P42 之前的极强 fuzzy 兜底, 因为 P42 fuzzy 也只搜 ws_dir 内。
-        _parent_ws = os.path.dirname(ws_dir.rstrip(os.sep).rstrip("/"))
-        _is_temp_ws = os.path.basename(ws_dir.rstrip(os.sep).rstrip("/")) == ".temp"
-        if _is_temp_ws and _parent_ws and os.path.isdir(_parent_ws):
+        _parent_ws = _derive_permanent_root(ws_dir)
+        if _parent_ws and os.path.isdir(_parent_ws):
             try:
                 _main_target = _safe_resolve(_parent_ws, path)
                 if os.path.isfile(_main_target):
@@ -1837,7 +1837,7 @@ async def handle_read_file(
             except (ValueError, OSError):
                 pass
         # P47 永久根再加 fuzzy 兜底 (覆盖 P42 只搜 .temp 的盲区)
-        if _is_temp_ws and _parent_ws and os.path.isdir(_parent_ws):
+        if _parent_ws and os.path.isdir(_parent_ws):
             _suggestions_main = _suggest_similar_files(_parent_ws, path)
             if _suggestions_main and _suggestions_main[0]["score"] >= 95:
                 _top = _suggestions_main[0]

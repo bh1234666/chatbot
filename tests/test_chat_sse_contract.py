@@ -364,6 +364,58 @@ async def test_chat_stream_duplicate_replays_cached_text_token(monkeypatch):
     assert events[2][1]["duplicate"] is True
 
 
+async def test_chat_stream_duplicate_suppresses_cached_text_for_voice_reply(monkeypatch):
+    from app.api import chat
+
+    async def fake_get_archive(archive_id):
+        return {"archive_id": archive_id}
+
+    async def fake_active(group_id):
+        return "archive"
+
+    async def fake_orchestrate(req, trace_id, **kwargs):
+        yield "meta", {"trace_id": trace_id}
+        yield "token", {"text": "这句会被语音替代"}
+        yield "done", {
+            "trace_id": trace_id,
+            "voice_reply": True,
+            "_suppress_text": True,
+            "voice_reply_file": "reply.wav",
+        }
+        yield "complete", {"trace_id": trace_id}
+
+    class Guard:
+        async def acquire(self, *args, **kwargs):
+            return None
+
+        async def release(self, *args, **kwargs):
+            return True
+
+    monkeypatch.setattr(chat.archive_dao, "get_archive", fake_get_archive)
+    monkeypatch.setattr(chat.bot_config, "get_active_archive", fake_active)
+    monkeypatch.setattr(chat, "orchestrate", fake_orchestrate)
+    monkeypatch.setattr(chat, "get_group_guard", lambda: Guard())
+    chat._idempotency_cache.clear()
+
+    req = ChatRequest(
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        message="voice",
+        client_msg_id="same-voice",
+    )
+    first = await chat.chat_stream(req)
+    await _collect_sse(first)
+
+    second = await chat.chat_stream(req)
+    events = await _collect_sse(second)
+
+    assert [name for name, _ in events] == ["meta", "done", "complete"]
+    assert events[1][1]["voice_reply"] is True
+    assert events[1][1]["_suppress_text"] is True
+    assert all(payload.get("text") != "这句会被语音替代" for _, payload in events)
+
+
 async def test_chat_stream_releases_guard_after_error_event(monkeypatch):
     from app.api import chat
 

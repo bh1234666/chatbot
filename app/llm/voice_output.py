@@ -3,15 +3,13 @@
 语音输出决策 — 用 lite 模型分析回复是否应该通过当前语音输出层发送。
 
 规则(按优先级):
-  1. 用户明确要求语音回复 + 预估时长 ≤ 60s → 语音
-  2. 用户要求语音回复 + 预估时长 > 60s → 不语音,标记"太长"
-  3. "帮我读xxx文件" → 这是文件推送场景,不是语音回复(但最终回复短+口语化仍可语音)
-  4. 回复很短(约 ≤20 字中文或 ≤15 词英文)且口语化 → 可语音
-  5. 其余 → 不语音（默认发文字）
+  1. 语音功能关闭、空回复、超过语音通道时长上限 → 不发送语音
+  2. voice_reply_preference 精确为 0/1 时作为人设硬边界
+  3. 其余情况由 Round3 语音/文字 classifier 根据用户、人设、计划和内容舒适度决定
 
-核心原则：除非用户明确要求，否则只有非常短的闲聊才用语音。
-语音消息适合：打招呼、简短确认、闲聊接话。
-语音消息不适合：任何需要阅读理解的回复、解释、多句对话。
+核心原则：语音倾向是给 LLM 的连续人设事实，不是本地阈值；本地逻辑只做硬安全边界、
+精确 0/1 人设边界。classifier 不可用时不合成本地 voice/text 决策，只保留已可见的文字回复。
+用户显式语音/文字意图也是 classifier 事实，不是本地 voice/text 短路。
 
 语音回复时不发文字。
 
@@ -29,10 +27,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import unicodedata
 from dataclasses import dataclass, field
+
+from app.config import settings
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ log = logging.getLogger(__name__)
 _CHAR_PER_SECOND_ZH = 3.0
 _WORD_PER_SECOND_EN = 2.5
 _MAX_VOICE_SECONDS = 60
+_VOICE_CLASSIFIER_TIMEOUT_SEC = max(0.5, float(getattr(settings, "voice_classifier_timeout_sec", 3.0) or 3.0))
 
 
 @dataclass
@@ -48,81 +50,459 @@ class VoiceDecision:
     voice_text: str = ""
     too_long: bool = False
     reason: str = ""
+    llm_decision_available: bool = True
 
 
-# 2026-05-16 Round 14b: round3 三者并行决策结果, 由 _round3_parallel 设置,
-# 后置 decide_voice 读. 避免后置重复 LLM 决策.
+# 2026-05-16 Round 14b: round3 三者并行决策结果, 由 _round3_parallel 设置.
+# 2026-06-13: voice 预判只选择生成侧; 最终发送语音前还要用实际回复文本做 LLM 复核.
 from contextvars import ContextVar
 _round3_parallel_decision: ContextVar[str] = ContextVar(
     "_round3_parallel_decision", default="",
 )
+_round3_voice_route_snapshot: ContextVar[dict | None] = ContextVar(
+    "_round3_voice_route_snapshot", default=None,
+)
 
 
-# 2026-05-16 Round 13/14: 提到模块级方便 round3 前置调用
-_VOICE_REQUEST_HINTS = (
-    "用语音", "语音回", "语音说", "发语音", "说给我听", "讲给我听",
-    "voice", "by voice", "speak it",
+def _voice_preference_hint(voice_preference: float) -> str:
+    """Model-visible label for the stable persona voice setting."""
+    voice_preference = max(0.0, min(1.0, float(voice_preference or 0.0)))
+    return (
+        f"continuous preference {voice_preference:.2f}: higher means the persona is more willing "
+        "to use voice for short conversational turns; lower means voice should need clearer "
+        "user/context support. Level guide for the classifier: below 0.20 = very low voice willingness "
+        "(default to text for neutral greetings, identity answers, thanks, acknowledgements, and ordinary short chat "
+        "unless the current user explicitly asks for a voice reply); 0.20-0.39 = low voice willingness "
+        "(voice needs clear current-turn support); 0.40-0.69 = balanced voice willingness; "
+        "0.70-0.79 = high voice willingness; 0.80+ = strong voice willingness "
+        "(strongly favor voice for short conversational replies and brief spoken statuses, unless the current user "
+        "asks for text or the final reply is not comfortable to hear because it is too long, dense, structured, "
+        "copyable, or revisitable). "
+        "This value is evidence for the classifier, not a local automatic threshold."
+    )
+
+
+def _compact_voice_classifier_context(persona: str = "", recent_messages: list | None = None) -> tuple[str, str]:
+    """Small persona/recent-context facts for the LLM voice classifier."""
+    persona_text = re.sub(r"\s+", " ", str(persona or "")).strip()
+    if len(persona_text) > 360:
+        persona_text = persona_text[:360].rstrip() + "..."
+    if not persona_text:
+        persona_text = "(none)"
+
+    recent_lines: list[str] = []
+    for item in list(recent_messages or [])[-4:]:
+        if isinstance(item, dict):
+            role = str(item.get("role") or item.get("speaker") or item.get("name") or "").strip()
+            content = str(item.get("content") or item.get("message") or item.get("text") or "").strip()
+        else:
+            role = str(getattr(item, "role", "") or getattr(item, "speaker", "") or getattr(item, "name", "") or "").strip()
+            content = str(getattr(item, "content", "") or getattr(item, "message", "") or getattr(item, "text", "") or "").strip()
+        content = re.sub(r"\s+", " ", content)
+        if not content:
+            continue
+        if len(content) > 120:
+            content = content[:120].rstrip() + "..."
+        recent_lines.append(f"{role or 'message'}: {content}")
+    recent_context = "\n".join(recent_lines) if recent_lines else "(none)"
+    return persona_text, recent_context
+
+
+def _parse_voice_classifier_label(raw: str) -> str:
+    """Parse the classifier protocol without treating explanatory text as a label."""
+    text = str(raw or "").strip().lower()
+    match = re.match(r"^(voice|text)\b", text)
+    if not match:
+        return "unavailable"
+    return match.group(1)
+
+
+def _parse_voice_classifier_json(raw: object) -> str:
+    if not isinstance(raw, dict):
+        return "unavailable"
+    for key in ("delivery", "decision", "mode", "answer"):
+        value = raw.get(key)
+        parsed = _parse_voice_classifier_label(str(value or ""))
+        if parsed in {"voice", "text"}:
+            return parsed
+    return "unavailable"
+
+
+async def _decide_voice_with_json_classifier(_llm, sys_msg: str, user_prompt: str) -> str:
+    """Ask the LLM for the voice/text route as strict JSON."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                sys_msg
+                + "\nReturn strict JSON only: {\"delivery\":\"voice\"} or {\"delivery\":\"text\"}."
+            ),
+        },
+        {"role": "user", "content": user_prompt},
+    ]
+    try:
+        raw = await asyncio.wait_for(
+            _llm.chat_json(
+                messages,
+                reasoning="disabled",
+                lite=True,
+                metrics_tag="json.voice_delivery_classifier",
+            ),
+            timeout=_VOICE_CLASSIFIER_TIMEOUT_SEC,
+        )
+    except Exception:
+        log.debug("voice classifier json decision failed", exc_info=True)
+        return "unavailable"
+    decision = _parse_voice_classifier_json(raw)
+    if decision == "unavailable":
+        log.debug("voice classifier json returned invalid label %r", raw)
+    return decision
+
+
+def _compact_reply_for_voice_review(text: str, limit: int = 900) -> str:
+    text = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    return text or "(empty)"
+
+
+def _compact_plan_items(values: object, *, limit: int = 6, item_limit: int = 120) -> str:
+    if values is None:
+        return "(none)"
+    if isinstance(values, str):
+        items = [values]
+    else:
+        try:
+            items = list(values)  # type: ignore[arg-type]
+        except TypeError:
+            items = [values]
+    lines: list[str] = []
+    for item in items[:limit]:
+        text = re.sub(r"\s+", " ", str(item or "")).strip()
+        if not text:
+            continue
+        if len(text) > item_limit:
+            text = text[:item_limit].rstrip() + "..."
+        lines.append(f"- {text}")
+    if not lines:
+        return "(none)"
+    if len(items) > limit:
+        lines.append(f"- ... ({len(items) - limit} more)")
+    return "\n".join(lines)
+
+
+def _plan_items(values: object) -> list:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        return [values]
+    try:
+        return list(values)  # type: ignore[arg-type]
+    except TypeError:
+        return [values]
+
+
+_READABLE_REQUEST_MARKERS = (
+    "http", "https://", "www.", "url", "link", "webpage", "website", "page",
+    "browser", "browse", "open", "inspect", "read", "check", "verify",
+    "validate", "analyze", "analyse", "debug", "log", "file", "document",
+    "image", "screenshot", "project", "artifact", "report", "table", "code",
+    "网页", "网站", "链接", "浏览", "打开", "查看", "检查", "读取", "读",
+    "验证", "分析", "调试", "日志", "文件", "文档", "图片", "截图",
+    "项目", "工程", "产物", "报告", "表格", "代码", "清单", "列表", "证据",
 )
-_VOICE_FILE_HINTS = (
-    "语音文件", "音频文件", "生成语音", "合成语音", "输出语音", "做个语音",
-    "做一段语音", "生成音频", "合成音频", "输出音频", "tts", "audio file",
-    "voice file", "generate audio", "synthesize audio", "make an audio",
-)
-_LONG_READ_HINTS = (
-    "朗读", "读出来", "读给我听", "念出来", "念给我听", "全文读", "通篇读",
-    "read aloud", "read it out", "read this to me",
-)
-_VOICE_REPLY_MARKERS = (
-    "回复", "回我", "回答", "response", "reply",
-    "说给我听", "讲给我听", "by voice", "speak it",
-)
-_VOICE_REFUSE_HINTS = (
-    "文字回复", "用文字", "文字回我", "纯文字", "别用语音", "别语音",
-    "不要语音", "不用语音", "不发语音", "不需要语音", "别合成语音",
-    "text only", "no voice", "in text", "text reply",
-)
+
+
+def _request_visibility_evidence(user_message: str = "") -> str:
+    msg = re.sub(r"\s+", " ", str(user_message or "")).strip().lower()
+    if not msg:
+        return ""
+    matched: list[str] = []
+    for marker in _READABLE_REQUEST_MARKERS:
+        marker_l = marker.lower()
+        if marker_l.isascii() and marker_l.replace("_", "").isalnum():
+            if re.search(rf"(?<![a-z0-9_]){re.escape(marker_l)}(?![a-z0-9_])", msg):
+                matched.append(marker)
+        elif marker_l in msg:
+            matched.append(marker)
+    if matched:
+        sample = ", ".join(dict.fromkeys(matched[:6]))
+        return (
+            "current user message contains material/result terms that often need readable "
+            f"follow-up ({sample}); treat this as evidence, not an automatic routing rule"
+        )
+    return ""
+
+
+def _compact_plan_projection(
+    plan,
+    *,
+    has_user_facing_files: bool = False,
+    user_message: str = "",
+) -> tuple[str, str, str, str, str]:
+    if not plan:
+        request_evidence = _request_visibility_evidence(user_message)
+        shape = "no response plan; infer from raw user message and recent context"
+        if request_evidence:
+            shape += f"; request_visibility_evidence={request_evidence}"
+        return "", "(none)", "(none)", "(none)", shape
+
+    tone = re.sub(r"\s+", " ", str(getattr(plan, "tone", "") or "")).strip()
+    length_hint = re.sub(r"\s+", " ", str(getattr(plan, "length_hint", "") or "")).strip()
+    key_points = _plan_items(getattr(plan, "key_points", None))
+    avoid = _plan_items(getattr(plan, "avoid", None))
+    deliverables = _plan_items(getattr(plan, "deliverables", None))
+    delivery_partial = _plan_items(getattr(plan, "delivery_partial", None))
+
+    key_count = len(key_points)
+    deliverable_count = len(deliverables)
+    partial_count = len(delivery_partial)
+    shape_bits = [
+        f"length_hint={length_hint or 'unspecified'}",
+        f"key_points={key_count}",
+        f"deliverables={deliverable_count}",
+        f"partial_deliveries={partial_count}",
+        f"user_facing_files={'yes' if has_user_facing_files else 'no'}",
+    ]
+    if key_count:
+        shape_bits.append("round3 is expected to cover the listed key points")
+    if deliverable_count or partial_count or has_user_facing_files:
+        shape_bits.append("reply may need readable file/status references")
+
+    shape_facts = _project_reply_shape_facts(
+        plan,
+        has_user_facing_files=has_user_facing_files,
+        user_message=user_message,
+    )
+    predicted_envelope = str(shape_facts.get("predicted_output_envelope") or "").strip()
+    if predicted_envelope:
+        shape_bits.append(f"predicted_output_envelope={predicted_envelope}")
+    request_evidence = str(shape_facts.get("request_visibility_evidence") or "").strip()
+    if request_evidence:
+        shape_bits.append(f"request_visibility_evidence={request_evidence}")
+
+    return (
+        tone,
+        _compact_plan_items(key_points),
+        _compact_plan_items(avoid),
+        _compact_plan_items(deliverables),
+        "; ".join(shape_bits),
+    )
+
+
+def _reply_shape_envelope(
+    *,
+    length_hint: str,
+    key_point_count: int,
+    deliverable_count: int,
+    partial_delivery_count: int,
+    has_user_facing_files: bool,
+    likely_readable: bool,
+    likely_structured: bool,
+    likely_multi_sentence: bool,
+) -> str:
+    """Model-visible final-output envelope; not a local delivery decision."""
+    length_l = str(length_hint or "").strip().lower()
+    output_items = key_point_count + deliverable_count + partial_delivery_count
+    if (
+        has_user_facing_files
+        or deliverable_count
+        or partial_delivery_count
+        or likely_structured
+    ):
+        return "structured_or_revisitable_result"
+    if likely_readable:
+        return "readable_status_or_evidence_summary"
+    if likely_multi_sentence or output_items >= 2 or any(token in length_l for token in ("medium", "long", "中", "长")):
+        return "multi_sentence_answer"
+    if output_items == 1:
+        return "single_fact_short_answer"
+    return "short_chat_or_ack"
+
+
+def _delivery_visibility_evidence(envelope: str) -> str:
+    """Model-visible listening/readability evidence, not a local routing rule."""
+    if envelope == "structured_or_revisitable_result":
+        return (
+            "reply is likely to contain structured, file/status, or revisitable details; "
+            "voice is a poor prediction for task outcomes, blockers, file/webpage/log statuses, "
+            "or details the user needs to read or revisit"
+        )
+    if envelope == "readable_status_or_evidence_summary":
+        return (
+            "reply may need readable status or evidence details; task outcomes and blockers should "
+            "remain text unless the current user explicitly asks for voice"
+        )
+    if envelope == "multi_sentence_answer":
+        return (
+            "reply likely has multiple user-facing facts; compare expected density with listening comfort"
+        )
+    if envelope == "single_fact_short_answer":
+        return "reply likely has one short user-facing fact"
+    if envelope == "short_chat_or_ack":
+        return "reply likely behaves like short conversational chat"
+    return "no plan-derived listening/readability evidence; use current request, previews, and final reply"
+
+
+def _project_reply_shape_facts(
+    plan,
+    *,
+    has_user_facing_files: bool = False,
+    user_message: str = "",
+) -> dict[str, object]:
+    """Shared facts for route-time prediction and final delivery review."""
+    request_evidence = _request_visibility_evidence(user_message)
+    if not plan:
+        likely_readable = bool(has_user_facing_files or request_evidence)
+        envelope = "readable_status_or_evidence_summary" if likely_readable else "unknown_without_plan"
+        why = "no response plan; infer from raw user message and final reply"
+        if request_evidence:
+            why += f"; request_visibility_evidence={request_evidence}"
+        return {
+            "length_hint": "unspecified",
+            "key_point_count": 0,
+            "deliverable_count": 0,
+            "partial_delivery_count": 0,
+            "content_unit_count": 0,
+            "has_user_facing_files": bool(has_user_facing_files),
+            "likely_readable": likely_readable,
+            "likely_structured": False,
+            "likely_multi_sentence": False,
+            "predicted_output_envelope": envelope,
+            "delivery_visibility_evidence": _delivery_visibility_evidence(envelope),
+            "request_visibility_evidence": request_evidence,
+            "information_boundary": "no response plan; route from raw user message, previews, and final reply",
+            "why": why,
+        }
+
+    length_hint = re.sub(r"\s+", " ", str(getattr(plan, "length_hint", "") or "")).strip() or "unspecified"
+    key_points = _plan_items(getattr(plan, "key_points", None))
+    deliverables = _plan_items(getattr(plan, "deliverables", None))
+    delivery_partial = _plan_items(getattr(plan, "delivery_partial", None))
+    intent = re.sub(r"\s+", " ", str(getattr(plan, "intent", "") or "")).strip()
+    joined = " ".join(
+        re.sub(r"\s+", " ", str(item or "")).strip()
+        for item in [intent, length_hint, *key_points, *deliverables, *delivery_partial]
+        if str(item or "").strip()
+    ).lower()
+    readable_markers = (
+        "http", "www.", "url", "link", "file", "filename", "path", "code", "json",
+        "csv", "table", "report", "docx", "xlsx", "pdf", "日志", "网页", "文件",
+        "链接", "代码", "表格", "报告", "清单", "列表", "状态", "证据", "路径",
+        "选项", "对比", "检查", "查看", "验证", "分析", "根因",
+    )
+    likely_readable = bool(
+        has_user_facing_files
+        or deliverables
+        or delivery_partial
+        or request_evidence
+        or any(marker in joined for marker in readable_markers)
+    )
+    likely_structured = bool(
+        len(key_points) >= 3
+        or deliverables
+        or delivery_partial
+        or any(marker in joined for marker in ("bullet", "list", "table", "列表", "清单", "表格", "步骤"))
+    )
+    likely_multi_sentence = bool(
+        len(key_points) >= 2
+        or likely_structured
+        or any(marker in joined for marker in ("long", "详细", "分析", "解释", "对比", "原因", "根因"))
+    )
+    content_unit_count = len(key_points) + len(deliverables) + len(delivery_partial)
+    predicted_output_envelope = _reply_shape_envelope(
+        length_hint=length_hint,
+        key_point_count=len(key_points),
+        deliverable_count=len(deliverables),
+        partial_delivery_count=len(delivery_partial),
+        has_user_facing_files=has_user_facing_files,
+        likely_readable=likely_readable,
+        likely_structured=likely_structured,
+        likely_multi_sentence=likely_multi_sentence,
+    )
+    if content_unit_count:
+        information_boundary = (
+            f"final reply should preserve the same {content_unit_count} planned user-facing "
+            "content unit(s); delivery form may change wording, not omit required facts"
+        )
+    else:
+        information_boundary = (
+            "final reply has no planned deliverable list; infer content scope from current user message and previews"
+        )
+    why_bits = [
+        f"length_hint={length_hint}",
+        f"key_points={len(key_points)}",
+        f"deliverables={len(deliverables)}",
+        f"partial_deliveries={len(delivery_partial)}",
+        f"user_facing_files={'yes' if has_user_facing_files else 'no'}",
+        f"content_units={content_unit_count}",
+        f"predicted_output_envelope={predicted_output_envelope}",
+        f"delivery_visibility_evidence={_delivery_visibility_evidence(predicted_output_envelope)}",
+    ]
+    if request_evidence:
+        why_bits.append(f"request_visibility_evidence={request_evidence}")
+    if likely_readable:
+        why_bits.append("reply likely benefits from readable/revisitable text")
+    if likely_structured:
+        why_bits.append("reply likely structured")
+    if likely_multi_sentence:
+        why_bits.append("reply likely multi-sentence")
+    return {
+        "length_hint": length_hint,
+        "key_point_count": len(key_points),
+        "deliverable_count": len(deliverables),
+        "partial_delivery_count": len(delivery_partial),
+        "content_unit_count": content_unit_count,
+        "has_user_facing_files": bool(has_user_facing_files),
+        "likely_readable": likely_readable,
+        "likely_structured": likely_structured,
+        "likely_multi_sentence": likely_multi_sentence,
+        "predicted_output_envelope": predicted_output_envelope,
+        "delivery_visibility_evidence": _delivery_visibility_evidence(predicted_output_envelope),
+        "request_visibility_evidence": request_evidence,
+        "information_boundary": information_boundary,
+        "why": "; ".join(why_bits),
+    }
+
+
+def _compact_reply_shape_projection(shape: object) -> str:
+    if not isinstance(shape, dict):
+        return "(none)"
+    ordered = [
+        "length_hint",
+        "key_point_count",
+        "deliverable_count",
+        "partial_delivery_count",
+        "content_unit_count",
+        "has_user_facing_files",
+        "likely_readable",
+        "likely_structured",
+        "likely_multi_sentence",
+        "predicted_output_envelope",
+        "delivery_visibility_evidence",
+        "request_visibility_evidence",
+        "information_boundary",
+        "why",
+    ]
+    parts: list[str] = []
+    for key in ordered:
+        if key not in shape:
+            continue
+        value = shape.get(key)
+        if isinstance(value, bool):
+            rendered = "yes" if value else "no"
+        else:
+            rendered = re.sub(r"\s+", " ", str(value or "")).strip()
+        if rendered:
+            parts.append(f"{key}={rendered}")
+    return "; ".join(parts) if parts else "(none)"
 
 
 def decide_voice_intent_from_user(user_message: str) -> str:
-    """仅看用户消息, 判断 voice 意图. 不调 LLM. 在 round3 之前调用,
-    让 round3 的 prompt 据此调整文字风格 (短口语 vs 可结构化).
-
-    这里的 "voice" 只表示 round3 最终回复要不要交给当前语音输出层;
-    用户说"生成/输出语音文件/音频文件/TTS"是 round2 工具交付任务,不是 round3 语音回复。
-
-    Returns:
-        "demand"  - 用户明确要语音回复
-        "refuse"  - 用户明确要文字回复,或只要求生成语音/音频文件
-        "neutral" - 无明确意图, 由后置 decide_voice 按文本特征判断
-    """
-    if not user_message:
-        return "neutral"
-    msg = user_message.lower()
-    # refuse 优先级高于 demand (用户同时含两者意图时, "文字回复" 主导)
-    for h in _VOICE_REFUSE_HINTS:
-        if h in msg:
-            return "refuse"
-    if any(h in msg for h in _VOICE_FILE_HINTS):
-        if not any(h in msg for h in _VOICE_REPLY_MARKERS):
-            return "refuse"
-    for h in _VOICE_REQUEST_HINTS:
-        if h in msg:
-            return "demand"
     return "neutral"
 
 
 def should_keep_round2_tts_tool(user_message: str) -> bool:
-    """Round2 是否应暴露 tts 工具。
-
-    True 只表示用户要文件/音频产物或长文本朗读; 普通"语音回复"应交给 Round3 后置语音发送。
-    """
-    if not user_message:
-        return False
-    msg = user_message.lower()
-    if any(h in msg for h in _VOICE_FILE_HINTS):
-        return True
-    if any(h in msg for h in _LONG_READ_HINTS):
-        return True
     return False
 
 
@@ -145,15 +525,10 @@ async def decide_voice(
     if not reply_text or not reply_text.strip():
         return VoiceDecision(use_voice=False, reason="empty reply")
     
-    # 2026-05-16 Round 14b: 三者并行的决策结果优先
-    # 如果 _round3_parallel 已经决定 (lite 判断 plan/persona/上下文), 直接采纳,
-    # 避免后置再做重复 LLM 决策；这里只保留语音输出 60s 硬上限。
+    # 2026-05-16 Round 14b: 三者并行的预判结果先选择 round3 生成侧.
+    # 2026-06-13: voice 预判不能直接授权最终发送; 它没有看到最终回复文本.
+    # 中间倾向值下, 后置复核用实际回复文本确认 voice/text.
     parallel_decision = _round3_parallel_decision.get()
-    if parallel_decision == "text":
-        return VoiceDecision(
-            use_voice=False,
-            reason="parallel pre-decision: text (lite saw plan/persona/context)",
-        )
 
     voice_preference = max(0.0, min(1.0, float(voice_preference or 0.0)))
     if voice_preference <= 0.0:
@@ -170,69 +545,14 @@ async def decide_voice(
             reason=f"estimated {estimated_seconds:.0f}s > {_MAX_VOICE_SECONDS}s voice length limit",
         )
 
-    # 2026-05-11 E4 加: 结构化内容直接跳过 lite
-    # 代码块/表格/链接/有序列表 — 这些类型用语音念出来体验极差,
-    # 不需要 lite 判断,直接走文字。每次 decide_voice 调用是 1-2s lite + 500ms 网络,
-    # 几乎每条回复都跑一次 = 累计很大。
     _text = reply_text.strip()
-    _STRUCT_SHORTCUTS = (
-        # 代码相关
-        ("```", "code_block"),
-        ("`", "inline_code"),  # 注:` 也匹配 ```,前面优先
-        # 表格(markdown / 直接的竖线表)
-        ("\n|", "table"),
-        # markdown 标题(语音不该读"井号 X")
-        ("\n#", "markdown_heading"),
-        ("\n##", "markdown_heading"),
-        # 列表(超过 3 个 bullet 不适合语音)
-    )
-    for marker, reason_tag in _STRUCT_SHORTCUTS:
-        if marker in _text:
-            return VoiceDecision(
-                use_voice=False,
-                reason=f"text contains structural element ({reason_tag}); voice unsuitable",
-            )
-    # URL/邮件 — 语音念 https://... 很怪
-    if re.search(r"https?://\S+|[\w.+-]+@[\w.-]+\.\w+", _text):
-        return VoiceDecision(
-            use_voice=False,
-            reason="text contains URL/email; voice unsuitable",
-        )
-    # 多 bullet 列表(3+ 行以 - 或 * 或 数字. 开头)
-    bullet_lines = sum(
-        1 for ln in _text.splitlines()
-        if re.match(r"^\s*([-*•]|\d+[.)、])\s+", ln)
-    )
-    if bullet_lines >= 3:
-        return VoiceDecision(
-            use_voice=False,
-            reason=f"text has {bullet_lines} bullet items; voice unsuitable",
-        )
 
-    # 2026-05-15 Item 4.2: 完全本地决策, 省 1 次 lite (1.5-2s + 成本)。
-    # 上面的结构化短路已经过滤了不适合语音的 95% 情况;留下来的都是
-    # 纯文本候选。用户明确要求语音或 parallel 已选 voice 时直接采纳;
-    # 否则短口语回复自动语音,更长内容交给前置分流决定。
-    # 2026-05-16 实测发现 (trace d8888f03):
-    # 用户消息 "测试，输出随意内容的语音文件，文字回复" 含双意图:
-    #   1. 输出语音文件 (LLM 主动 tts 工具, 作为 deliverable)
-    #   2. 文字回复 (不要自动 voice 合成 round3)
-    # 之前只检查 user_demands_voice, 没有反向 user_refuses_voice. 结果 round3 文字
-    # 被自动 voice 合成, 用户听到语音 — 违反明确指令.
-    # (hints 提到模块级 _VOICE_REQUEST_HINTS / _VOICE_REFUSE_HINTS, 同时供
-    # decide_voice_intent_from_user 在 round3 前置使用)
-    _user_msg_lower = (user_message or "").lower()
-    user_refuses_voice = any(h in _user_msg_lower for h in _VOICE_REFUSE_HINTS)
-    user_wants_voice_file = decide_voice_intent_from_user(user_message) == "refuse" and any(
-        h in _user_msg_lower for h in _VOICE_FILE_HINTS
-    )
-    if user_refuses_voice or user_wants_voice_file:
-        return VoiceDecision(
-            use_voice=False,
-            reason="user requested text reply or voice/audio file deliverable, not voice reply",
-        )
-
-    user_demands_voice = decide_voice_intent_from_user(user_message) == "demand"
+    # Voice/text is decided by the exact 0/1 persona boundary or the Round3
+    # LLM classifier. In-between persona preferences and user voice/text
+    # wording are evidence for the classifier, not local thresholds.
+    # User voice/text wording is intentionally not interpreted here. For
+    # 0 < voice_preference < 1, the LLM classifier owns that decision
+    # and receives the wording/reply facts as model-visible evidence.
     if voice_preference >= 1.0:
         cleaned = _clean_voice_text(_text)
         if not cleaned.strip():
@@ -240,60 +560,49 @@ async def decide_voice(
         return VoiceDecision(
             use_voice=True,
             voice_text=cleaned,
-            reason="voice preference is 1; voice reply unless over 60s",
+            reason="voice preference is 1; voice reply boundary",
         )
 
-    if parallel_decision == "voice" and (user_demands_voice or voice_preference >= 0.4):
-        cleaned = _clean_voice_text(_text)
-        if not cleaned.strip():
-            return VoiceDecision(use_voice=False, reason="voice text empty after cleanup")
-        return VoiceDecision(
-            use_voice=True,
-            voice_text=cleaned,
-            reason="parallel pre-decision: voice (lite saw plan/persona/context)",
-        )
-    if parallel_decision == "voice":
+    if parallel_decision == "text":
         return VoiceDecision(
             use_voice=False,
-            reason="parallel pre-decision voice ignored for neutral/low-preference request",
+            reason="parallel pre-decision: text (lite saw plan/persona/context)",
         )
 
-    # 自动语音的本地启发式:未经过前置分流时,只把明显短口语回复转成语音。
-    cjk_count = sum(1 for c in _text if 0x4E00 <= ord(c) <= 0x9FFF)
-    if cjk_count >= 5:
-        is_short = cjk_count <= 25
-    else:
-        word_count = len(re.findall(r"\b[\w']+\b", _text))
-        is_short = word_count <= 18
+    if parallel_decision == "unavailable":
+        return VoiceDecision(
+            use_voice=False,
+            reason=(
+                "no LLM voice decision available; keeping text reply visible; "
+                "voice delivery not authorized "
+                f"(est={estimated_seconds:.0f}s, voice_preference={voice_preference:.2f})"
+            ),
+            llm_decision_available=False,
+        )
 
-    if user_demands_voice:
-        if estimated_seconds > _MAX_VOICE_SECONDS:
-            return VoiceDecision(
-                use_voice=False, too_long=True,
-                reason=f"user requested voice but text estimates {estimated_seconds:.0f}s > {_MAX_VOICE_SECONDS}s",
-            )
+    if parallel_decision == "voice":
         cleaned = _clean_voice_text(_text)
         if not cleaned.strip():
             return VoiceDecision(use_voice=False, reason="voice text empty after cleanup")
         return VoiceDecision(
             use_voice=True,
             voice_text=cleaned,
-            reason="user explicitly requested voice",
+            reason="parallel route decision authorized voice",
         )
 
-    if voice_preference >= 0.4 and is_short and estimated_seconds <= _MAX_VOICE_SECONDS:
-        cleaned = _clean_voice_text(_text)
-        if not cleaned.strip():
-            return VoiceDecision(use_voice=False, reason="voice text empty after cleanup")
-        return VoiceDecision(
-            use_voice=True,
-            voice_text=cleaned,
-            reason=f"short conversational reply with voice preference {voice_preference:.2f} ({cjk_count} CJK chars)",
-        )
-
+    # No local persona-threshold decision here. In normal production this
+    # function receives `_round3_parallel_decision` from the LLM voice
+    # classifier. If that decision is absent, do not synthesize voice locally:
+    # the existing text is a visible reply, while voice delivery requires an
+    # explicit classifier decision except at exact 0/1 persona boundaries.
     return VoiceDecision(
         use_voice=False,
-        reason=f"reply too long or not conversational (cjk={cjk_count}, est={estimated_seconds:.0f}s)",
+        reason=(
+            "no LLM voice decision available; keeping text reply visible; "
+            "voice delivery not authorized "
+            f"(est={estimated_seconds:.0f}s, voice_preference={voice_preference:.2f})"
+        ),
+        llm_decision_available=False,
     )
 
 
@@ -456,88 +765,144 @@ def _estimate_duration(text: str) -> float:
     return zh_seconds + en_seconds
 
 
+def _compact_candidate_output_previews(candidate_previews: object, *, limit: int = 260) -> str:
+    """Model-visible early text from Round3 candidates.
+
+    The text candidate is the canonical final reply. The voice candidate is only
+    a route-time style probe; it must not be treated as the final content shape.
+    """
+    if not candidate_previews:
+        return "(none; no candidate text was available at route start without waiting)"
+    if isinstance(candidate_previews, str):
+        text = _compact_reply_for_voice_review(candidate_previews, limit=limit)
+        return f"- unknown candidate preview (partial, chars={len(candidate_previews)}): {text}"
+    if not isinstance(candidate_previews, dict):
+        text = _compact_reply_for_voice_review(str(candidate_previews), limit=limit)
+        return f"- unknown candidate preview (partial, chars={len(str(candidate_previews))}): {text}"
+
+    lines: list[str] = []
+    for side in ("text", "voice"):
+        value = candidate_previews.get(side)
+        done_text = ""
+        meta_text = ""
+        if isinstance(value, dict):
+            raw = str(value.get("text") or "").strip()
+            raw_chars = value.get("raw_chars")
+            visible_chars = value.get("visible_chars")
+            done_text = "final" if value.get("done") else "partial"
+            truncated_text = ", truncated" if value.get("truncated") else ""
+            meta_bits = []
+            if isinstance(visible_chars, int):
+                meta_bits.append(f"visible_chars={visible_chars}")
+            if isinstance(raw_chars, int):
+                meta_bits.append(f"raw_chars={raw_chars}")
+            meta_bits.append(f"status={done_text}{truncated_text}")
+            meta_text = ", ".join(meta_bits)
+        else:
+            raw = str(value or "").strip()
+            done_text = "partial"
+            meta_text = f"{done_text}, chars={len(raw)}"
+        if raw:
+            preview = _compact_reply_for_voice_review(raw, limit=limit)
+            if side == "text":
+                label = "canonical text candidate preview (final reply content shape)"
+            else:
+                label = "voice candidate preview (non-canonical style probe)"
+            lines.append(f"- {label} ({meta_text}): {preview}")
+        else:
+            if side == "text":
+                label = "canonical text candidate preview"
+            else:
+                label = "voice candidate preview (non-canonical style probe)"
+            lines.append(f"- {label}: unavailable at route start")
+    return "\n".join(lines)
+
+
 async def decide_voice_with_context_lite(
     plan,
     persona: str,
     user_message: str,
     recent_messages: list | None = None,
     voice_preference: float = 0.0,
+    has_user_facing_files: bool = False,
+    candidate_previews: dict[str, str] | str | None = None,
 ) -> str:
     """三者并行设计中的决策器: lite 模型看 plan + 人设 + 最近对话, 决定 voice/text.
     
     2026-05-16 Round 14b: 与 round3 文字版/语音版并行启动 — 决策出来后
-    cancel 败者. 决策本身用 lite 几百 ms 完成, 比 round3 渲染快.
+    cancel 败者. 决策本身用 lite 模型完成, 不用 text/voice 哪边先产出的速度作为决策依据.
+    2026-06-13: 决策可读取候选输出的早期文本预览, 让路由侧能看到更接近最终输出的形态事实.
     
-    优先用规则短路 (用户明确说 "文字回复"/"语音回复"), 不调 LLM, 几 μs.
-    其余 neutral 情况调 lite (几百 ms).
+    只在 0/1 人设边界本地定死; 用户明确语音/文字意图作为事实交给 lite classifier.
     
-    Returns: "voice" / "text"
+    Returns: "voice" / "text" / "unavailable"
     """
-    # 1. 规则短路 — 用户明确意图
+    # 1. 设定边界
     voice_preference = max(0.0, min(1.0, float(voice_preference or 0.0)))
     if voice_preference <= 0.0:
         return "text"
     if voice_preference >= 1.0:
         return "voice"
-
-    rule_intent = decide_voice_intent_from_user(user_message)
-    if rule_intent == "demand":
-        return "voice"
-    if rule_intent == "refuse":
-        return "text"
     
-    # 2. neutral → lite 模型决策
-    if voice_preference >= 0.95:
-        preference_hint = "很高:明显偏向语音,除非回复明显长/结构化/不适合朗读"
-    elif voice_preference >= 0.7:
-        preference_hint = "偏高:同等情况下优先语音,允许稍长口语回复用语音"
-    elif voice_preference >= 0.4:
-        preference_hint = "中等:语音和文字都可,按内容是否适合朗读决定"
-    elif voice_preference >= 0.15:
-        preference_hint = "偏低:仅短闲聊或明显适合朗读时语音"
-    else:
-        preference_hint = "很低:除非用户明确要求或极短闲聊,否则文字"
-    # 2026-05-17 Round 14f 修 (实测 trace 120fa615 决策 2s timeout):
-    # 旧版 prompt 包 plan/persona/最近 5 条对话 ≈ 1.5KB → deepseek-v4-flash 偶发抖动到 2s+.
-    # 同时 round3 text/voice 已 0.5s 完成, 决策慢反而拖累 TTFT.
-    # 极简化: 只看 plan.intent + plan.length_hint + user_msg 末 100 char, 总 ≈ 300 字.
-    # recent/persona 不太影响 voice/text 选择, 移除.
+    # 2. 中间倾向值 → lite 模型决策
+    preference_hint = _voice_preference_hint(voice_preference)
+    # 2026-05-17 Round 14f: compact classifier prompt.
+    # 2026-06-13: the deadline below is only an availability guard for a
+    # broken classifier request, not a "voice generation was slow, choose text"
+    # policy. Normal neutral turns wait for the classifier decision before TTS,
+    # while canonical Round3 text is already streaming in parallel.
+    # Keep classifier input compact, but include persona/recent facts so the
+    # LLM can apply character voice preference without local thresholds.
     from app.llm import client as _llm
     
     plan_intent = getattr(plan, "intent", "") if plan else ""
     plan_length = getattr(plan, "length_hint", "") if plan else ""
+    plan_tone, plan_key_points, plan_avoid, plan_deliverables, projected_reply_shape = _compact_plan_projection(
+        plan,
+        has_user_facing_files=has_user_facing_files,
+        user_message=user_message,
+    )
+    projected_reply_shape_facts = _project_reply_shape_facts(
+        plan,
+        has_user_facing_files=has_user_facing_files,
+        user_message=user_message,
+    )
+    candidate_output_previews = _compact_candidate_output_previews(candidate_previews)
+    persona_context, recent_context = _compact_voice_classifier_context(persona, recent_messages)
     
     from app.llm import aux_prompts as _aux
     sys_msg = _aux.VOICE_DELIVERY_CLASSIFIER_SYSTEM
     user_prompt = _aux.VOICE_DELIVERY_CLASSIFIER_USER_TEMPLATE.format(
         plan_intent=plan_intent[:150],
         plan_length=plan_length,
+        plan_tone=plan_tone,
+        plan_key_points=plan_key_points,
+        plan_avoid=plan_avoid,
+        plan_deliverables=plan_deliverables,
+        projected_reply_shape=projected_reply_shape,
+        projected_reply_shape_facts=_compact_reply_shape_projection(projected_reply_shape_facts),
+        candidate_output_previews=candidate_output_previews,
+        delivery_state="yes" if has_user_facing_files else "no",
+        persona_context=persona_context,
+        recent_context=recent_context,
         user_message=(user_message or "")[:100],
         voice_preference=voice_preference,
         preference_hint=preference_hint,
     )
     
-    try:
-        # collect 流式 token, 几个字就够 (我们只要一个词)
-        # 2026-05-16 显式 aclose: 早停后底层 streaming 可能还在收 token (浪费 API 资源 +
-        # 占连接). 用 generator + finally aclose 确保释放.
-        toks: list[str] = []
-        stream = _llm.chat_stream(
-            [{"role": "system", "content": sys_msg},
-             {"role": "user", "content": user_prompt}],
-            reasoning="disabled", lite=True,
+    messages = [
+        {"role": "system", "content": sys_msg},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # The route classifier runs in parallel with canonical Round3 text, so it
+    # does not need a separate low-latency streaming request. A single strict
+    # JSON call avoids duplicate provider requests and the stream/json race that
+    # made identical route inputs intermittently return unavailable.
+    decision = await _decide_voice_with_json_classifier(_llm, sys_msg, user_prompt)
+    if decision == "unavailable":
+        log.debug(
+            "voice classifier unavailable after JSON route request; "
+            "no local voice/text fallback"
         )
-        try:
-            async for t in stream:
-                toks.append(t)
-                if len("".join(toks)) > 24:  # 早停: 一个词就够
-                    break
-        finally:
-            try:
-                await stream.aclose()
-            except Exception:
-                pass
-        raw = "".join(toks).strip().lower()
-        return "voice" if "voice" in raw else "text"
-    except Exception:
-        return "text"  # lite 失败默认安全
+    return decision

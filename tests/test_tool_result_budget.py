@@ -267,6 +267,97 @@ def test_max_result_chars_uses_tool_override_and_default():
     assert max_result_chars("unknown_tool") == DEFAULT_MAX_RESULT_CHARS
 
 
+def test_delegate_result_model_context_sanitizes_internal_work_fields():
+    from app.llm.client_tools_loop import _sanitize_delegate_result_for_model_context
+
+    raw = json.dumps(
+        {
+            "ok": True,
+            "helpers_initially_spawned": 1,
+            "helpers_completed": 1,
+            "helpers_still_running": 0,
+            "error_kind": "helper_resource_required",
+            "_evidence_policy": "Helper reports are not direct task facts.",
+            "results": [
+                {
+                    "task_id": "inspect_page",
+                    "helper_name": "page_report.txt",
+                    "helper_workspace": ".temp/_delegate_user_inspect_page",
+                    "report": "helper report says the requested page was inspected",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    sanitized = _sanitize_delegate_result_for_model_context(raw)
+    data = json.loads(sanitized)
+    text = sanitized.lower()
+
+    assert data["processing_records_started"] == 1
+    assert data["results_returned"] == 1
+    assert data["processing_records_running"] == 0
+    assert data["results"][0]["source_name"] == "page_report.txt"
+    assert "helper_workspace" not in data["results"][0]
+    assert "helpers_completed" not in text
+    assert "helpers_still_running" not in text
+    assert "helper" not in text
+    assert "background_work" not in text
+    assert "producer" not in text
+
+
+def test_tool_result_model_context_sanitizes_internal_metadata_only():
+    from app.llm.client_tools_loop import _sanitize_tool_result_internal_terms_for_model_context
+
+    raw = json.dumps(
+        {
+            "ok": True,
+            "helper_handoff_fact": {"project_paths": ["users.db"]},
+            "recovery_facts": {
+                "matching_helper_kind": "code",
+                "suggested_helper_kind": "code",
+                "helper_prompt_fact": "Delegate a focused helper with acceptance checks.",
+            },
+            "available_followups": {
+                "helper_route": "delegate a read/code/file_summary helper with concrete acceptance checks",
+            },
+            "available_recovery_shapes": {
+                "options": [
+                    "delegate a focused helper with expected_outputs and acceptance_checks",
+                ],
+            },
+            "runtime_facts": [
+                {
+                    "fact": "The current workflow expects helpers to own source authoring.",
+                    "content": "The source file literally says helper in a comment.",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    sanitized = _sanitize_tool_result_internal_terms_for_model_context(raw)
+    data = json.loads(sanitized)
+
+    assert "processing_handoff_fact" in data
+    assert "helper_handoff_fact" not in sanitized
+    assert data["recovery_facts"]["matching_work_kind"] == "code"
+    assert data["recovery_facts"]["suggested_work_kind"] == "code"
+    assert "matching_helper_kind" not in sanitized
+    assert "suggested_helper_kind" not in sanitized
+    assert "work_prompt_fact" in sanitized
+    assert "work_route" in sanitized
+    assert "helpers to own" not in sanitized
+    assert "focused helper" not in sanitized
+    assert "helper with concrete acceptance" not in sanitized
+    assert "processing records to own" in sanitized
+    assert "focused processing record" in sanitized
+    assert "background_work" not in sanitized
+    assert "delegate" not in sanitized.lower()
+    assert "producer" not in sanitized
+    assert data["runtime_facts"][0]["content"] == "The source file literally says helper in a comment."
+
+
 def test_soft_compact_folds_old_delegate_milestones_without_todo_boundary():
     from app.llm.message_utils import _soft_compact_redundant_tool_results
 
@@ -314,7 +405,11 @@ def test_soft_compact_folds_old_delegate_milestones_without_todo_boundary():
     folded = json.loads(msgs[2]["content"])
 
     assert folded["_folded"] is True
-    assert folded["_redundant"] == "delegate_excerpts_already_extracted"
+    assert folded["_redundant"] == "processing_record_excerpts_already_extracted"
+    assert "helpers_completed" not in msgs[2]["content"]
+    assert "helpers_still_running" not in msgs[2]["content"]
+    assert "helper" not in folded["summary"].lower()
+    assert "background_work" not in msgs[2]["content"]
     assert msgs[2]["tool_call_id"] == "call_delegate_1"
     assert msgs[4]["content"] == latest_report
 
@@ -374,7 +469,10 @@ def test_soft_compact_preserves_delegate_task_status_fields():
     assert folded["_task_status"] == "incomplete"
     assert folded["incomplete_count"] == 1
     assert folded["resource_required_count"] == 1
-    assert "failed helpers" in folded["_evidence_policy"]
+    assert "failed processing records" in folded["_evidence_policy"]
+    assert "helpers_completed" not in msgs[2]["content"]
+    assert "helpers_still_running" not in msgs[2]["content"]
+    assert "background_work" not in msgs[2]["content"]
 
 
 def test_soft_compact_delegate_fold_serializes_prompt_json_stably():
@@ -485,4 +583,7 @@ def test_fold_old_tool_messages_preserves_delegate_aggregate_status():
     assert folded["_task_status"] == "incomplete"
     assert folded["incomplete_count"] == 1
     assert folded["resource_required_count"] == 1
-    assert "failed helpers" in folded["_evidence_policy"]
+    assert "failed processing records" in folded["_evidence_policy"]
+    assert "helper" not in json.dumps(folded, ensure_ascii=False).lower()
+    assert "background_work" not in json.dumps(folded, ensure_ascii=False)
+    assert "producer" not in json.dumps(folded, ensure_ascii=False).lower()

@@ -57,6 +57,265 @@ _RECOVERABLE_DELEGATE_REASONS = {
 _READONLY_HELPER_KINDS = {"read", "ocr", "project_map", "file_summary", "impact_review", "inventory", "summarize", "verify"}
 
 
+_DELEGATE_MODEL_KEY_RENAMES = {
+    "helpers_initially_spawned": "processing_records_started",
+    "helpers_requested": "processing_records_requested",
+    "background_work_started": "processing_records_started",
+    "background_work_requested": "processing_records_requested",
+    "helpers_completed": "results_returned",
+    "helpers_returned": "results_returned",
+    "helpers_still_running": "processing_records_running",
+    "background_work_running": "processing_records_running",
+    "helpers_unavailable": "processing_records_unavailable",
+    "background_work_unavailable": "processing_records_unavailable",
+    "helpers_forked_during_run": "processing_records_started_during_run",
+    "background_work_started_during_run": "processing_records_started_during_run",
+    "active_helpers": "active_processing_records",
+    "active_background_work": "active_processing_records",
+    "completed_helpers": "completed_processing_records",
+    "completed_background_work": "completed_processing_records",
+    "runaway_helpers": "runaway_processing_records",
+    "runaway_background_work": "runaway_processing_records",
+    "helper_name": "source_name",
+    "helper_kind": "work_kind",
+    "matching_helper_kind": "matching_work_kind",
+    "suggested_helper_kind": "suggested_work_kind",
+    "helper_prompt_fact": "work_prompt_fact",
+    "helper_output_path": "work_output_path",
+    "helper_output_fact": "work_output_fact",
+    "helper_owned_artifact_fact": "generated_artifact_fact",
+    "post_helper_usage_hint": "post_work_usage_hint",
+    "helper_resource_required": "processing_record_resource_required",
+    "background_work_resource_required": "processing_record_resource_required",
+    "helper_route": "work_route",
+    "helper_handoff_fact": "processing_handoff_fact",
+    "producer_self_verified": "output_self_verified",
+    "helper_producer_self_verified": "output_self_verified",
+    "producer_boundary_fact": "output_boundary_fact",
+    "_post_helper_action": "_post_work_action",
+}
+_DELEGATE_MODEL_DROP_KEYS = {
+    "workspace_dir",
+    "helper_workspace",
+}
+_DELEGATE_MODEL_TEXT_REPLACEMENTS = (
+    ("helpers_initially_spawned", "processing_records_started"),
+    ("helpers_requested", "processing_records_requested"),
+    ("background_work_started", "processing_records_started"),
+    ("background_work_requested", "processing_records_requested"),
+    ("helpers_completed", "results_returned"),
+    ("helpers_returned", "results_returned"),
+    ("helpers_still_running", "processing_records_running"),
+    ("background_work_running", "processing_records_running"),
+    ("helpers_unavailable", "processing_records_unavailable"),
+    ("background_work_unavailable", "processing_records_unavailable"),
+    ("helpers_forked_during_run", "processing_records_started_during_run"),
+    ("background_work_started_during_run", "processing_records_started_during_run"),
+    ("active_helpers", "active_processing_records"),
+    ("active_background_work", "active_processing_records"),
+    ("completed_helpers", "completed_processing_records"),
+    ("completed_background_work", "completed_processing_records"),
+    ("runaway_helpers", "runaway_processing_records"),
+    ("runaway_background_work", "runaway_processing_records"),
+    ("helper_resource_required", "processing_record_resource_required"),
+    ("background_work_resource_required", "processing_record_resource_required"),
+    ("matching_helper_kind", "matching_work_kind"),
+    ("suggested_helper_kind", "suggested_work_kind"),
+    ("helper_prompt_fact", "work_prompt_fact"),
+    ("helper_output_path", "work_output_path"),
+    ("helper_output_fact", "work_output_fact"),
+    ("helper_owned_artifact_fact", "generated_artifact_fact"),
+    ("post_helper_usage_hint", "post_work_usage_hint"),
+    ("helper_route", "work_route"),
+    ("helper_runaway_requires_intervention", "processing_record_runaway_requires_intervention"),
+    ("background_work_runaway_requires_intervention", "processing_record_runaway_requires_intervention"),
+    ("helper_still_running_prompt_dropped", "processing_record_still_running_prompt_dropped"),
+    ("background_work_still_running_prompt_dropped", "processing_record_still_running_prompt_dropped"),
+    ("helper_producer_self_verified", "output_self_verified"),
+    ("producer_self_verified", "output_self_verified"),
+    ("producer_boundary_fact", "output_boundary_fact"),
+    ("helper_result_summary", "processing_result_summary"),
+    ("no_successful_helper", "no_successful_processing_record"),
+    ("no_successful_background_work", "no_successful_processing_record"),
+    ("clean_helper_batch", "clean_processing_record_batch"),
+    ("clean_background_work_batch", "clean_processing_record_batch"),
+)
+_MODEL_CONTEXT_META_TEXT_KEYS = {
+    "fact",
+    "facts",
+    "hint",
+    "hints",
+    "warning",
+    "warnings",
+    "details",
+    "note",
+    "notes",
+    "instruction",
+    "instructions",
+    "reason",
+    "summary_policy",
+    "policy",
+    "next_action_instruction",
+    "error_summary",
+    "escalation_advice",
+    "attention_fact",
+    "error",
+    "blocked_reason",
+    "options",
+    "available_shapes",
+    "available_recovery_shapes",
+    "available_followups",
+    "事实",
+}
+
+
+_MODEL_CONTEXT_LITERAL_VALUE_KEYS = {
+    "tool_name",
+}
+
+
+def _first_present(mapping: dict, *keys: str, default=None):
+    for key in keys:
+        if key in mapping:
+            value = mapping.get(key)
+            if value is not None:
+                return value
+    return default
+
+
+def _sanitize_delegate_model_text(value: str) -> str:
+    text = str(value)
+    for old, new in _DELEGATE_MODEL_TEXT_REPLACEMENTS:
+        text = text.replace(old, new)
+    text = re.sub(r"\bdelegation\b", "processing step", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdelegated\b", "routed", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdelegating\b", "routing", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdelegate\b", "route", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:helper|producer)[-_ ]owned\b", "generated", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:helper|producer)\s+reports\b", "available evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:helper|producer)\s+report\b", "available evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\s+evidence\b", "evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bbackground_work\b", "processing_records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bbackground\s+(?:tasks?|work|producers?|branches?)\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\s+helpers\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\s+helper\b", "processing record", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducers\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\b", "processing record", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhelpers\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhelper\b", "processing record", text, flags=re.IGNORECASE)
+    return text
+
+
+def _sanitize_delegate_model_value(value, *, key: str = ""):
+    if isinstance(value, dict):
+        sanitized: dict = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                sanitized[key] = _sanitize_delegate_model_value(item, key="")
+                continue
+            if key in _DELEGATE_MODEL_DROP_KEYS:
+                continue
+            new_key = _DELEGATE_MODEL_KEY_RENAMES.get(key, key)
+            sanitized[new_key] = _sanitize_delegate_model_value(item, key=new_key)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_delegate_model_value(item, key=key) for item in value]
+    if isinstance(value, str):
+        if key in _MODEL_CONTEXT_LITERAL_VALUE_KEYS:
+            return value
+        return _sanitize_delegate_model_text(value)
+    return value
+
+
+def _sanitize_delegate_result_for_model_context(result: str) -> str:
+    """Remove internal helper vocabulary before delegate results enter LLM context."""
+    if not isinstance(result, str) or not result:
+        return result
+    try:
+        parsed = json.loads(result)
+    except Exception:
+        return _sanitize_delegate_model_text(result)
+    if not isinstance(parsed, dict):
+        return result
+    return stable_prompt_json(_sanitize_delegate_model_value(parsed))
+
+
+def _neutral_round3_gap_text(value: object) -> str:
+    """Keep gap facts model-readable without seeding internal workflow terms."""
+    text = str(value or "")
+    text = re.sub(r"\bhelpers?\b", "processing step", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhelper[_ -]gap\b", "processing_gap", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bbackground\s+(?:tasks?|work|producers?|branches?)\b", "processing step", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer-owned\b", "generated", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\s+evidence\b", "evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:_delegate_|_helpers_shared/|\.helper_[\w.-]+|\.helper_task_contract\.json)", "internal material", text)
+    return text
+
+
+def _round3_gap_missing_items(values: object) -> list[str]:
+    """Return only user-relevant missing paths for Round3 gap wording."""
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for item in values:
+        text = str(item or "").replace("\\", "/").strip()
+        lowered = text.lower()
+        if not text:
+            continue
+        if lowered.startswith(("_helpers_shared/", "_shared/", ".helper_")):
+            continue
+        if ".helper_" in lowered or "/.helper_" in lowered:
+            continue
+        out.append(text)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _sanitize_tool_result_internal_terms_for_model_context(result: str) -> str:
+    """Sanitize internal routing metadata without changing user/file evidence fields."""
+    if not isinstance(result, str) or not result:
+        return result
+    try:
+        parsed = json.loads(result)
+    except Exception:
+        return result
+    if not isinstance(parsed, dict):
+        return result
+
+    def visit(value, *, key: str = ""):
+        if isinstance(value, dict):
+            sanitized: dict = {}
+            for raw_key, item in value.items():
+                if not isinstance(raw_key, str):
+                    sanitized[raw_key] = visit(item, key="")
+                    continue
+                if raw_key in _DELEGATE_MODEL_DROP_KEYS:
+                    continue
+                new_key = _DELEGATE_MODEL_KEY_RENAMES.get(raw_key, raw_key)
+                sanitized[new_key] = visit(item, key=new_key)
+            return sanitized
+        if isinstance(value, list):
+            return [visit(item, key=key) for item in value]
+        if isinstance(value, str):
+            key_l = key.lower()
+            if (
+                key_l in _MODEL_CONTEXT_META_TEXT_KEYS
+                or key_l.endswith("_fact")
+                or key_l.endswith("_facts")
+                or key_l.endswith("_hint")
+                or key_l.endswith("_hints")
+                or key_l.endswith("_policy")
+                or key_l.endswith("_route")
+                or key_l.endswith("_option")
+                or key_l.endswith("_options")
+            ):
+                return _sanitize_delegate_model_text(value)
+        return value
+
+    return stable_prompt_json(visit(parsed))
+
+
 def _looks_like_final_plan_self_assessment(text: str) -> bool:
     """Detect a malformed final response that only evaluates a missing JSON plan."""
     low = (text or "").lower()
@@ -454,7 +713,7 @@ def _main_source_or_test_paths_from_project_discovery(tool_name: str, parsed_res
         if path:
             raw_paths.append(path)
 
-    handoff = parsed_result.get("helper_handoff_fact")
+    handoff = parsed_result.get("helper_handoff_fact") or parsed_result.get("background_handoff_fact")
     if isinstance(handoff, dict):
         for key in ("project_paths", "source_paths", "test_paths", "input_files", "acceptance_script_paths"):
             values = handoff.get(key)
@@ -497,14 +756,14 @@ def _main_source_path_handoff_fact(paths: list[str]) -> str:
     return (
         "[SYSTEM_HINT/main_source_path_handoff_fact]\n"
         f"Project discovery has already exposed likely source/test paths: {shown}{more}. "
-        "For coding/debugging, these path/search facts are enough to give a focused code helper `input_files`, "
-        "`expected_outputs`, and acceptance checks; the helper can read source bodies, diagnose, edit, and test from them. "
-        "If you delegate from these facts, keep the helper prompt compact and do not paste complete source-code blocks "
+        "For coding/debugging, these path/search facts are enough to give a focused code producer `input_files`, "
+        "`expected_outputs`, and acceptance checks; that producer can read source bodies, diagnose, edit, and test from them. "
+        "If you delegate from these facts, keep the producer prompt compact and do not paste complete source-code blocks "
         "that are already covered by `input_files`; include only specific observed facts that affect routing or acceptance. "
         "A batch of main-thread env_read calls over all known source/test paths before delegation repeats "
-        "helper-owned reading and increases coordinator context. This is not a ban: one narrow env_read is useful when a "
+        "producer-owned reading and increases coordinator context. This is not a ban: one narrow env_read is useful when a "
         "specific missing routing or acceptance fact remains unresolved.\n\n"
-        "事实：源码/测试路径和搜索事实已足够形成紧凑 code helper 请求；delegate prompt 不粘贴 input_files 已覆盖的完整源码；若只缺一个具体路由/验收事实，可窄读。"
+        "事实：源码/测试路径和搜索事实已足够形成紧凑 code producer 请求；delegate prompt 不粘贴 input_files 已覆盖的完整源码；若只缺一个具体路由/验收事实，可窄读。"
     )
 
 
@@ -521,7 +780,7 @@ def _main_helper_handoff_paths_from_project_discovery(tool_name: str, parsed_res
         if path:
             raw_paths.append(path)
 
-    handoff = parsed_result.get("helper_handoff_fact")
+    handoff = parsed_result.get("helper_handoff_fact") or parsed_result.get("background_handoff_fact")
     if isinstance(handoff, dict):
         for key in (
             "project_paths", "source_paths", "test_paths", "data_paths",
@@ -599,12 +858,12 @@ def _main_text_material_handoff_fact(paths: list[str]) -> str:
         "[SYSTEM_HINT/main_text_material_handoff_fact]\n"
         f"Project discovery reports a compact text-material set: {shown}{more}. "
         "These are current project facts, not a forced decision. For triage, classification, summarization, "
-        "drafting, report writing, or small text/data artifact production, one focused read/edit/code helper can receive "
-        "these paths as `input_files` plus the user request and acceptance checks. The helper can read the material bodies "
+        "drafting, report writing, or small text/data artifact production, one focused reading/implementation step can receive "
+        "these paths as `input_files` plus the user request and acceptance checks. That step can read the material bodies "
         "and produce the requested artifact or concise evidence in its own context. Main-thread full-body reads still add "
         "value for one missing routing fact, a user-facing quote, or a main-owned evidence gap, but reading the whole set "
-        "in the coordinator usually expands context that a helper can own.\n\n"
-        "事实：项目发现结果显示一组紧凑文本材料；可把路径和验收要求交给一个 read/edit/code helper 读取并产出。主线程全文读取整组材料通常增加协调上下文，除非缺少具体路由、引用或主进程自有证据缺口。"
+        "in the coordinator usually expands context that a focused step can own.\n\n"
+        "事实：项目发现结果显示一组紧凑文本材料；可把路径和验收要求交给一个聚焦读取/实现步骤处理并产出。主线程全文读取整组材料通常增加协调上下文，除非缺少具体路由、引用或主进程自有证据缺口。"
     )
 
 
@@ -638,16 +897,16 @@ def _main_helper_handoff_overwork_checkpoint(
     more = f" (+{len(paths) - 10} more)" if len(paths) > 10 else ""
     recent = ", ".join(recent_labels[-8:]) or "none"
     return (
-        "[SYSTEM_HINT/main_helper_handoff_overwork_fact]\n"
-        f"Project discovery already exposed helper-suitable input paths: {shown}{more}. "
+        "[SYSTEM_HINT/main_processing_handoff_overwork_fact]\n"
+        f"Project discovery already exposed focused-step input paths: {shown}{more}. "
         f"Since those handoff facts appeared, the main process has performed about {direct_count} direct "
-        f"read/probe/script-style tool result(s) before a useful helper result; recent direct work labels: {recent}. "
-        "This is a factual coordinator-context signal, not a forced decision. A focused helper can receive the known "
+        f"read/probe/script-style tool result(s) before useful processing results; recent direct work labels: {recent}. "
+        "This is a factual coordinator-context signal, not a forced decision. A focused step can receive the known "
         "input_files plus acceptance checks and perform data probes, source reads, edits, and tests in its own context. "
         "Main-thread direct work still adds value for one missing routing fact, diff/apply preparation, or a narrow "
         "main-owned evidence gap. Compare the current task contract, observed facts, and missing evidence before deciding whether to "
         "delegate, continue one narrow main check, or finalize.\n\n"
-        "事实：已有 helper 可用路径后，主进程又进行了多次直接读取/探测/脚本式操作；这只是上下文负担信号，由模型结合当前契约决定是否委派或只做一个窄检查。"
+        "事实：已有聚焦处理步骤可用路径后，主进程又进行了多次直接读取/探测/脚本式操作；这只是上下文负担信号，由模型结合当前契约决定是否路由后续处理或只做一个窄检查。"
     )
 
 
@@ -1444,7 +1703,7 @@ def _compact_delegate_input_file_source_blocks_in_last_assistant(
             return False
         compact_args["tasks"] = compact_tasks
         compact_args["_omitted_source_blocks_reason"] = (
-            "source bodies duplicated files named in input_files; helper can read current staged file bodies"
+            "source bodies duplicated files named in input_files; producer can read current staged file bodies"
         )
         replacement = json.dumps(compact_args, ensure_ascii=False)
         for message in reversed(msgs):
@@ -1548,11 +1807,11 @@ def _delegate_workflow_result_summary(result) -> dict | None:
         tid = str(item.get("task_id") or "").strip()
         return {
             "task_id": tid,
-            "source": "helper_result_summary",
+            "source": "result_summary",
             "urls": urls,
             "fact": (
-                "A helper reported browser-family evidence using an actual browser automation or host-browser route. "
-                "This is helper-owned evidence; the main process should consume the fact rather than re-running the browser solely to prove it existed."
+                "Available result evidence shows browser-family evidence using an actual browser automation or host-browser route. "
+                "Use that fact rather than re-running the browser solely to prove it existed."
             ),
         }
 
@@ -1585,12 +1844,12 @@ def _delegate_workflow_result_summary(result) -> dict | None:
                 break
         return {
             "task_id": str(item.get("task_id") or "").strip(),
-            "source": "helper_result_summary",
+            "source": "result_summary",
             "urls": urls,
             "fact": (
-                "A helper reported that the requested browser/host-browser evidence boundary was not satisfied "
-                "or was blocked in its own tool environment. This is a separate active-task evidence fact; it does "
-                "not invalidate the helper's producer-owned artifact self-checks, and it should not be treated as "
+                "Available result evidence shows the requested browser/host-browser evidence boundary was not satisfied "
+                "or was blocked in that tool environment. This is a separate active-task evidence fact; it does "
+                "not invalidate artifact self-checks, and it should not be treated as "
                 "browser-family evidence."
             ),
         }
@@ -1639,6 +1898,7 @@ def _delegate_workflow_result_summary(result) -> dict | None:
                 browser_evidence_gap_facts.append(browser_gap)
             result_item = {
                 "task_id": tid,
+                "kind": item.get("kind"),
                 "ok": ok,
                 "terminal_reason": item.get("terminal_reason"),
                 "outputs_complete": outputs_complete,
@@ -1658,6 +1918,9 @@ def _delegate_workflow_result_summary(result) -> dict | None:
                     if key in copy_stats
                 },
             }
+            for _candidate_key in ("voice_reply_file_candidate", "deliverable_candidate", "delivery_guidance"):
+                if item.get(_candidate_key):
+                    result_item[_candidate_key] = item.get(_candidate_key)
             if browser_evidence is not None:
                 result_item["browser_evidence"] = browser_evidence
             if browser_gap is not None:
@@ -1673,9 +1936,21 @@ def _delegate_workflow_result_summary(result) -> dict | None:
     return {
         "action": result.get("action"),
         "task_ok": result.get("task_ok"),
-        "helpers_requested": result.get("helpers_requested", result.get("helpers_initially_spawned", 0)),
-        "helpers_returned": result.get("helpers_completed", 0),
-        "helpers_still_running": result.get("helpers_still_running", 0),
+        "helpers_requested": _first_present(
+            result,
+            "helpers_requested",
+            "background_work_requested",
+            "helpers_initially_spawned",
+            "background_work_started",
+            default=0,
+        ),
+        "helpers_returned": _first_present(result, "helpers_completed", "results_returned", default=0),
+        "helpers_still_running": _first_present(
+            result,
+            "helpers_still_running",
+            "background_work_running",
+            default=0,
+        ),
         "success_count": result.get("success_count", len(completed_ids)),
         "incomplete_count": result.get("incomplete_count", 0),
         "failed_count": result.get("failed_count", 0),
@@ -1732,7 +2007,7 @@ def _workflow_event_status_for_tool_result(tool: str, result, fallback_status: s
     except Exception:
         pass
     tool_return_ok = parsed.get("ok")
-    running = int(parsed.get("helpers_still_running") or 0)
+    running = int(_first_present(parsed, "helpers_still_running", "background_work_running", default=0) or 0)
     incomplete = int(parsed.get("incomplete_count") or 0)
     failed = int(parsed.get("failed_count") or 0)
     interrupted = int(parsed.get("interrupted_count") or 0)
@@ -1950,7 +2225,11 @@ def _summarize_large_tool_result(
             "Use returned paths, line ranges, status fields, or rerun/read targeted segments if full evidence is needed."
         )
     for key in (
-        "task_ok", "helpers_completed", "helpers_still_running", "incomplete_count",
+        "task_ok", "helpers_completed", "helpers_still_running",
+        "results_returned", "background_work_running", "processing_records_running",
+        "background_work_requested", "background_work_started",
+        "processing_records_requested", "processing_records_started",
+        "incomplete_count",
         "resource_required_count", "failed_count", "outputs_complete", "outputs_missing",
         "quality_blocked", "blocking_quality_warnings", "path", "read_text_path",
         "files", "deliverables", "promoted", "skipped", "next_start_block",
@@ -1961,6 +2240,7 @@ def _summarize_large_tool_result(
         "total_lines", "shown_range", "truncated", "encoding", "size", "bytes",
         "workspace_path", "main_workspace_path", "source_path", "line_count",
         "matched_count", "count", "pattern", "is_regex", "limit", "max_results",
+        "voice_reply_file_candidate", "deliverable_candidate", "delivery_guidance",
     ):
         if key in parsed:
             summary[key] = _compact_summary_value(parsed.get(key))
@@ -2077,6 +2357,9 @@ def _summarize_large_tool_result(
                 "outputs_missing": oc.get("outputs_missing"),
                 "quality_blocked": oc.get("quality_blocked") or item.get("quality_blocked"),
                 "files": _display_files,
+                "voice_reply_file_candidate": item.get("voice_reply_file_candidate"),
+                "deliverable_candidate": item.get("deliverable_candidate"),
+                "delivery_guidance": _compact_summary_value(item.get("delivery_guidance")),
                 "staged_project_files": _compact_summary_value(item.get("staged_project_files")),
                 "pending_project_apply_fact": item.get("pending_project_apply_fact"),
                 "internal_evidence_files": _compact_summary_value(item.get("internal_evidence_files")),
@@ -2122,7 +2405,13 @@ def _summarize_large_tool_result(
         "summary_too_large": True,
         "original_chars": summary.get("original_chars"),
         "task_ok": summary.get("task_ok"),
-        "helpers_completed": summary.get("helpers_completed"),
+        "results_returned": _first_present(summary, "results_returned", "helpers_completed"),
+        "processing_records_running": _first_present(
+            summary,
+            "processing_records_running",
+            "background_work_running",
+            "helpers_still_running",
+        ),
         "incomplete_count": summary.get("incomplete_count"),
         "resource_required_count": summary.get("resource_required_count"),
         "result_items": [
@@ -2477,6 +2766,49 @@ def _delegate_item_outputs_complete(item: dict) -> bool:
 
 def _delegate_item_is_race_lost(item: dict) -> bool:
     return bool(item.get("race_lost_to"))
+
+
+def _delegate_item_is_terminal_tts_generation_fact(item: dict) -> bool:
+    """TTS authorization/resource failures are final facts, not retry fuel."""
+    kind = str(item.get("kind") or item.get("helper_kind") or item.get("suggested_retry_kind") or "").lower()
+    resource = item.get("resource_required") if isinstance(item.get("resource_required"), dict) else {}
+    resource_kind = str(
+        resource.get("matching_helper_kind")
+        or resource.get("suggested_helper_kind")
+        or resource.get("helper_kind")
+        or ""
+    ).lower()
+    if kind != "tts" and resource_kind != "tts":
+        return False
+    text = " ".join(
+        str(value or "")
+        for value in (
+            item.get("terminal_reason"),
+            item.get("error"),
+            item.get("error_kind"),
+            item.get("stuck_reason"),
+            item.get("summary"),
+            item.get("report"),
+            item.get("report_excerpt"),
+            resource.get("blocked_reason") if resource else "",
+            resource.get("resource_resolution_facts") if resource else "",
+        )
+    ).lower()
+    return any(
+        marker in text
+        for marker in (
+            "tts voice profile is not configured",
+            "built-in tts",
+            "authorization",
+            "voice authorization",
+            "voice reply",
+            "语音",
+            "tts",
+        )
+    ) and (
+        str(item.get("terminal_reason") or "").lower() == "resource_required"
+        or bool(resource)
+    )
 
 
 def _delegate_item_is_incomplete(item: dict) -> bool:
@@ -3098,7 +3430,7 @@ def _attach_browser_pre_edit_fact_to_delegate(args: dict, *, warning_count: int)
         if not isinstance(checks, list):
             checks = []
         check_fact = (
-            "Satisfy the active browser/host-browser evidence requirement before helper-owned edits, using "
+            "Satisfy the active browser/host-browser evidence requirement before artifact edits, using "
             "browser automation/screenshot/page observation; if infeasible, report the exact blocker/evidence boundary."
         )
         if check_fact not in [str(item) for item in checks]:
@@ -3133,7 +3465,7 @@ def _browser_pre_edit_missing_fact_payload(
             "are not the same evidence. Browser evidence can come from an actual browser tool or from "
             "a command that runs Playwright, Puppeteer, Selenium, Chromium, Chrome, Firefox, or WebKit "
             "against the target URL. The tool call was allowed to execute; use this fact when deciding "
-            "whether the active contract still needs browser evidence, helper delegation, or a follow-up "
+            "whether the active contract still needs browser evidence or a follow-up "
             "verification step."
         ),
         "事实": (
@@ -3141,7 +3473,7 @@ def _browser_pre_edit_missing_fact_payload(
             "但当前工具链尚未出现 browser/Playwright/Selenium/Puppeteer 证据。"
             "源码阅读、静态诊断、普通 HTTP 检查不等同于该证据。浏览器证据可来自实际浏览器工具，"
             "或运行 Playwright/Puppeteer/Selenium/Chromium/Chrome/Firefox/WebKit 访问目标 URL 的命令。"
-            "本次工具调用已放行；请据此判断当前契约是否仍需浏览器证据、helper 委派或后续验证。"
+            "本次工具调用已放行；请据此判断当前契约是否仍需浏览器证据或后续验证。"
         ),
     }
 
@@ -3155,12 +3487,12 @@ def _browser_pre_edit_predecision_guidance(*, iteration: int) -> str:
         "actual browser tool result or a command using Playwright, Puppeteer, Selenium, Chromium, Chrome, "
         "Firefox, or WebKit against the target. Source reads, static diagnosis, docs-file reads, curl/plain "
         "HTTP checks, and final text claims are different evidence. If the target URL/path is already known, "
-        "a narrow main-process browser probe is a routing/evidence fact that can be collected before delegating "
-        "or applying edits; the resulting compact browser facts can then be handed to the producer helper. "
+        "a narrow browser probe is a routing/evidence fact that can be collected before edits; the resulting "
+        "compact browser facts can then be used by the next implementation or verification step. "
         "This is a fact checkpoint, not a forced decision: decide whether to gather browser evidence now, "
-        "delegate a helper that actually has browser-family capability, or record the concrete infeasible "
+        "choose a browser-capable route, or record the concrete infeasible "
         "evidence boundary before browser-dependent edits/apply/deliverable writes.\n\n"
-        "当前任务要求浏览器/宿主浏览器证据先于编辑；当前工具链尚无 browser-family 证据。源码读取、静态诊断、文档读取、curl/普通 HTTP 和文字声明不等同；URL/路径已知时，主进程可先收集窄浏览器证据事实再交给 helper。"
+        "当前任务要求浏览器/宿主浏览器证据先于编辑；当前工具链尚无 browser-family 证据。源码读取、静态诊断、文档读取、curl/普通 HTTP 和文字声明不等同；URL/路径已知时，可先收集窄浏览器证据事实，供后续实现或验证步骤使用。"
     )
 
 
@@ -3176,17 +3508,17 @@ def _main_source_edit_delegation_fact_payload(
         "path": path,
         "fact": (
             "This main-process tool call authored or modified a source/project-like file. "
-            "The current workflow expects helpers to own source/project authoring and producer-side "
-            "verification, while the main process owns task planning, helper coordination, diff/apply, "
-            "deliverable mapping, and acceptance accounting. No helper-produced staged project output "
+            "The current workflow expects source/project authoring and verification to stay at the "
+            "implementation boundary, while the coordinator owns task planning, work coordination, diff/apply, "
+            "deliverable mapping, and acceptance accounting. No staged project output "
             "for this path had appeared in the current tool loop before this call. The tool call was "
-            "allowed to execute; use this fact when deciding whether to keep the direct edit, delegate "
-            "producer verification, or route follow-up work to a focused helper."
+            "allowed to execute; use this fact when deciding whether to keep the direct edit, request "
+            "verification, or route follow-up implementation work."
         ),
         "事实": (
-            "本次主进程调用编写或修改了源码/项目类文件；当前流程期望源码/项目产物由 helper 产出并自验，"
-            "主进程负责计划、派发、diff/apply、交付映射和验收记账。调用前当前工具链尚未出现该路径的 helper 暂存产物。"
-            "本次调用已放行；请据此判断是否保留直接编辑、委派生产者验证或将后续工作交给 focused helper。"
+            "本次主进程调用编写或修改了源码/项目类文件；当前流程期望源码/项目编写和验证留在实现边界，"
+            "协调侧负责计划、派发、diff/apply、交付映射和验收记账。调用前当前工具链尚未出现该路径的暂存产物。"
+            "本次调用已放行；请据此判断是否保留直接编辑、请求验证或路由后续实现工作。"
         ),
     }
 
@@ -3433,6 +3765,8 @@ def _retryable_delegate_facts_from_result(result) -> list[dict]:
             continue
         if _delegate_item_is_read_no_evidence_loop(item):
             continue
+        if _delegate_item_is_terminal_tts_generation_fact(item):
+            continue
         if not _delegate_item_is_incomplete(item):
             continue
         next_action = item.get("next_action")
@@ -3533,6 +3867,33 @@ def _delegate_gap_facts_from_result(result) -> list[dict]:
     facts: list[dict] = []
     for item in _delegate_items_from_result(result):
         if _delegate_item_is_race_lost(item):
+            continue
+        if _delegate_item_is_terminal_tts_generation_fact(item):
+            resource = item.get("resource_required") if isinstance(item.get("resource_required"), dict) else {}
+            outputs_check = item.get("outputs_check")
+            if not isinstance(outputs_check, dict):
+                outputs_check = {}
+            task_id = str(item.get("task_id") or "?")
+            facts.append({
+                "task_id": task_id,
+                "kind": item.get("kind") or item.get("helper_kind") or "tts",
+                "terminal_reason": item.get("terminal_reason") or "resource_required",
+                "gap_kind": "tts_generation_not_completed",
+                "stuck_reason": str(
+                    item.get("stuck_reason")
+                    or item.get("error")
+                    or item.get("report")
+                    or resource.get("blocked_reason")
+                    or ""
+                )[:700],
+                "outputs_missing": outputs_check.get("outputs_missing") or [],
+                "outputs_complete": outputs_check.get("outputs_complete"),
+                "nonblocking_tts_generation_fact": True,
+                "note": (
+                    "TTS generation/authorization failure is visible status evidence for the final plan, "
+                    "but it should not force an automatic same-helper retry."
+                ),
+            })
             continue
         if not _delegate_item_is_read_no_evidence_loop(item):
             continue
@@ -3807,9 +4168,9 @@ def _delegate_completion_checkpoint_from_result(result) -> dict | None:
                 facts.append("producer_self_verified=true")
         report_text = str(item.get("summary") or item.get("report") or item.get("content") or "")
         if "recommend: no" in report_text.lower():
-            facts.append("helper reported recommend: no")
+            facts.append("available evidence includes recommend: no")
         if "Output files" in report_text or '"files"' in report_text:
-            facts.append("helper report includes Output files")
+            facts.append("available evidence includes Output files")
     if staged_project_files:
         facts.append(
             "staged_project_files_not_real_project_apply="
@@ -3884,6 +4245,8 @@ def _pending_retry_tasks_blocking_finalize(
     for tid in pending_retry_tasks:
         fact = latest_by_task.get(tid) or {}
         if fact.get("nonblocking_readonly_evidence"):
+            continue
+        if fact.get("nonblocking_tts_generation_fact"):
             continue
         missing = [
             _normalize_committed_filename(item)
@@ -4250,6 +4613,10 @@ async def chat_with_tools_loop(
                     f"{'>' if _orig_over_budget else '~'} budget {_budget}c, "
                     f"used={'structured_summary' if _summary_result is not None else 'head_tail_fallback'}",
                 )
+        if tc_name == "delegate":
+            result = _sanitize_delegate_result_for_model_context(result)
+        else:
+            result = _sanitize_tool_result_internal_terms_for_model_context(result)
         debug.log(
             f"llm.tools.result",
             f"name={tc_name} id={tc_id}",
@@ -4387,7 +4754,7 @@ async def chat_with_tools_loop(
     _task_focus_refresh_iters: set[int] = set()
 
     def _merge_delegate_gap_facts_into_response_plan_json(content: str) -> str:
-        """Preserve nonblocking helper gap facts in final ResponsePlan JSON."""
+        """Preserve nonblocking processing gap facts in final ResponsePlan JSON."""
         if not _delegate_gap_facts:
             return content
         try:
@@ -4399,12 +4766,12 @@ async def chat_with_tools_loop(
         gap_lines: list[str] = []
         for fact in _delegate_gap_facts[-6:]:
             task = str(fact.get("task_id") or "?")
-            kind = str(fact.get("kind") or "?")
-            gap_kind = str(fact.get("gap_kind") or "helper_gap")
-            reason = str(fact.get("terminal_reason") or "")
-            missing = fact.get("outputs_missing") or []
-            missing_text = f"; missing={', '.join(str(x) for x in missing[:3])}" if missing else ""
-            gap_lines.append(f"helper {task} ({kind}) gap: {gap_kind}/{reason}{missing_text}")
+            kind = _neutral_round3_gap_text(fact.get("kind") or "?")
+            gap_kind = _neutral_round3_gap_text(fact.get("gap_kind") or "processing_gap")
+            reason = _neutral_round3_gap_text(fact.get("terminal_reason") or "")
+            missing = _round3_gap_missing_items(fact.get("outputs_missing"))
+            missing_text = f"; missing={', '.join(missing)}" if missing else ""
+            gap_lines.append(f"processing gap {task} ({kind}): {gap_kind}/{reason}{missing_text}")
         existing_joined = " ".join(str(x) for x in (parsed.get("key_points") or []))
         existing_joined += " " + str(parsed.get("internal_note") or "")
         new_lines = [line for line in gap_lines if line not in existing_joined]
@@ -4413,14 +4780,14 @@ async def chat_with_tools_loop(
         key_points = parsed.get("key_points")
         if not isinstance(key_points, list):
             key_points = []
-        key_points.extend("Nonblocking helper gap fact: " + line for line in new_lines)
+        key_points.extend("Nonblocking processing gap fact: " + line for line in new_lines)
         parsed["key_points"] = key_points
         note = str(parsed.get("internal_note") or "")
         gap_note = (
-            " Nonblocking helper gap facts were preserved for Round3 wording; "
+            " Nonblocking processing gap facts were preserved for Round3 wording; "
             "they do not decide completion by themselves."
         )
-        if "Nonblocking helper gap facts" not in note:
+        if "Nonblocking processing gap facts" not in note:
             parsed["internal_note"] = (note + gap_note).strip()
         return json.dumps(parsed, ensure_ascii=False)
 
@@ -4710,7 +5077,7 @@ async def chat_with_tools_loop(
                                 if len(_qw) > 3:
                                     _lines.append(f"      ... {len(_qw)-3} more quality warnings in outputs_check.quality_warnings")
                             _lines.append(
-                                "Use outputs_complete as file-presence evidence. Treat producer_self_verified=true with no blocking warnings as the clean helper-owned completion boundary. For clean results, consume the helper report, output map, and check facts without re-reading or re-validating helper-owned artifact bodies. For missing, warning-bearing, contradictory, stale, or explicitly independent-QA boundaries, use the report, warnings, and active contract to decide producer resume, verify-helper, repair, or partial delivery."
+                                "Use outputs_complete as file-presence evidence. Treat producer_self_verified=true with no blocking warnings as the clean producer completion boundary. For clean results, consume the result report, output map, and check facts without re-reading or re-validating producer-owned artifact bodies. For missing, warning-bearing, contradictory, stale, or explicitly independent-QA boundaries, use the report, warnings, and active contract to decide producer resume, independent verification, repair, or partial delivery."
                             )
                             _lines.append(
                                 "For quality warnings, inspect details and decide whether repair or verification is needed.\n\n"
@@ -6078,12 +6445,15 @@ async def chat_with_tools_loop(
                         if tid not in blocking_retry_tasks:
                             continue
                         params = fact.get("params") or {}
-                        missing = fact.get("outputs_missing") or []
+                        missing = _round3_gap_missing_items(fact.get("outputs_missing"))
+                        terminal_reason = _neutral_round3_gap_text(fact.get("terminal_reason"))
+                        next_action_type = _neutral_round3_gap_text(fact.get("next_action_type"))
+                        params_json = _neutral_round3_gap_text(json.dumps(params, ensure_ascii=False))
                         retry_lines.append(
-                            f"- {tid}: {fact.get('terminal_reason')} / "
-                            f"{fact.get('next_action_type')} / "
+                            f"- {tid}: {terminal_reason} / "
+                            f"{next_action_type} / "
                             f"missing={missing} / "
-                            f"delegate(action='spawn', tasks=[{json.dumps(params, ensure_ascii=False)}])"
+                            f"retry_params={params_json}"
                         )
                     if not retry_lines:
                         retry_lines = [f"- {tid}: resume or escalate the same task_id before finalizing" for tid in blocking_retry_tasks]
@@ -6139,22 +6509,30 @@ async def chat_with_tools_loop(
                     _delegate_gap_facts_injected = True
                     _gap_lines = []
                     for fact in _delegate_gap_facts[-6:]:
-                        missing = fact.get("outputs_missing") or []
-                        missing_text = f"; missing={missing[:3]}" if missing else ""
+                        missing = _round3_gap_missing_items(fact.get("outputs_missing"))
+                        missing_text = f"; missing={missing}" if missing else ""
+                        gap_kind = _neutral_round3_gap_text(fact.get("gap_kind"))
+                        terminal_reason = _neutral_round3_gap_text(fact.get("terminal_reason"))
+                        if fact.get("nonblocking_tts_generation_fact"):
+                            _gap_lines.append(
+                                f"- voice output status {fact.get('task_id')}: "
+                                f"{gap_kind} / {terminal_reason}{missing_text}"
+                            )
+                            continue
                         _gap_lines.append(
-                            f"- helper {fact.get('task_id')} ({fact.get('kind')}): "
-                            f"{fact.get('gap_kind')} / {fact.get('terminal_reason')}{missing_text}"
+                            f"- processing gap {fact.get('task_id')} ({_neutral_round3_gap_text(fact.get('kind'))}): "
+                            f"{gap_kind} / {terminal_reason}{missing_text}"
                         )
                     _append_tool_loop_dynamic_guidance(
                         msgs,
                         (
-                            "[SYSTEM_HINT/helper_gap_facts]\n"
-                            "Some helper branches produced nonblocking gap facts. These facts do not force retry or stop, "
+                            "[SYSTEM_HINT/processing_gap_facts]\n"
+                            "Some work produced nonblocking gap facts. These facts do not force retry or stop, "
                             "but they should remain visible in the final JSON if relevant to the user's requested coverage:\n"
                             + "\n".join(_gap_lines)
                             + "\n\n"
-                            "If the main thread independently covered the task, say so as the evidence basis; do not hide helper gaps when they affect coverage or confidence.\n"
-                            "helper 缺口事实不强制续作；如主线程已独立覆盖，应说明证据边界。"
+                            "If the main thread independently covered the task, say so as the evidence basis; do not hide processing gaps when they affect coverage or confidence.\n"
+                            "处理缺口事实不强制续作；如主流程已独立覆盖，应说明证据边界。"
                         ),
                     )
                     debug.log(
@@ -6872,20 +7250,22 @@ async def chat_with_tools_loop(
                                         _browser_repro_helper_gap_tasks.add(_tid)
                                         _urls = _gap.get("urls") if isinstance(_gap.get("urls"), list) else []
                                         _url_text = ", ".join(str(u) for u in _urls[:3]) or "target URL/path not stated"
-                                        _new_gap_lines.append(f"- helper={_tid}; urls={_url_text}; fact={_gap.get('fact')}")
+                                        _new_gap_lines.append(
+                                            f"- branch={_tid}; urls={_url_text}; fact={_neutral_round3_gap_text(_gap.get('fact'))}"
+                                        )
                                     if _new_gap_lines:
                                         _append_tool_loop_dynamic_guidance(
                                             msgs,
                                             (
-                                                "[SYSTEM_HINT/browser_evidence_gap_from_helper]\n"
-                                                "A helper returned producer-owned artifact facts, but also reported that the active "
-                                                "browser/host-browser evidence boundary was not satisfied in that helper environment. "
-                                                "This is a separate task-evidence fact, not a content-quality rejection of the helper output. "
+                                                "[SYSTEM_HINT/browser_evidence_gap_from_parallel_branch]\n"
+                                                "A processing branch returned artifact facts, but also reported that the active "
+                                                "browser/host-browser evidence boundary was not satisfied in that execution environment. "
+                                                "This is a separate task-evidence fact, not a content-quality rejection of the artifact output. "
                                                 "If the main process has a narrower browser-family route available, collect that evidence "
                                                 "before treating browser-dependent apply/finalization as covered; otherwise record the concrete "
                                                 "infeasible boundary and decide from the active contract.\n"
                                                 + "\n".join(_new_gap_lines)
-                                                + "\n\nhelper 报告了产物事实，同时报告浏览器证据边界未满足；这不是否定 helper 产物质量，而是独立任务证据事实。"
+                                                + "\n\n并行处理步骤报告了产物事实，同时报告浏览器证据边界未满足；这不是否定产物质量，而是独立任务证据事实。"
                                             ),
                                         )
                                         debug.log(
@@ -7047,7 +7427,11 @@ async def chat_with_tools_loop(
                                     _fact.setdefault("source", "env_read")
                                     _main_acceptance_script_facts[_fact_path] = _fact
                             _acceptance_paths: list[str] = []
-                            for _container in (_parsed_result, _parsed_result.get("helper_handoff_fact")):
+                            for _container in (
+                                _parsed_result,
+                                _parsed_result.get("helper_handoff_fact"),
+                                _parsed_result.get("background_handoff_fact"),
+                            ):
                                 if not isinstance(_container, dict):
                                     continue
                                 _paths = _container.get("acceptance_script_paths")
@@ -7423,7 +7807,7 @@ async def chat_with_tools_loop(
                             ),
                         )
                         debug.log(
-                            "llm.tools.main_helper_handoff_overwork_fact",
+                            "llm.tools.main_background_work_handoff_overwork_fact",
                             (
                                 f"direct_count={_main_helper_handoff_direct_work_count} "
                                 f"paths={_handoff_paths_for_hint[:10]} iter={it}"
@@ -7594,18 +7978,19 @@ async def chat_with_tools_loop(
                                 if _tid not in _retryable_next_action_tasks:
                                     _retryable_next_action_tasks.append(_tid)
                                 _retryable_next_action_facts.append(_fact)
+                                _params_json = _neutral_round3_gap_text(json.dumps(_params, ensure_ascii=False))
                                 _append_tool_loop_dynamic_guidance(
                                     msgs,
                                     (
-                                        f"[SYSTEM_HINT/auto_retry] Helper '{_tid}' terminated "
-                                        f"with reason '{_tr}'.\n"
-                                        f"  Recovery rationale: {_rationale}\n"
-                                        f"  Available recovery call: delegate(action='spawn', tasks=[{json.dumps(_params, ensure_ascii=False)}])\n"
+                                        f"[SYSTEM_HINT/auto_retry] Processing step '{_tid}' terminated "
+                                        f"with reason '{_neutral_round3_gap_text(_tr)}'.\n"
+                                        f"  Recovery rationale: {_neutral_round3_gap_text(_rationale)}\n"
+                                        f"  Recovery parameters: {_params_json}\n"
                                         f"  This is a factual recovery option, not a forced decision. Before finalizing, compare the "
                                         f"current task contract, verified evidence, missing outputs, and user interruption state; then "
                                         f"decide whether to resume the same task_id, split/escalate, use sufficient existing evidence, "
                                         f"or report an explicit incomplete state.\n\n"
-                                        f"helper 未完成时只陈述恢复事实；由模型结合任务契约、证据和缺口决定续作、拆分/升级、采用已有证据或说明未完成。"
+                                        f"处理步骤未完成时只陈述恢复事实；由模型结合任务契约、证据和缺口决定续作、拆分/升级、采用已有证据或说明未完成。"
                                     ),
                                 )
                                 debug.log(
@@ -8232,7 +8617,7 @@ async def chat_with_tools_loop(
 
             if retry_facts and not committed_files_real:
                 tasks = ", ".join(str(f.get("task_id") or "?") for f in retry_facts)
-                intent = f"本轮任务尚未完成; helper {tasks} 已失败并给出续作/升级重试建议"
+                intent = f"本轮任务尚未完成; 处理步骤 {tasks} 已失败并给出续作/升级重试建议"
             elif (
                 last_assistant_text
                 and not _looks_like_unparsed_tool_markup(last_assistant_text)
@@ -8256,11 +8641,14 @@ async def chat_with_tools_loop(
                 key_points.extend(helper_findings)
             if retry_facts:
                 for fact in retry_facts:
-                    missing = fact.get("outputs_missing") or []
-                    missing_text = f"; 缺失产物: {', '.join(str(x) for x in missing[:3])}" if missing else ""
-                    reason_text = f"; 原因: {fact.get('stuck_reason')}" if fact.get("stuck_reason") else ""
+                    missing = _round3_gap_missing_items(fact.get("outputs_missing"))
+                    missing_text = f"; 缺失产物: {', '.join(missing)}" if missing else ""
+                    reason_text = (
+                        f"; 原因: {_neutral_round3_gap_text(fact.get('stuck_reason'))}"
+                        if fact.get("stuck_reason") else ""
+                    )
                     key_points.append(
-                        f"helper {fact.get('task_id')} {fact.get('terminal_reason')}, "
+                        f"处理步骤 {fact.get('task_id')} {_neutral_round3_gap_text(fact.get('terminal_reason'))}, "
                         f"建议 {fact.get('next_action_type')} mode={fact.get('mode')}{reason_text}{missing_text}"
                     )
             if recent_files and not committed_files_real:
@@ -8286,7 +8674,7 @@ async def chat_with_tools_loop(
                 # 修法:abort path 的 internal_note 改成中性描述,不强言"用户主动",
                 # 由 orchestrator 通过 abort_ch.gen 判定真假 abort,各自走对应路径。
                 "internal_note": (
-                    "This task ended early during Round2 through the forced-finalize path. Possible causes include user interruption, long helper inactivity, or tool-call budget pressure. "
+                    "This task ended early during Round2 through the forced-finalize path. Possible causes include user interruption, long background-task inactivity, or tool-call budget pressure. "
                     "Round3 should continue naturally in persona, mention the interruption or pause when relevant, and avoid pretending the task completed successfully. Keep apologies brief. "
                     "Workspace files are preserved, so the main thread can resume later with resume=true.\n"
                     "Round2 提前结束时，Round3 按人设说明暂停/中断事实，不假装完成；工作区可续作。"

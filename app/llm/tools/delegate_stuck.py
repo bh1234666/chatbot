@@ -221,6 +221,10 @@ class StuckDetector:
         self._batch_todo_warn_sent: bool = False
         self._pending_batch_todo_hint: str | None = None
         self._pending_missing_dependency_hint: str | None = None
+        self._dependency_strategy_events: int = 0
+        self._dependency_strategy_failures: int = 0
+        self._dependency_strategy_hint_sent: bool = False
+        self._pending_dependency_strategy_hint: str | None = None
         # 2026-05-11 P12.H: progress_note 跟踪
         # 病因(实测 18:46-19:09 pptx): helper 跑 22 分钟没 progress_note,
         # 主线程不知道在干嘛, 也不知道何时需要介入。
@@ -458,6 +462,48 @@ class StuckDetector:
                             return
                 except (ValueError, TypeError, KeyError):
                     pass
+
+        if tool_name in {"bash", "workspace"} and args:
+            _cmd = ""
+            if tool_name == "bash":
+                _cmd = str(args.get("command", "") or args.get("cmd", ""))
+            elif str(args.get("action", "")).lower() == "run":
+                _cmd = str(args.get("command", "") or args.get("cmd", ""))
+            if _cmd and self._looks_like_dependency_or_external_service_route(_cmd):
+                self._dependency_strategy_events += 1
+                _result_low = (result_str or "").lower()
+                if (
+                    not ok
+                    or "timed_out" in _result_low
+                    or "timeout" in _result_low
+                    or "could not install" in _result_low
+                    or "failed to establish" in _result_low
+                    or "temporary failure" in _result_low
+                    or ("connection" in _result_low and "error" in _result_low)
+                ):
+                    self._dependency_strategy_failures += 1
+                if (
+                    not self._dependency_strategy_hint_sent
+                    and self._dependency_strategy_events >= 2
+                    and self._dependency_strategy_failures >= 1
+                ):
+                    self._dependency_strategy_hint_sent = True
+                    self._pending_dependency_strategy_hint = (
+                        "[SYSTEM_HINT/dependency_strategy_recovery]\n"
+                        f"You have used dependency installation, downloads, or external service/client commands "
+                        f"{self._dependency_strategy_events} times, with {self._dependency_strategy_failures} "
+                        f"failure/timeout signal(s). Treat this as a strategy and environment signal, not normal "
+                        f"implementation progress. Before another install/service/library switch, decide from the "
+                        f"task contract:\n"
+                        f"- If the deliverable requires a system-managed capability, stop this route and report the "
+                        f"correct helper/tool boundary.\n"
+                        f"- If this is a real code task, prefer local/project/bundled dependencies or a small fallback "
+                        f"verification that does not require new global installs.\n"
+                        f"- If the missing dependency is essential, publish progress_note or finalize with the exact "
+                        f"dependency blocker and current partial evidence instead of trying more unrelated engines.\n"
+                        f"Repeated dependency installs or external service retries are not acceptance progress.\n"
+                        f"依赖安装/外部服务反复失败时，应回到任务边界、本地/内置路线或报告依赖阻塞，而不是继续换库试探。"
+                    )
 
 
 
@@ -1203,6 +1249,10 @@ class StuckDetector:
         if _pending_missing:
             self._pending_missing_dependency_hint = None
             return _pending_missing
+        _pending_dep_strategy = getattr(self, "_pending_dependency_strategy_hint", None)
+        if _pending_dep_strategy:
+            self._pending_dependency_strategy_hint = None
+            return _pending_dep_strategy
 
         # 2026-05-12 P27: 产出停滞检测(P22 的兄弟维度)
         # 病因(实测 13:06 paper): kind=edit+mode=hard 前期 office.write 5 次, 后 14 batch
@@ -1435,6 +1485,37 @@ class StuckDetector:
             # 暂留接口, 后续可加 args 跟踪
 
         return None
+
+    @staticmethod
+    def _looks_like_dependency_or_external_service_route(command: str) -> bool:
+        cmd = (command or "").lower()
+        if not cmd.strip():
+            return False
+        install_patterns = (
+            r"\bpip(?:\d+(?:\.\d+)?)?\s+install\b",
+            r"\bpython\s+-m\s+pip\s+install\b",
+            r"\bpy\s+-m\s+pip\s+install\b",
+            r"\bnpm\s+(?:install|i)\b",
+            r"\byarn\s+add\b",
+            r"\bpnpm\s+add\b",
+            r"\bapt(?:-get)?\s+install\b",
+            r"\bchoco\s+install\b",
+            r"\bscoop\s+install\b",
+            r"\bwinget\s+install\b",
+        )
+        external_patterns = (
+            r"\bcurl\b",
+            r"\bwget\b",
+            r"\binvoke-webrequest\b",
+            r"\brequests\.(?:get|post)\b",
+            r"\burllib\.request\b",
+            r"\bhttpx\.(?:get|post)\b",
+            r"\bwebsocket\b",
+            r"\bedge[-_ ]?tts\b",
+            r"\bgtts\b",
+            r"\bpyttsx3\b",
+        )
+        return any(re.search(pat, cmd) for pat in install_patterns + external_patterns)
 
     @staticmethod
     def _is_success(result_str: str) -> bool:

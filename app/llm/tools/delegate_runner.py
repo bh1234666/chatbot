@@ -93,6 +93,32 @@ def _helper_input_file_path_facts(
     )
 
 
+def _tts_helper_persona_context_for_prompt(kind: str) -> str:
+    if str(kind or "").strip().lower() != "tts":
+        return ""
+    try:
+        persona = _current_tts_helper_persona.get("")
+    except Exception:
+        try:
+            from app.llm.tools import delegate as _delegate
+            persona = _delegate._current_tts_helper_persona.get("")
+        except Exception:
+            persona = ""
+    persona = str(persona or "").strip()
+    if not persona:
+        return ""
+    return (
+        "## Full Persona Context for TTS Delivery\n"
+        "Use this persona to write any spoken transcript or final handoff text in-character. "
+        "This context is about wording, boundaries, and user-facing behavior only. "
+        "Do not infer, choose, request, reveal, or modify raw voice parameters such as timbre, "
+        "reference audio, voice model, speaker id, pitch, or TTS engine settings; the built-in `tts` "
+        "tool applies the system-managed voice automatically.\n\n"
+        f"{persona}\n\n"
+        "完整人设只用于语气和边界；声音配置由系统管理，helper 不选择也不暴露。"
+    )
+
+
 def _registry_helper_outputs(main_workspace: str, task_id: str, kind: str) -> tuple[list[str], list[str]]:
     """Return registry-backed helper outputs visible to the main process."""
     if not main_workspace or not task_id:
@@ -1213,6 +1239,14 @@ async def _run_one_helper(
         debug.log(
             f"delegate.{task_id}.input_file_path_facts",
             f"injected path facts for {len(input_files or [])} input file(s)",
+        )
+
+    tts_persona_context = _tts_helper_persona_context_for_prompt(kind)
+    if tts_persona_context:
+        dynamic_prompt_prefix_parts.append(tts_persona_context)
+        debug.log(
+            f"delegate.{task_id}.tts_persona_context",
+            "injected full persona context for TTS helper wording only",
         )
 
     # 2026-05-12 P34: 自动注入依赖路径清单(铁律 12 实操层)
@@ -2705,6 +2739,21 @@ async def _run_one_helper(
                 evidence_files=_result.get("internal_evidence_files") or _read_internal_evidence_files,
                 report=_full_report,
             )
+        if kind == "tts":
+            _tts_candidate_files = [
+                path for path in (_visible_copied_back or _workspace_copied_back or copied_back or [])
+                if str(path or "").strip().lower().rsplit(".", 1)[-1] in {"wav", "mp3", "ogg", "m4a"}
+            ]
+            if _tts_candidate_files:
+                _primary_tts_candidate = os.path.basename(str(_tts_candidate_files[0]).replace("\\", "/"))
+                _result["voice_reply_file_candidate"] = _primary_tts_candidate
+                _result["deliverable_candidate"] = _primary_tts_candidate
+                _result["delivery_guidance"] = (
+                    "Generated speech is a current-turn candidate fact. If it is the final spoken reply, "
+                    "set ResponsePlan.voice_reply_file to voice_reply_file_candidate and keep it out of "
+                    "deliverables. If the user requested an audio file attachment, put deliverable_candidate "
+                    "in deliverables instead."
+                )
         if interrupted:
             _result["interrupted"] = True
             if _visible_copied_back or _env_available_files:
@@ -3558,12 +3607,21 @@ async def _run_one_helper(
                 _result["_post_helper_action"] = "output_json_directly"
                 # 2026-06-05 简化: 之前的提示太长 (~280 chars * 14 helpers = 4K context),
                 # 而且每个 helper 完成都重复;改为 1 行核心信息。
-                _result["_post_helper_hint"] = (
-                    "Producer self-verified outputs are complete. Put the clean filename in plan.deliverables "
-                    "(pick one final if multiple candidates exist); trust the helper's content judgment and do not run "
-                    "a separate main-thread final acceptance pass over helper-owned content.\n"
-                    "helper 自检产物完整；deliverables 写干净文件名，主进程信任其内容判断，不额外终验正文。"
-                )
+                if kind == "tts":
+                    _result["_post_helper_hint"] = (
+                        "Producer self-verified speech output is complete. Treat voice_reply_file_candidate "
+                        "as a current-turn fact: use plan.voice_reply_file only when this generated speech is "
+                        "the final spoken reply, or plan.deliverables only when the user requested an audio "
+                        "attachment. Do not run a separate main-thread final acceptance pass over helper-owned speech.\n"
+                        "tts 音频已生成；由 Round2 按当前请求决定 voice_reply_file、deliverables 或忽略，不额外重验。"
+                    )
+                else:
+                    _result["_post_helper_hint"] = (
+                        "Producer self-verified outputs are complete. Put the clean filename in plan.deliverables "
+                        "(pick one final if multiple candidates exist); trust the helper's content judgment and do not run "
+                        "a separate main-thread final acceptance pass over helper-owned content.\n"
+                        "helper 自检产物完整；deliverables 写干净文件名，主进程信任其内容判断，不额外终验正文。"
+                    )
                 if _env_available_files:
                     _result["_post_helper_hint"] += (
                         " _env/ paths are in main workspace; use those directly.\n"

@@ -113,13 +113,13 @@ def _compact_agent_state_status(status: dict[str, Any], *, include_latest_contra
             "contracts": len(contracts),
             "evidence_recent": len(status.get("evidence_recent") or []),
             "artifacts_ready": len(status.get("artifacts_ready") or []),
-            "blocked_helpers": len(status.get("blocked_helpers") or []),
+            "blocked_work": len(status.get("blocked_work") or []),
             "resource_requests": len(status.get("resource_requests") or []),
         },
         "freshness": status.get("freshness") or {},
         "recent_evidence": _compact_records("evidence_recent"),
         "ready_artifacts": _compact_records("artifacts_ready"),
-        "blocked_helpers": _compact_records("blocked_helpers"),
+        "blocked_work": _compact_records("blocked_work"),
         "resource_requests": _compact_records("resource_requests"),
     }
     if include_latest_contract and compact_contract:

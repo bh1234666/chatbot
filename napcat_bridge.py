@@ -127,7 +127,8 @@ _pending_queue: defaultdict[_PendKey, deque] = defaultdict(deque)
 _processing_lock: defaultdict[_PendKey, asyncio.Lock] = defaultdict(asyncio.Lock)
 _currently_processing: set[_PendKey] = set()   # 哪些 (group, user) 正在跑 chat 流
 _abort_injected_messages: defaultdict[_PendKey, deque[str]] = defaultdict(deque)
-_RECENT_OBSERVED_MEDIA: dict[_PendKey, tuple[float, str]] = {}
+_RecentMediaKey = tuple[str, str, str]  # (group_id, user_id, media_type)
+_RECENT_OBSERVED_MEDIA: dict[_RecentMediaKey, tuple[float, str]] = {}
 _RECENT_OBSERVED_MEDIA_TTL = 300.0
 
 # Multi-turn botctl sessions: user_id → (timestamp, stage_cmd, stage_args)
@@ -510,17 +511,33 @@ _MEDIA_PREFIX = {"image": "img", "record": "voice", "video": "video", "file": "f
 _PIC_DATA_BY_FILE: dict[str, dict] = {}
 
 
-def _message_contains_local_media(message: str) -> bool:
+def _local_media_types_in_message(message: str) -> set[str]:
     msg = (message or "").lower()
-    return any(tag in msg for tag in ("[本地image:", "[本地record:", "[本地video:", "[本地file:"))
+    out: set[str] = set()
+    for media_type in _MEDIA_TYPE_LABEL:
+        if f"[本地{media_type}:".lower() in msg:
+            out.add(media_type)
+    return out
+
+
+def _remote_media_types_in_message(message: str) -> set[str]:
+    return {m.group(1) for m in _CQ_MEDIA_RE.finditer(message or "")}
+
+
+def _media_types_in_message(message: str) -> set[str]:
+    return _local_media_types_in_message(message) | _remote_media_types_in_message(message)
+
+
+def _message_contains_local_media(message: str) -> bool:
+    return bool(_local_media_types_in_message(message))
 
 
 def _message_contains_remote_media(message: str) -> bool:
-    return bool(_CQ_MEDIA_RE.search(message or ""))
+    return bool(_remote_media_types_in_message(message))
 
 
 def _message_contains_media(message: str) -> bool:
-    return _message_contains_local_media(message) or _message_contains_remote_media(message)
+    return bool(_media_types_in_message(message))
 
 
 def _message_mentions_recent_image(message: str) -> bool:
@@ -533,11 +550,13 @@ def _message_mentions_recent_image(message: str) -> bool:
 
 
 def _remember_observed_media(group_id: str, user_id: str, raw_message: str) -> None:
-    if not _message_contains_media(raw_message):
+    media_types = _media_types_in_message(raw_message)
+    if not media_types:
         return
-    _RECENT_OBSERVED_MEDIA[(group_id, user_id)] = (time.time(), raw_message)
+    now = time.time()
+    for media_type in media_types:
+        _RECENT_OBSERVED_MEDIA[(group_id, user_id, media_type)] = (now, raw_message)
     if len(_RECENT_OBSERVED_MEDIA) > 512:
-        now = time.time()
         for key, (ts, _) in list(_RECENT_OBSERVED_MEDIA.items()):
             if now - ts > _RECENT_OBSERVED_MEDIA_TTL:
                 _RECENT_OBSERVED_MEDIA.pop(key, None)
@@ -546,12 +565,13 @@ def _remember_observed_media(group_id: str, user_id: str, raw_message: str) -> N
 def _attach_recent_media_if_referenced(group_id: str, user_id: str, raw_message: str) -> str:
     if _message_contains_media(raw_message) or not _message_mentions_recent_image(raw_message):
         return raw_message
-    item = _RECENT_OBSERVED_MEDIA.get((group_id, user_id))
+    key = (group_id, user_id, "image")
+    item = _RECENT_OBSERVED_MEDIA.get(key)
     if not item:
         return raw_message
     ts, media_msg = item
     if time.time() - ts > _RECENT_OBSERVED_MEDIA_TTL:
-        _RECENT_OBSERVED_MEDIA.pop((group_id, user_id), None)
+        _RECENT_OBSERVED_MEDIA.pop(key, None)
         return raw_message
     return f"{media_msg}\n{raw_message}"
 

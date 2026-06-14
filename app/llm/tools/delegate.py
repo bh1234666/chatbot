@@ -510,6 +510,12 @@ _current_persona_excerpt: ContextVar[str] = ContextVar(
 
 )
 
+_current_tts_helper_persona: ContextVar[str] = ContextVar(
+
+    "_current_tts_helper_persona", default=""
+
+)
+
 _current_user_message: ContextVar[str] = ContextVar(
 
     "_current_user_message", default=""
@@ -535,6 +541,13 @@ def set_current_persona_excerpt(persona: str):
     return _current_persona_excerpt.set(rules.strip()[:1800])
 
 
+def set_current_tts_helper_persona(persona: str):
+
+    """Expose full persona text only to TTS helpers that may deliver final voice."""
+
+    return _current_tts_helper_persona.set((persona or "").strip()[:8000])
+
+
 
 
 
@@ -553,6 +566,13 @@ def reset_current_persona_excerpt(token):
     if token is not None:
 
         _current_persona_excerpt.reset(token)
+
+
+def reset_current_tts_helper_persona(token):
+
+    if token is not None:
+
+        _current_tts_helper_persona.reset(token)
 
 
 
@@ -933,7 +953,7 @@ def _deterministic_kind_recommendations(tasks: list[dict]) -> list[dict]:
             for x in (task.get("expected_outputs") or [])
             if str(x).strip()
         ]
-        if not tid or not expected_outputs:
+        if not tid:
             continue
 
         # Skip deprecated kinds - they should be rejected upstream, not recommended
@@ -944,8 +964,22 @@ def _deterministic_kind_recommendations(tasks: list[dict]) -> list[dict]:
         reason = ""
         has_non_text_impl = _has_non_text_implementation_output(expected_outputs)
 
+        if (
+            kind != "tts"
+            and _looks_like_user_facing_tts_synthesis_task(prompt, expected_outputs)
+            and not _looks_like_project_tts_implementation_task(prompt, expected_outputs)
+        ):
+            suggested = "tts"
+            reason = (
+                "User-facing/persona voice synthesis or audio-file generation must use the "
+                "system-managed TTS route. Code helpers must not install or use external TTS "
+                "engines such as gTTS, edge-tts, pyttsx3, SAPI, browser speech, espeak, or "
+                "similar engines to produce the requested speech/voice output. Non-speech audio "
+                "such as white noise, tones, beeps, music/signal synthesis, waveform processing, "
+                "or audio analysis remains code/signal work."
+            )
         # Hard physical constraint: edit helper owns Office/PDF document assembly.
-        if _has_office_document_output(prompt, expected_outputs) and kind != "edit":
+        elif expected_outputs and _has_office_document_output(prompt, expected_outputs) and kind != "edit":
             suggested = "edit"
             reason = "Office/PDF deliverables require document assembly tools."
         # Hard physical constraint: source code, scripts, executables, generated data
@@ -966,6 +1000,51 @@ def _deterministic_kind_recommendations(tasks: list[dict]) -> list[dict]:
             }
             recommendations.append(rec)
     return recommendations
+
+
+_AUDIO_OUTPUT_RE = re.compile(
+    r"(?i)(?:\b(?:speech|spoken|narration|voice\s*file|voice\s*reply|tts)\b|"
+    r"voice_reply_file|voice_reply\.|final\s+voice\s+reply|"
+    r"语音文件|人声|朗读|配音|语音回复|生成语音|合成语音|输出语音)"
+)
+_EXTERNAL_TTS_ENGINE_RE = re.compile(
+    r"(?i)(?:\bgtts\b|edge[-_ ]?tts|pyttsx3|sapi\.spvoice|spvoice|"
+    r"speechsynthesizer|speechsynthesis|espeak|festival|pico2wave|"
+    r"system\.speech\.synthesis|windows\s+sapi|browser\s+speech)"
+)
+_TTS_SYNTHESIS_VERB_RE = re.compile(
+    r"(?i)(?:synthesi[sz]e|generate|create|produce|save|output|export|"
+    r"spoken|narration|voice|audio|tts|朗读|配音|语音|音频|合成|生成|输出)"
+)
+_PROJECT_TTS_IMPLEMENTATION_RE = re.compile(
+    r"(?i)(?:implement|debug|fix|repair|refactor|test|unit\s*test|pytest|"
+    r"module|source|project|library|wrapper|bridge|api|pipeline|handler|"
+    r"实现|调试|修复|重构|测试|源码|模块|项目|接口|封装|管线)"
+)
+
+
+def _looks_like_user_facing_tts_synthesis_task(prompt: str, expected_outputs: list[str]) -> bool:
+    """Return true when the helper envelope asks to produce user-facing speech."""
+    joined_outputs = " ".join(str(x or "") for x in expected_outputs)
+    text = f"{prompt or ''}\n{joined_outputs}"
+    if not text.strip():
+        return False
+    if _AUDIO_OUTPUT_RE.search(text):
+        return bool(_EXTERNAL_TTS_ENGINE_RE.search(text) or _TTS_SYNTHESIS_VERB_RE.search(text))
+    return False
+
+
+def _looks_like_project_tts_implementation_task(prompt: str, expected_outputs: list[str]) -> bool:
+    """Exempt project-code work about TTS systems from audio-output routing facts."""
+    joined_outputs = " ".join(str(x or "") for x in expected_outputs)
+    text = f"{prompt or ''}\n{joined_outputs}"
+    low_outputs = joined_outputs.lower()
+    if any(str(x or "").lower().endswith((".wav", ".mp3", ".m4a", ".ogg", ".flac")) for x in expected_outputs):
+        return False
+    if not _PROJECT_TTS_IMPLEMENTATION_RE.search(text):
+        return False
+    project_path_hint = bool(re.search(r"(?i)(?:^|[\\/])(?:app|src|tests?|lib|core)[\\/]|\.py\b|\.ts\b|\.js\b", low_outputs + "\n" + text))
+    return project_path_hint or bool(re.search(r"(?i)(tts\s+(?:module|bridge|handler|pipeline|tool|api)|(?:module|bridge|handler|pipeline|tool|api)\s+tts)", text))
 
 
 def _read_helper_project_visible_output_facts(
@@ -6837,5 +6916,3 @@ WAIT_HELPER_TOOL_SCHEMA = {
 # spawn_helper/wait_helper intentionally stay unexposed: all helper spawning and
 
 # activation is controlled by the main process through delegate().
-
-

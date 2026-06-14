@@ -37,23 +37,6 @@ from app.llm.tools.gpu_resources import (
 # 2026-05-15: 阈值改从 settings 读, 通过 OCR_CONCURRENCY / TTS_CONCURRENCY 环境变量调整。
 _current_voice_instruct: ContextVar[str] = ContextVar("_current_voice_instruct", default="")
 _current_voice_ref_audio: ContextVar[str] = ContextVar("_current_voice_ref_audio", default="")
-_current_persona_for_tts: ContextVar[str] = ContextVar("_current_persona_for_tts", default="")
-_current_user_message_for_tts: ContextVar[str] = ContextVar("_current_user_message_for_tts", default="")
-
-
-def set_current_tts_guard_context(persona: str, user_message: str):
-    tok_persona = _current_persona_for_tts.set((persona or "").strip()[:800])
-    tok_user = _current_user_message_for_tts.set((user_message or "").strip()[:500])
-    return tok_persona, tok_user
-
-
-def reset_current_tts_guard_context(tokens):
-    try:
-        tok_persona, tok_user = tokens
-        _current_persona_for_tts.reset(tok_persona)
-        _current_user_message_for_tts.reset(tok_user)
-    except Exception:
-        pass
 
 
 def _copy_ocr_raw_text_to_workspace(workspace_dir: str, raw_text_path: str) -> dict[str, Any]:
@@ -93,34 +76,6 @@ def _copy_ocr_raw_text_to_workspace(workspace_dir: str, raw_text_path: str) -> d
             "OCR 原始展开文本已转存到工作区相对路径，应分段读取。"
         ),
     }
-
-
-async def tts_persona_guard(text: str, *, purpose: str = "tts") -> tuple[bool, str]:
-    persona = _current_persona_for_tts.get("")
-    user_message = _current_user_message_for_tts.get("")
-    if not (text or "").strip():
-        return True, "empty tts text"
-    try:
-        from app.llm.client import chat_json
-        from app.llm import aux_prompts as _aux
-        msgs = [
-            {"role": "system", "content": _aux.TTS_PERSONA_GUARD_SYSTEM},
-            {"role": "user", "content": _aux.TTS_PERSONA_GUARD_USER_TEMPLATE.format(
-                persona=persona or "(none)",
-                user_message=user_message or "(empty)",
-                purpose=purpose,
-                text=(text or "")[:500],
-            )},
-        ]
-        raw = await chat_json(
-            msgs,
-            lite=True,
-            reasoning="disabled",
-            metrics_tag="json.tts_persona_guard",
-        )
-        return bool(raw.get("allow", True)), str(raw.get("reason", ""))[:200]
-    except Exception as e:
-        return True, f"guard_error: {e}"
 
 
 def set_current_voice_instruct(instruct: str):
@@ -165,11 +120,120 @@ from app.memory import kb as kb_mem
 from app.memory import group_files as gf_mem
 from app.core import debug
 from app.core.permissions import check_tool_permission, sync_tool_permissions_from_meta
+from app.core.source_attribution import (
+    current_user_source_match,
+    current_user_source_relation,
+)
 from app.llm.tools.result_budget import apply_result_budget
 from app.llm.tools.tool_meta import ToolMeta, schemas_for_main_thread, tool_meta, validate_aliases
 
 
 log = logging.getLogger(__name__)
+
+
+_EXTERNAL_TTS_ENGINE_RE = re.compile(
+    r"(?i)(?:\bgtts\b|edge[-_ ]?tts|pyttsx3|sapi\.spvoice|spvoice|"
+    r"speechsynthesizer|speechsynthesis|system\.speech\.synthesis|"
+    r"espeak|festival|pico2wave|browser\s+speech|web\s+speech\s+api)"
+)
+_TTS_AUDIO_OUTPUT_RE = re.compile(
+    r"(?i)(?:\b(?:speech|spoken|narration|voice\s*file|voice\s*reply|tts)\b|"
+    r"voice_reply|final\s+voice|语音|人声|朗读|配音)"
+)
+_DIRECT_SCRIPT_RE = re.compile(r"(?<![\w./\\-])([\w./\\-]+\.(?:py|js|ts|mjs|cjs|ps1))\b")
+_external_tts_runtime_guard: dict[tuple[str, str, str], dict[str, Any]] = {}
+_EXTERNAL_TTS_GUARD_TTL_SEC = 600.0
+
+
+def _reset_external_tts_runtime_guard_for_tests() -> None:
+    _external_tts_runtime_guard.clear()
+
+
+def _external_tts_runtime_guard_key(workspace_dir: str) -> tuple[str, str, str]:
+    try:
+        from app.core.core_processes import current_owner
+        owner = current_owner() or "unknown"
+    except Exception:
+        owner = "unknown"
+    try:
+        ws_key = os.path.abspath(workspace_dir or "")
+    except Exception:
+        ws_key = str(workspace_dir or "")
+    return (owner, ws_key, "external_tts_engine")
+
+
+def _read_direct_command_script_for_tts_scan(workspace_dir: str, command: str) -> str:
+    low = (command or "").lower()
+    if " -m " in low or "pytest" in low or "unittest" in low:
+        return ""
+    if not re.search(r"(?i)^\s*(?:python|py|node|powershell|pwsh)\b", command or ""):
+        return ""
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for match in _DIRECT_SCRIPT_RE.finditer(command or ""):
+        rel = match.group(1).strip("'\"")
+        if not rel or rel in seen:
+            continue
+        seen.add(rel)
+        try:
+            path = ws_tool._safe_resolve(workspace_dir, rel)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                chunks.append(f.read(20000))
+        except Exception:
+            continue
+    return "\n".join(chunks)
+
+
+def _external_tts_attempt_fact(workspace_dir: str, command: str) -> dict[str, Any] | None:
+    command_text = str(command or "")
+    scan_text = command_text
+    script_text = _read_direct_command_script_for_tts_scan(workspace_dir, command_text)
+    if script_text:
+        scan_text += "\n" + script_text
+    if not _EXTERNAL_TTS_ENGINE_RE.search(scan_text):
+        return None
+    if not (_TTS_AUDIO_OUTPUT_RE.search(scan_text) or re.search(r"(?i)\bpip\s+install\b", command_text)):
+        return None
+    engines = sorted({m.group(0) for m in _EXTERNAL_TTS_ENGINE_RE.finditer(scan_text)})[:6]
+    return {
+        "engines": engines,
+        "script_scanned": bool(script_text),
+        "command_preview": command_text[:240],
+    }
+
+
+def _maybe_block_external_tts_attempt(workspace_dir: str, command: str) -> dict[str, Any] | None:
+    fact = _external_tts_attempt_fact(workspace_dir, command)
+    if fact is None:
+        return None
+    key = _external_tts_runtime_guard_key(workspace_dir)
+    now = time.time()
+    state = _external_tts_runtime_guard.get(key) or {}
+    if state and now - float(state.get("at") or 0.0) > _EXTERNAL_TTS_GUARD_TTL_SEC:
+        state = {}
+    if state.get("allow_next"):
+        _external_tts_runtime_guard.pop(key, None)
+        return None
+    _external_tts_runtime_guard[key] = {"allow_next": True, "at": now}
+    return {
+        "ok": False,
+        "blocked_reason": "external_tts_engine_requires_system_tts_tool",
+        "retry_allowed_on_next_attempt": True,
+        "suggested_helper_kind": "tts",
+        "suggested_tool": "tts",
+        "guard_scope": "transient_runtime_warning",
+        "fact": (
+            "This command appears to use an external TTS engine to synthesize user-facing or persona speech/voice. "
+            "Use the built-in/system `tts` tool for user-facing speech, narration, persona voice, or TTS-file generation. Code helpers may debug "
+            "project TTS code, but they must not install or call external TTS engines to produce the requested final "
+            "speech/voice output. Non-speech audio such as white noise, tones, beeps, music/signal synthesis, waveform processing, or audio analysis remains code/signal work."
+        ),
+        "observed_external_tts_engines": fact.get("engines", []),
+        "script_scanned": bool(fact.get("script_scanned")),
+        "command_preview": fact.get("command_preview", ""),
+    }
 
 
 # ── 拒绝主线程实现型别名 ────────────────────────────────────────
@@ -245,7 +309,7 @@ def _main_thread_resource_delegate_required(name: str) -> str:
             "suggested_helper_kind": helper_kind,
             "resource_boundary_fact": (
                 f"Fact: tool `{name}` is not directly available to the main thread. "
-                f"The matching helper resource kind is `{helper_kind}`. The main process may delegate, reuse "
+                f"The matching background resource kind is `{helper_kind}`. The main process may delegate, reuse "
                 "an existing resource result, answer from existing evidence, or explain why no resource is needed."
             ),
             "recovery_facts": {
@@ -253,9 +317,9 @@ def _main_thread_resource_delegate_required(name: str) -> str:
                 "main_thread_direct_call_allowed": False,
             },
             "hint": (
-                f"The main thread attempted to use `{name}` directly. Resource tools are helper-owned here so "
+                f"The main thread attempted to use `{name}` directly. Resource tools are scheduled through background producers so "
                 "resource scheduling, persona/resource guards, and output copyback remain consistent. Decide from "
-                "the active task whether to delegate a `{helper_kind}` helper, reuse existing evidence, or finish "
+                "the active task whether to delegate a `{helper_kind}` producer, reuse existing evidence, or finish "
                 "without this resource.\n"
                 "事实：主进程不能直接调用该资源工具；可根据任务决定派发对应 helper、复用已有证据或说明无需资源。"
             ),
@@ -679,6 +743,7 @@ async def dispatch(
     archive_id: str,
     group_id: str,
     user_id: str,
+    user_name: str = "",
     workspace_dir: str = "",
     permission_level: str | None = None,
     caller: str = "main",
@@ -845,9 +910,16 @@ async def dispatch(
             elif name == "mark_avoid_mention":
                 result = await _handle_mark_avoid(archive_id, group_id, user_id, args)
             elif name == "search_files":
-                result = await _handle_search_files(archive_id, group_id, workspace_dir, args)
+                result = await _handle_search_files(
+                    archive_id,
+                    group_id,
+                    workspace_dir,
+                    args,
+                    current_user_id=user_id,
+                    current_user_name=user_name,
+                )
             elif name in {"fetch_indexed_file", "fetch_group_file"}:
-                result = await _handle_fetch_group_file(archive_id, group_id, workspace_dir, args)
+                result = await _handle_fetch_group_file(archive_id, group_id, user_id, user_name, workspace_dir, args)
             elif name == "read_file":
                 result = await _handle_read_file(workspace_dir, args, caller_kind=caller_kind)
             elif name == "edit_file":
@@ -989,6 +1061,9 @@ async def _handle_bash(workspace_dir: str, args: dict) -> str:
     # 改到 90s 是中间值,既给查询命令留余地(2-90s 都正常返回),
     # 又对 benchmark 类强行迫使 helper 显式传更长值(若它只想用默认)。
     timeout_sec = int(args.get("timeout_sec", 90) or 90)
+    warning = _maybe_block_external_tts_attempt(workspace_dir, command)
+    if warning is not None:
+        return json.dumps(warning, ensure_ascii=False)
 
     # 直接调 handle_run(不经 _handle_workspace)— 拿当前 dispatch 的 abort_event
     # 让 ctrl-c / 用户 abort 能中途打断长 bash 跑。
@@ -1479,10 +1554,10 @@ def _main_thread_project_write_warning(helper_kind: str, path: str, content: str
     )
     helper_output_path = _helper_writable_artifact_path(norm_path)
     prompt_goal = (
-        f"Create or update only {helper_output_path!r} as a helper-owned staged document/report framework contract."
+        f"Create or update only {helper_output_path!r} as a producer-owned staged document/report framework contract."
         if suggested_kind == "edit"
         else (
-            f"Create or update only {helper_output_path!r} as a helper-owned staged output according to the shared "
+            f"Create or update only {helper_output_path!r} as a producer-owned staged output according to the shared "
             "framework. Keep the scope to this artifact and report whether it is an internal handoff or should later "
             "be applied as a project file."
         )
@@ -1500,10 +1575,10 @@ def _main_thread_project_write_warning(helper_kind: str, path: str, content: str
         "content_lines": content_text.count("\n") + (1 if content_text else 0),
         "hint": (
             "The main thread coordinates project source, framework contracts, shared interfaces, "
-            "scaffolds, benchmark harnesses, and implementation files by keeping artifact authorship helper-owned. "
-            "No file was written. The attempted path, content size, likely helper kind, and helper-owned output path "
+            "scaffolds, benchmark harnesses, and implementation files by keeping artifact authorship producer-owned. "
+            "No file was written. The attempted path, content size, likely producer kind, and producer-owned output path "
             "are reported as facts so the model can decide whether to delegate, write a much smaller coordination note, "
-            "or explain why no project artifact is needed. A helper request envelope usually includes `task_id`, "
+            "or explain why no project artifact is needed. A delegation request envelope usually includes `task_id`, "
             "`kind`, `mode`, `framework`, `input_files`, `prompt`, `expected_outputs`, and `acceptance_checks`.\n"
             "事实：本次未写入项目源码、共享接口、框架契约或脚手架；返回路径、大小和可恢复事实，由模型决定派发、缩小写入或说明无需产物。"
         ),
@@ -1542,17 +1617,17 @@ def _main_thread_large_write_guard(helper_kind: str, path: str, content: str) ->
         "content_chars": char_count,
         "content_lines": line_count,
         "hint": (
-            "The main process attempted a large opaque workspace.write. Large authored files should be helper-owned "
+            "The main process attempted a large opaque workspace.write. Large authored files should be producer-owned "
             "so the main context stays focused on planning, evidence, diff/apply, and acceptance. No file was written. "
             "The tool loop will replace the attempted long `content` argument with an omission marker after this result, "
             "so the main context keeps the path and size facts instead of the full body. The model can decide whether "
-            "to delegate a focused helper, retry with a much smaller section or skeleton, or use focused edit tools on "
+            "to delegate a focused producer, retry with a much smaller section or skeleton, or use focused edit tools on "
             "already-small local regions.\n\n"
             "主进程长写已拦截且不落盘；工具循环会把长 content 回写成省略标记，保留路径、大小和可恢复事实。"
         ),
         "available_recovery_shapes": {
             "options": [
-                "delegate a focused helper with expected_outputs and acceptance_checks",
+                "delegate a focused producer with expected_outputs and acceptance_checks",
                 "write only a compact skeleton or short section in this tool",
                 "use focused edit_file/multi_edit/insert_in_file on already-small local regions",
             ],
@@ -1593,7 +1668,7 @@ def _main_thread_workspace_run_guard(helper_kind: str, command: str) -> dict[str
         "blocked_command": command_text[:500],
         "hint": (
             "The main process workspace.run is limited to lightweight file-management commands. "
-            "Computation, scripts, tests, builds, benchmarks, and project services should be run by a focused helper, "
+            "Computation, scripts, tests, builds, benchmarks, and project services should be run by a focused background producer, "
             "then the main process can inspect concise results and final artifacts. No command was run.\n\n"
             "事实：主进程 workspace.run 未执行该命令；脚本、测试、构建、计算和服务运行通常由 helper 承担。"
         ),
@@ -1724,7 +1799,7 @@ def _main_thread_project_run_warning(
         "timeout_sec": timeout_sec,
         "hint": (
             "The main process coordinates substantial benchmark, performance, stress, profiling, and long "
-            "project workloads through helpers. The current facts are: no command was run, the blocked "
+            "project workloads through background producers. The current facts are: no command was run, the blocked "
             "command/script list is returned here, and the main process remains responsible for collecting "
             "concise results, inspecting produced CSV/JSON/stdout/artifacts, and running only bounded final "
             "verification when needed.\n"
@@ -1836,7 +1911,7 @@ def _helper_monolithic_project_write_warning(helper_kind: str, path: str, conten
             "This project source/script write is too large for one opaque workspace.write call. "
             "The current facts are: target path, character count, and line count are returned here; no file "
             "was written. The same task can still author this file through smaller source units, focused "
-            "workspace edits, or split files declared in the helper contract, then verify after assembly.\n"
+            "workspace edits, or split files declared in the producer contract, then verify after assembly.\n"
             "事实：源码/脚本单次写入过大且未落盘；返回路径与大小，由模型决定骨架、分段编辑、拆文件和验证方式。"
         ),
         "recovery_facts": {
@@ -1847,8 +1922,8 @@ def _helper_monolithic_project_write_warning(helper_kind: str, path: str, conten
                 "focused edit_file/multi_edit/insert_in_file steps",
                 "smaller project files listed in expected_outputs",
             ],
-            "workspace_io_fact": "workspace file tools operate on helper workspace files; isolated python execution is not a workspace file IO substitute",
-            "acceptance_fact": "run the helper contract acceptance checks after assembly",
+            "workspace_io_fact": "workspace file tools operate on transient workspace files; isolated python execution is not a workspace file IO substitute",
+            "acceptance_fact": "run the producer contract acceptance checks after assembly",
         },
     }
 
@@ -1987,7 +2062,7 @@ async def _handle_workspace(workspace_dir: str, args: dict, *, caller_kind: str 
                     "ok": False,
                     "error": (
                         "inventory helper temporary files belong under `_scratch/` or `scratch/`. "
-                        "Project files, shared inputs, and deliverables belong to the matching helper contract.\n"
+                        "Project files, shared inputs, and deliverables belong to the matching producer contract.\n"
                         "inventory helper 的临时文件应写在 `_scratch/` 或 `scratch/`。"
                     ),
                     "blocked_reason": "inventory_helper_workspace_path_forbidden",
@@ -2001,7 +2076,7 @@ async def _handle_workspace(workspace_dir: str, args: dict, *, caller_kind: str 
                         "ok": False,
                         "error": (
                             "inventory helper may only write temporary text/data/script files. "
-                            "Use the matching helper kind for Office, media, images, archives, binaries, or deliverables.\n"
+                            "Use the matching producer kind for Office, media, images, archives, binaries, or deliverables.\n"
                             "inventory helper 只能写临时文本、数据或脚本文件。"
                         ),
                         "blocked_reason": "inventory_helper_workspace_path_forbidden",
@@ -2071,6 +2146,9 @@ async def _handle_workspace(workspace_dir: str, args: dict, *, caller_kind: str 
         warning = _main_thread_workspace_run_guard(helper_kind, command)
         if warning is not None:
             return json.dumps(warning, ensure_ascii=False)
+        warning = _maybe_block_external_tts_attempt(workspace_dir, command)
+        if warning is not None:
+            return json.dumps(warning, ensure_ascii=False)
         # ── abort_event: 从 ContextVar 读取(Phase 5++ — 中途 abort 修)──
         # 主线程: 共享 group abort;helper: local abort(已包含 shared 桥接)
         from app.core.core_processes import current_abort_event
@@ -2104,10 +2182,10 @@ async def _handle_workspace(workspace_dir: str, args: dict, *, caller_kind: str 
                 result["project_search_performed"] = False
                 result["project_search_tools"] = ["env_list_tree", "env_search", "env_inventory", "env_read"]
                 result["environment_workspace_scope_fact"] = (
-                    "Fact: workspace(action='locate') searches the chat/helper workspace, not the real environment "
+                    "Fact: workspace(action='locate') searches the transient chat workspace, not the real environment "
                     "project root. For project source/test/config files, use env_list_tree, env_search, env_inventory, "
                     "or env_read facts. An empty workspace locate result is not evidence that a project file is absent."
-                    "\n\n事实：workspace.locate 查的是聊天/helper 工作区，不是真实项目根；项目源码/测试路径以 env_* 工具事实为准。"
+                    "\n\n事实：workspace.locate 查的是临时聊天工作区，不是真实项目根；项目源码/测试路径以 env_* 工具事实为准。"
                 )
         except Exception:
             pass
@@ -2174,7 +2252,7 @@ async def _handle_read_file(workspace_dir: str, args: dict, *, caller_kind: str 
                         "bytes": size,
                         "fact": (
                             "The main process attempted an unbounded read of a large workspace file. "
-                            "Large-file understanding is helper-suitable; search/code_index/inspect can provide "
+                            "Large-file understanding is background-producer-suitable; search/code_index/inspect can provide "
                             "targeting evidence if the main process later needs a narrow acceptance check. This "
                             "protects main-process context and attention."
                         ),
@@ -2182,7 +2260,7 @@ async def _handle_read_file(workspace_dir: str, args: dict, *, caller_kind: str 
                             "主进程尝试无边界读取大文件；优先委派 helper，或先用搜索/索引/检查定位后只做窄范围核查。"
                         ),
                         "available_followups": {
-                            "helper_route": "delegate a read/code/file_summary helper with concrete acceptance checks",
+                            "helper_route": "delegate a read/code/file_summary producer with concrete acceptance checks",
                             "targeting_evidence_tools": ["search_in_file", "search_across_files", "code_index", "inspect_file"],
                             "main_read_boundary": "small files and already-located acceptance evidence only",
                         },
@@ -2217,7 +2295,7 @@ async def _handle_read_file(workspace_dir: str, args: dict, *, caller_kind: str 
             )
     if is_main_thread_read and isinstance(result, dict) and result.get("truncated"):
         result["main_thread_read_fact"] = (
-            "Main-process read output used the smaller coordinator budget. Broad reading is helper-suitable; "
+            "Main-process read output used the smaller coordinator budget. Broad reading is background-producer-suitable; "
             "main-process reads are for small files and already-located verification evidence."
         )
         result["主进程读取事实"] = "主进程读取预算更小；全量阅读优先委派 helper，主进程只做定位后的窄范围核查。"
@@ -2761,10 +2839,10 @@ def _tool_out_summary(name: str, result: str) -> str:
                     task_id = r.get("task_id") or r.get("killed_task_id") or "?"
                     proc_id = r.get("killed_proc_id") or "?"
                     mode = r.get("mode") or r.get("kill_mode") or "killed"
-                    return f"ok: killed helper {task_id} ({proc_id}, {mode})"
+                    return f"ok: killed background task {task_id} ({proc_id}, {mode})"
                 if action == "spawn_async":
                     spawned = r.get("spawned") or []
-                    return f"ok: spawned {len(spawned)} helper(s) in background"
+                    return f"ok: spawned {len(spawned)} background task(s)"
                 if action == "poll":
                     polled = r.get("polled") or []
                     counts = {}
@@ -2774,8 +2852,8 @@ def _tool_out_summary(name: str, result: str) -> str:
                             counts[status] = counts.get(status, 0) + 1
                     if counts:
                         bits = ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))
-                        return f"ok: poll {len(polled)} helper(s) ({bits})"
-                    return f"ok: poll {len(polled)} helper(s)"
+                        return f"ok: poll {len(polled)} background task(s) ({bits})"
+                    return f"ok: poll {len(polled)} background task(s)"
                 if action == "collect":
                     requested = r.get("helpers_requested", 0)
                     returned = r.get("helpers_completed", 0)
@@ -2789,13 +2867,13 @@ def _tool_out_summary(name: str, result: str) -> str:
                     if unavailable:
                         suffix.append(f"{unavailable} unavailable")
                     extra = f" ({', '.join(suffix)})" if suffix else ""
-                    return f"ok: collect {returned}/{requested} helper result(s) returned{extra}"
+                    return f"ok: collect {returned}/{requested} background result(s) returned{extra}"
                 if action == "wait_any":
                     winner = r.get("winner_task_id")
                     if winner:
                         return f"ok: wait_any winner={winner}"
                     polled = r.get("polled") or []
-                    return f"ok: wait_any timeout; polled {len(polled)} helper(s)"
+                    return f"ok: wait_any timeout; polled {len(polled)} background task(s)"
                 if action == "status":
                     summary = r.get("summary") or {}
                     running = summary.get("running", 0)
@@ -3084,15 +3162,37 @@ async def _handle_mark_avoid(
     }, ensure_ascii=False)
 
 
-async def _handle_fetch_group_file(archive_id: str, group_id: str, workspace_dir: str, args: dict) -> str:
+async def _handle_fetch_group_file(
+    archive_id: str,
+    group_id: str,
+    user_id: str,
+    user_name: str,
+    workspace_dir: str,
+    args: dict,
+) -> str:
     kb_node_id = str(args.get("kb_node_id", "")).strip()
     if not kb_node_id:
         return json.dumps({"ok": False, "error": "kb_node_id is required"}, ensure_ascii=False)
-    result = await gf_mem.fetch_group_file(kb_node_id, archive_id, group_id, workspace_dir)
+    result = await gf_mem.fetch_group_file(
+        kb_node_id,
+        archive_id,
+        group_id,
+        workspace_dir,
+        current_user_id=user_id,
+        current_user_name=user_name,
+    )
     return json.dumps(result, ensure_ascii=False)
 
 
-async def _handle_search_files(archive_id: str, group_id: str, workspace_dir: str, args: dict) -> str:
+async def _handle_search_files(
+    archive_id: str,
+    group_id: str,
+    workspace_dir: str,
+    args: dict,
+    *,
+    current_user_id: str = "",
+    current_user_name: str = "",
+) -> str:
     query = str(args.get("query", "")).strip()
     if not query:
         return json.dumps({"error": "query is required"})
@@ -3104,11 +3204,35 @@ async def _handle_search_files(archive_id: str, group_id: str, workspace_dir: st
     except RuntimeError as e:
         kb_error = str(e)
     for it in items:
+        node_id = str(it.get("kb_node_id") or it.get("id") or "").strip()
+        if node_id:
+            it.setdefault("kb_node_id", node_id)
         fname = it.get("filename", "")
         aid = it.get("archive_id", "")
         gid = it.get("group_id", "")
         if fname and aid and gid:
             it["url"] = f"/v1/chat/files/{aid}/{gid}/{fname}"
+        uploader_id = str(it.get("uploader_uin") or it.get("uploader_user_id") or "")
+        uploader_name = str(it.get("uploader_name") or "")
+        current_user_match = current_user_source_match(
+            current_user_id=current_user_id,
+            current_user_name=current_user_name,
+            uploader_id=uploader_id,
+            uploader_name=uploader_name,
+        )
+        relation = current_user_source_relation(current_user_match)
+        it.setdefault("uploader_id", uploader_id)
+        it.setdefault("current_user_match", current_user_match)
+        it.setdefault("current_user_relation", relation)
+        it.setdefault("source_attribution", {
+            "scope": "shared_group_file_index",
+            "kb_node_id": node_id,
+            "filename": fname,
+            "uploader_id": uploader_id,
+            "uploader_name": uploader_name,
+            "current_user_match": current_user_match,
+            "current_user_relation": relation,
+        })
 
     workspace_matches: list[dict] = []
     if workspace_dir:
@@ -3150,6 +3274,23 @@ async def _handle_search_files(archive_id: str, group_id: str, workspace_dir: st
         "workspace_count": len(workspace_matches),
         "total_count": len(items) + len(workspace_matches),
         "search_completed": True,
+        "selection_guidance": {
+            "decision_owner": (
+                "The model chooses the relevant source from the current request and returned facts; "
+                "search_files does not automatically select the newest file or a same-name file."
+            ),
+            "facts_to_compare": [
+                "Compare each item's content summary/headline, filename, kb_node_id, uploader, upload_time, and current_user_relation.",
+                "Recent same-speaker uploads are strong implicit candidates when the user says this file, the file just sent, or similar wording.",
+                "Older same-speaker files remain valid when wording, history, filename, or summary points back to them.",
+                "Other-user uploads can be current shared context when recent-message facts or the user's wording points to that upload.",
+                "When several items share a filename or nickname, keep them distinct by kb_node_id, uploader_id, upload_time, and summary.",
+            ],
+            "not_a_rule": (
+                "Recency and current_user_relation are attention facts, not hard prohibitions. "
+                "Do not forbid older files when the user's reference points to them."
+            ),
+        },
     }
     try:
         from app.core.runtime_mode import is_environment_mode
@@ -3158,11 +3299,11 @@ async def _handle_search_files(archive_id: str, group_id: str, workspace_dir: st
             payload["project_search_performed"] = False
             payload["project_search_tools"] = ["env_list_tree", "env_search", "env_inventory", "env_read"]
             payload["environment_search_scope_fact"] = (
-                "Fact: search_files searches chat file memory and the chat/helper workspace. It does not search the "
+                "Fact: search_files searches chat file memory and transient chat workspaces. It does not search the "
                 "real environment project root. For project source, data, verifier, or config files, use env_list_tree, "
                 "env_search, env_inventory, or env_read facts. Empty search_files/workspace_matches results are not "
                 "evidence that a project file is absent.\n\n"
-                "事实：search_files 查聊天文件记忆和聊天/helper 工作区，不查真实项目根；项目文件以 env_* 工具事实为准。"
+                "事实：search_files 查聊天文件记忆和临时聊天工作区，不查真实项目根；项目文件以 env_* 工具事实为准。"
             )
     except Exception:
         pass
@@ -3821,15 +3962,6 @@ async def _handle_tts(workspace_dir: str, args: dict, *, archive_id: str = "") -
     speed = float(speed_val) if speed_val is not None else None
     push = bool(args.get("push", False))
 
-    _guard_ok, _guard_reason = await tts_persona_guard(text, purpose="round2/tool tts")
-    debug.log("tool.tts.persona_guard", f"allow={_guard_ok} reason={_guard_reason}")
-    if not _guard_ok:
-        return json.dumps({
-            "ok": False,
-            "error": "persona_guard_refused_tts",
-            "reason": _guard_reason or "人设拒绝执行这次 TTS",
-        }, ensure_ascii=False)
-
     # 2026-05-16: 自动分配 workspace 内输出路径
     # 用 timestamp 防覆盖 + 让 LLM 看到稳定 filename 当 deliverable
     import time as _t
@@ -3952,17 +4084,18 @@ async def _handle_tts(workspace_dir: str, args: dict, *, archive_id: str = "") -
         "paths": final_paths,
         "durations": r.durations,
     }
+    if final_paths:
+        primary_path = final_paths[0]
+        result["voice_reply_file_candidate"] = primary_path
+        result["deliverable_candidate"] = primary_path
+        result["delivery_guidance"] = (
+            "If this generated speech is the final spoken reply for the current turn, set ResponsePlan.voice_reply_file "
+            "to voice_reply_file_candidate and leave it out of deliverables. If it is a user-facing audio attachment "
+            "instead, list deliverable_candidate in deliverables."
+        )
 
     if push:
-        result["push_supported"] = False
-        result["push_note"] = (
-            "push=true 当前未实现:文件已生成在 paths 列出的路径,但**不会自动发出**。"
-            "若希望让用户听到语音,有三种正确做法:"
-            "(1) 让你的最终回复保持口语化短句,自动语音决策器(decide_voice)会判定后合成并发送;"
-            "(2) 若这次生成的音频就是本轮最终回复,在 ResponsePlan 写 voice_reply_file 指向该 wav,不要写入 deliverables;"
-            "(3) 把生成的 .wav 路径写入 plan.deliverables,作为附件文件交付,用户可手动点开。"
-            "**不要**靠 push=true 让用户'听到'你刚生成的内容——它不会自动发。"
-        )
+        result["push_ignored"] = True
 
     return json.dumps(result, ensure_ascii=False)
 

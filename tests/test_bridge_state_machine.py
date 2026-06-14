@@ -137,6 +137,7 @@ def _reset_bridge_state(napcat_bridge):
     napcat_bridge._participate_cache.clear()
     napcat_bridge._chat_archive_cache.clear()
     napcat_bridge._botctl_sessions.clear()
+    napcat_bridge._RECENT_OBSERVED_MEDIA.clear()
 
 
 async def test_chat_and_reply_forwards_upstream_persona_progress_to_group():
@@ -278,6 +279,59 @@ async def test_send_generated_files_uses_done_payload_file_not_reply_text(tmp_pa
         f"{napcat_bridge.NAPCAT_URL}/upload_group_file",
         {"json": {"group_id": 123, "file": str(file_path), "name": "actual.pdf"}, "timeout": 60.0},
     )]
+
+
+async def test_send_generated_audio_file_uploads_as_file_unless_voice_reply(tmp_path):
+    import napcat_bridge
+
+    file_path = tmp_path / "artifact.wav"
+    file_path.write_bytes(b"RIFF....WAVE")
+    client = FakeClient()
+
+    await napcat_bridge._send_generated_files(
+        client,
+        "123",
+        [{
+            "name": "artifact.wav",
+            "url": "/v1/chat/files/a/g/artifact.wav",
+            "local_path": str(file_path),
+        }],
+        voice_reply_file="",
+    )
+
+    assert client.posts == [(
+        f"{napcat_bridge.NAPCAT_URL}/upload_group_file",
+        {"json": {"group_id": 123, "file": str(file_path), "name": "artifact.wav"}, "timeout": 60.0},
+    )]
+
+
+async def test_send_generated_voice_reply_uses_record_message(tmp_path, monkeypatch):
+    import napcat_bridge
+
+    file_path = tmp_path / "reply.wav"
+    file_path.write_bytes(b"RIFF....WAVE")
+    client = FakeClient()
+
+    async def fake_convert(_path):
+        return None
+
+    monkeypatch.setattr(napcat_bridge, "_convert_to_amr", fake_convert)
+
+    voice_sent = await napcat_bridge._send_generated_files(
+        client,
+        "123",
+        [{
+            "name": "reply.wav",
+            "url": "/v1/chat/files/a/g/reply.wav",
+            "local_path": str(file_path),
+        }],
+        voice_reply_file="reply.wav",
+    )
+
+    assert voice_sent is True
+    assert client.posts[0][0] == f"{napcat_bridge.NAPCAT_URL}/send_group_msg"
+    assert client.posts[0][1]["json"]["group_id"] == 123
+    assert "[CQ:record,file=file:///" in client.posts[0][1]["json"]["message"]
 
 
 async def test_chat_and_reply_captures_done_files_from_sse():
@@ -454,6 +508,107 @@ async def test_non_at_message_is_observed_and_schedules_file_sync(monkeypatch):
         "addressed_bot": False,
     }]
     assert scheduled == ["bridge.sync_files:g1"]
+
+
+async def test_recent_media_reference_is_scoped_by_group_and_user():
+    import napcat_bridge
+
+    _reset_bridge_state(napcat_bridge)
+    media = "[CQ:image,file=a.jpg,url=http://example.test/a.jpg]"
+    napcat_bridge._remember_observed_media("g1", "u1", media)
+
+    same_user = napcat_bridge._attach_recent_media_if_referenced("g1", "u1", "看上面的图")
+    other_user = napcat_bridge._attach_recent_media_if_referenced("g1", "u2", "看上面的图")
+    other_group = napcat_bridge._attach_recent_media_if_referenced("g2", "u1", "看上面的图")
+
+    assert same_user == f"{media}\n看上面的图"
+    assert other_user == "看上面的图"
+    assert other_group == "看上面的图"
+
+
+async def test_recent_image_reference_is_not_overwritten_by_other_media():
+    import napcat_bridge
+
+    _reset_bridge_state(napcat_bridge)
+    image = "[CQ:image,file=a.jpg,url=http://example.test/a.jpg]"
+    voice = "[CQ:record,file=v.amr,url=http://example.test/v.amr]"
+    napcat_bridge._remember_observed_media("g1", "u1", image)
+    napcat_bridge._remember_observed_media("g1", "u1", voice)
+
+    same_user = napcat_bridge._attach_recent_media_if_referenced("g1", "u1", "看上面的图")
+
+    assert same_user == f"{image}\n看上面的图"
+    assert voice not in same_user
+
+
+async def test_callback_recent_media_reference_scopes_implicit_image_by_user(monkeypatch):
+    import napcat_bridge
+
+    _reset_bridge_state(napcat_bridge)
+    client = FakeClient()
+    observed = []
+    chat_messages = []
+    scheduled = []
+
+    async def fake_check_participate(_client, _group_id):
+        return True, "archive1"
+
+    async def fake_download(_body, raw_message, _archive_id, _group_id, _user_id="", _user_name=""):
+        return raw_message
+
+    async def fake_observe(_client, archive_id, group_id, user_id, user_name, content, addressed_bot):
+        observed.append((archive_id, group_id, user_id, user_name, content, addressed_bot))
+
+    async def fake_sync(_group_id, _archive_id):
+        return None
+
+    async def fake_ensure_persona(_client, _archive_id):
+        return None
+
+    async def fake_chat_and_reply(_client, _archive_id, _group_id, user_id, _user_name, message, **_kwargs):
+        chat_messages.append((user_id, message))
+        return "ok", [], False, False, ""
+
+    def fake_schedule(coro, *, name=None):
+        scheduled.append(name)
+        coro.close()
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        fut.set_result(None)
+        return fut
+
+    monkeypatch.setattr(napcat_bridge, "get_http_client", lambda: client)
+    monkeypatch.setattr(napcat_bridge, "_check_participate", fake_check_participate)
+    monkeypatch.setattr(
+        napcat_bridge,
+        "_message_addressed_to_bot",
+        lambda body, _bot_qq="": "[CQ:at,qq=bot]" in body.get("raw_message", ""),
+    )
+    monkeypatch.setattr(napcat_bridge, "_download_incoming_media", fake_download)
+    monkeypatch.setattr(napcat_bridge, "_observe_message", fake_observe)
+    monkeypatch.setattr(napcat_bridge, "_sync_group_files_fire_and_forget", fake_sync)
+    monkeypatch.setattr(napcat_bridge, "_ensure_persona", fake_ensure_persona)
+    monkeypatch.setattr(napcat_bridge, "_chat_and_reply", fake_chat_and_reply)
+
+    import app.core.bg_tasks as bg_tasks
+    monkeypatch.setattr(bg_tasks, "schedule", fake_schedule)
+
+    image = "[CQ:image,file=a.jpg,url=http://example.test/a.jpg]"
+    first = await napcat_bridge.napcat_callback(
+        FakeRequest(_message(image, message_id="media-a", user_id="u1", group_id="123"))
+    )
+    second = await napcat_bridge.napcat_callback(
+        FakeRequest(_message("[CQ:at,qq=bot] 看上面的图", message_id="ask-b", user_id="u2", group_id="123"))
+    )
+    third = await napcat_bridge.napcat_callback(
+        FakeRequest(_message("[CQ:at,qq=bot] 看上面的图", message_id="ask-a", user_id="u1", group_id="123"))
+    )
+
+    assert _json_response(first) == {"status": "observed"}
+    assert _json_response(second) == {"status": "ok"}
+    assert _json_response(third) == {"status": "ok"}
+    assert chat_messages[0] == ("u2", "[CQ:at,qq=bot] 看上面的图")
+    assert chat_messages[1] == ("u1", f"{image}\n[CQ:at,qq=bot] 看上面的图")
 
 
 async def test_non_at_stop_message_aborts_when_same_user_busy(monkeypatch):

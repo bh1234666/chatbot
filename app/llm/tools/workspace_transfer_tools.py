@@ -5,6 +5,7 @@ import os
 
 from app.core import debug
 from app.llm.tools import workspace as ws_tool
+from app.llm.tools.workspace_utils import _derive_permanent_root
 
 
 def _compact_string_list(value: object, *, max_items: int = 20, max_chars_each: int = 260) -> list[str]:
@@ -66,6 +67,11 @@ def _infer_main_and_temp(workspace_dir: str) -> tuple[str, str, str] | None:
         return parent, norm, norm
     if base.startswith("_delegate_") and parent_base == ".temp":
         return os.path.dirname(parent), parent, norm
+    main_ws = _derive_permanent_root(norm)
+    if main_ws:
+        if base.startswith("_delegate_"):
+            return main_ws, parent, norm
+        return main_ws, norm, norm
     return None
 
 
@@ -280,8 +286,8 @@ async def handle_recall_thread(workspace_dir: str, args: dict) -> str:
             "contracts": status.get("contracts") or [],
             "verified_evidence_recent": status.get("verified_evidence_recent") or [],
             "artifacts_ready": status.get("artifacts_ready") or [],
-            "blocked_helpers": status.get("blocked_helpers") or [],
-            "ready_to_resume_helpers": status.get("ready_to_resume_helpers") or [],
+            "blocked_work": status.get("blocked_work") or [],
+            "ready_to_resume_work": status.get("ready_to_resume_work") or [],
         }
     except Exception:
         out["agent_state"] = {"note": "agent_state unavailable"}
@@ -290,9 +296,9 @@ async def handle_recall_thread(workspace_dir: str, args: dict) -> str:
         "After reading original_user_message, plan, and todos, ask yourself: "
         "(1) Is the current tool chain still moving toward the original request? "
         "(2) Is there an in_progress todo? Finish it before opening a new branch. "
-        "(3) Do ready artifacts and helper evidence satisfy the acceptance points and expected final deliverables, not merely exist? "
-        "(4) For long source materials, prefer helper coverage summaries and line ranges over loading full evidence into the main context. "
-        "(5) If helper stages are complete but a requested final artifact, final document, or verification report is absent, start the next assembly or verification stage. "
+            "(3) Do ready artifacts and background work evidence satisfy the acceptance points and expected final deliverables, not merely exist? "
+            "(4) For long source materials, prefer coverage summaries and line ranges over loading full evidence into the main context. "
+            "(5) If background work stages are complete but a requested final artifact, final document, or verification report is absent, start the next assembly or verification stage. "
         "(6) Only when the original request's acceptance points are satisfied should you produce the plan JSON and stop calling tools.\n\n"
         "先核对原始请求、计划、todo、契约、最终产物和验收覆盖；阶段完成不等于整体完成，长材料优先看摘要和分段范围。"
     )

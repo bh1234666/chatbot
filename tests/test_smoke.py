@@ -5,6 +5,8 @@
 - 三轮 messages 结构正确
 """
 import sys
+import time
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -168,7 +170,19 @@ def test_round1_messages_light_includes_candidate_signals_and_bot_log_facts():
     assert "candidate_" not in user_text
     assert "not decisions" in user_text
     assert "deliverables=[report.md]" in user_text
-    assert "helpers={done:[report_edit]}" in user_text
+    assert "work_status=done:1" in user_text
+    assert "processing_records" not in user_text
+    assert "report_edit" not in user_text
+    assert "background_work" not in user_text
+
+
+def test_audio_artifact_task_fact_text_stays_evidence_only():
+    path = os.path.join(os.path.dirname(__file__), "..", "app", "core", "orchestrator_entry.py")
+    text = open(path, encoding="utf-8").read()
+    assert "Treat this as evidence, not a route decision." in text
+    assert "built-in/system TTS route" in text
+    assert "non-speech audio" in text
+    assert "Choose the route by content:" not in text
 
 
 def test_round1_messages_light_frames_task_quality_reminder_as_possible_followup():
@@ -257,6 +271,108 @@ def test_round2_messages():
     assert "finish with one strict JSON plan" in all_text
     assert "Stay outside the conversation and finish with one strict JSON plan" in all_text
     print("[OK] round2 messages")
+
+
+def test_round2_recent_execution_records_are_sanitized_bot_log_briefs():
+    now = datetime.now(timezone.utc)
+    hot = [
+        HotMessage(role="user", content="查看网页", turn_id="t1", created_at=now),
+        HotMessage(
+            role="assistant",
+            content=(
+                "已处理"
+                "<bot_log>complexity=medium | intent=inspect page | "
+                "deliverables=[page_report.md] | helpers={done:[fetch_page]} | "
+                "helpers_still_running=0 | "
+                "note=read helper report from _helpers_shared/fetch/page.txt</bot_log>"
+            ),
+            turn_id="t1",
+            created_at=now,
+        ),
+    ]
+    base = ctx_build.build_base_context(
+        user_name="Alice",
+        current_message="刚才查了什么",
+        hot_user=hot,
+        hot_group=[],
+        warm_user_index=[],
+        warm_group_index=[],
+        cold_user_topk=[],
+        cold_group_topk=[],
+        kb_topk=[],
+    )
+    msgs = ctx_build.round2_messages(base, {"complexity": "normal", "rationale": "followup"})
+    user_text = "\n\n".join(m["content"] for m in msgs if m.get("role") == "user")
+
+    assert "Recent execution records" in user_text
+    assert "<bot_log_brief>" in user_text
+    assert "intent=inspect page" in user_text
+    assert "deliverables=[page_report.md]" in user_text
+    assert "work_status=done:1" in user_text
+    assert "fetch_page" not in user_text
+    assert "background_work" not in user_text
+    assert "work_status=running:0" in user_text
+    assert "processing_records" not in user_text
+    assert "helpers_still_running" not in user_text
+    assert "work unit" not in user_text.lower()
+    assert "producer evidence" not in user_text.lower()
+    assert "helper" not in user_text.lower()
+    assert "_helpers_shared" not in user_text
+
+
+def test_shared_files_keep_old_same_user_and_new_other_user_summaries_visible():
+    now_ts = time.time()
+    base = ctx_build.build_base_context(
+        user_name="Alice",
+        current_user_id="u1",
+        current_message="看一下这个文件",
+        hot_user=[],
+        hot_group=[],
+        warm_user_index=[],
+        warm_group_index=[],
+        cold_user_topk=[],
+        cold_group_topk=[],
+        kb_topk=[],
+        file_index=[
+            {
+                "id": "old_same",
+                "filename": "old_homework.docx",
+                "headline": "Alice earlier homework file",
+                "content": "旧文件摘要：包含第六章作业题目和配图要求。",
+                "uploader_user_id": "u1",
+                "uploader_name": "Alice",
+                "upload_time": now_ts - 7200,
+                "file_size": 2048,
+                "download_status": "done",
+                "eff_salience": 0.9,
+            },
+            {
+                "id": "new_other",
+                "filename": "fresh_reference.pdf",
+                "headline": "Bob fresh reference file",
+                "content": "新文件摘要：包含刚上传的参考资料和页码。",
+                "uploader_user_id": "u2",
+                "uploader_name": "Bob",
+                "upload_time": now_ts - 30,
+                "file_size": 4096,
+                "download_status": "done",
+                "eff_salience": 0.1,
+            },
+        ],
+    )
+    system_text = base[0]["content"]
+
+    assert "Recent uploads are source candidates" in system_text
+    assert "older same-speaker files remain valid historical candidates" in system_text
+    assert "Newer uploads from other users may be the active shared context" in system_text
+    assert "not automatic current-user source material by default" in system_text
+    assert "禁止" not in system_text
+    assert "[old_same]" in system_text
+    assert "relation same-speaker" in system_text
+    assert "summary: 旧文件摘要：包含第六章作业题目和配图要求。" in system_text
+    assert "[new_other] recent other-user" in system_text
+    assert "relation other-user" in system_text
+    assert "summary: 新文件摘要：包含刚上传的参考资料和页码。" in system_text
 
 
 def test_round2_messages_strips_static_context_when_recall_not_needed():
@@ -496,16 +612,17 @@ def test_round3_visual_internal_terms_prompt_has_exceptions():
         ],
     )
     sys_text = msgs[0]["content"]
-    assert "Internal terms such as OCR, TTS, helper" in sys_text
+    assert "Internal terms such as OCR, TTS, routing labels" in sys_text
     assert "ordinary delivery" in sys_text
     assert "Concept questions are answered as concepts" in sys_text
-    assert "Explain internal process details only when the user asks about tools, logs, scheduling, or concept definitions" in sys_text
+    assert "prefer generic workflow wording" in sys_text
+    assert "do not name helper/delegate routing labels" in sys_text
     assert "only the answer, no explanation, no expansion, or a short reply" in sys_text
     assert "PASS/FAIL and success/failure labels should follow the source evidence" in sys_text
     assert "Rewrite internal paths or tool errors into user-understandable file/material status" in sys_text
     assert "Round3 只基于计划和工具证据表达事实" in sys_text
     user_text = "\n".join(m["content"] for m in msgs if m["role"] == "user")
-    assert "Real helper/tool evidence for this reply" in user_text
+    assert "Real work/tool evidence for this reply" in user_text
     assert "缺失细节按未知表达" in user_text
     assert "With partial evidence, state the uncertainty or need for further inspection" in sys_text
     assert "永远别说" not in sys_text

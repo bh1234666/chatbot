@@ -2,8 +2,8 @@
 
 These short auxiliary prompts drive lightweight LLM calls inside the LLM and
 tool layer: a generic prose-to-JSON converter, the task-quality guard that
-reviews delegated helper tasks, the resource-helper dispatch prompt, the TTS
-persona guard, and the voice-vs-text delivery classifier. They previously lived
+reviews delegated helper tasks, the resource-helper dispatch prompt, and the
+voice-vs-text delivery classifier. They previously lived
 inline in their call sites; centralizing them keeps every model-visible prompt
 in a reviewable catalog.
 
@@ -33,42 +33,51 @@ JSON_CONVERTER_USER_TEMPLATE = (
 )
 
 
-# ── Persona guard for TTS / voice output ──────────────────────────
-TTS_PERSONA_GUARD_SYSTEM = (
-    "You are a persona guard. Decide whether the AI character permits this TTS or voice output. "
-    "Any TTS may eventually be heard by the user, so judge persona permission only. "
-    "Resource availability, delivery mechanics, and text quality are handled elsewhere. Allow the output when the persona has no explicit refusal. Output strict JSON only.\n\n"
-    "人设守卫只判断角色是否硬性拒绝本次语音输出。"
-)
-
-TTS_PERSONA_GUARD_USER_TEMPLATE = (
-    "# Persona\n{persona}\n\n"
-    "# User message\n{user_message}\n\n"
-    "# TTS purpose\n{purpose}\n\n"
-    "# Candidate text\n{text}\n\n"
-    'Output format: {{"allow": true, "reason": "<=80 Chinese characters"}}\n\n'
-    "根据人设判断是否允许本次语音输出。"
-)
-
-
 # ── Voice-vs-text delivery classifier ─────────────────────────────
 VOICE_DELIVERY_CLASSIFIER_SYSTEM = (
-    "You are a voice-vs-text delivery classifier. Decide only whether the final round3 reply should be sent "
-    "through the active voice output layer. Generating an audio/TTS file is a separate round2 artifact task, not this delivery decision. "
+    "You are a voice-vs-text delivery router. Decide only whether the final round3 reply should be sent "
+    "through the active voice output layer. This routing result is a delivery authorization: if it is later confirmed "
+    "against the final reply, text may be hidden and replaced by a voice message. Generating an audio/TTS file is a separate round2 artifact task, not this delivery decision. "
+    "Use the user request, persona voice preference, expected listening comfort, route-time shared facts, and route-start previews. "
+    "The canonical text candidate is the final reply content shape that will be reviewed and, if authorized, synthesized as voice; the voice candidate is only a non-canonical style probe. "
+    "Your answer should roughly predict the final delivery result after the actual reply is reviewed; do not pick a side that the shown plan/previews make likely to be reversed. "
+    "Read predicted_output_envelope, content_unit_count, request_visibility_evidence, information_boundary, and delivery_visibility_evidence. "
+    "If request_visibility_evidence or delivery_visibility_evidence says the expected reply is task/result oriented, structured, revisitable, or readability-sensitive, choose text unless the current request explicitly asks for voice. "
+    "Route from the same facts round3 will use: the plan key points are likely to be expressed in the final reply, even when the length hint says short. "
+    "Candidate previews are optional route-start observations, never wait requirements; use them when present because the canonical text candidate can be stronger evidence of the final output shape than the plan's length hint. "
+    "When the canonical text preview is marked final/done, treat it as the actual final output shape; when partial, combine it with the plan key points and information_boundary. "
+    "Use the non-canonical voice preview only for style/listening-comfort evidence; never let a shorter voice probe override a denser canonical text candidate or required plan facts. "
+    "Missing preview means no text was available yet, not a delivery instruction. Several facts, corrections, options, filenames, or status details imply multi-sentence/structured reply. "
+    "Treat persona voice preference as a stable character setting and a continuous strength signal, not a hard threshold. "
+    "For persona voice preference below 0.20, choose text unless the current user explicitly asks for a voice reply; neutral greetings, identity answers, thanks, acknowledgements, and ordinary short chat are not enough support by themselves. "
+    "For persona voice preference 0.80 or above, strongly favor voice for short conversational replies and non-task chat statuses, unless the current user explicitly asks for text or the expected reply is a task outcome, blocker, inspected-material status, too long, dense, structured, copyable, or revisitable. "
+    "A low persona voice preference is real evidence against voice delivery. Do not let shortness or conversational comfort alone overcome it; a neutral greeting, thanks, or acknowledgement is not by itself clear support for voice when preference is low. "
+    "Voice delivery for a low-preference persona needs concrete positive support such as an explicit current voice-reply request, an active voice-first interaction, recent user acceptance of voice in the same conversation, or strong persona evidence that this exact short turn should be spoken. "
+    "Persona context and recent context are evidence for character fit and turn continuity; recent context only matters when current-turn relevant, so do not carry old delivery mode, old artifacts, or unrelated historical voice use forward as a current voice request. "
+    "Do not turn numeric ranges into local delivery rules. Infer explicit voice/text/audio-artifact wording directly from the user message. "
+    "Readable, copyable, inspectable, or revisitable replies prefer text. Long reports, code, tables, many bullets, URLs, and artifact/status details are usually poor voice-only content. "
+    "When the active request asks to inspect, browse, open, read, check, verify, analyze, or debug a webpage, file, image, document, project, log, or generated artifact, treat it as a task/result request whose reply commonly carries evidence, blocker status, or status the user may need to read or revisit. Predict text unless the current user explicitly asks for voice. "
+    "Requests to generate audio files are artifact tasks handled outside this final delivery decision. "
+    "When uncertain, choose the mode matching the active request and listening comfort. "
     "Output exactly one word: `voice` or `text`, with no explanation.\n\n"
-    "只判断最终回复走语音还是文字。"
+    "短口语适合语音；网页/文件查看结果、长报告、代码、表格适合文字。只判断最终回复走语音还是文字。"
 )
 
 VOICE_DELIVERY_CLASSIFIER_USER_TEMPLATE = (
     "plan intent: {plan_intent}\n"
     "plan length hint: {plan_length}\n"
+    "plan tone: {plan_tone}\n"
+    "plan key points likely to appear in final reply:\n{plan_key_points}\n"
+    "plan avoid list:\n{plan_avoid}\n"
+    "plan user-facing deliverables:\n{plan_deliverables}\n"
+    "projected final reply shape from the same plan round3 will follow: {projected_reply_shape}\n"
+    "shared output-shape facts for this route decision: {projected_reply_shape_facts}\n"
+    "route-start candidate output previews, if any were already available without waiting:\n{candidate_output_previews}\n"
+    "current user-facing file delivery: {delivery_state}\n"
+    "persona context: {persona_context}\n"
+    "recent context:\n{recent_context}\n"
     "user message: {user_message}\n"
     "persona voice preference: {voice_preference:.2f} ({preference_hint})\n\n"
-    "Decision factors: user request, persona voice preference, and whether the content is comfortable to hear. "
-    "Short conversational replies lean voice. Long reports, code, tables, many bullets, and URLs lean text. "
-    "Requests to generate audio files lean text here because round2 handles the artifact. "
-    "When uncertain, follow persona voice preference.\n\n"
-    "短口语适合语音，长报告/代码/表格适合文字。\n"
     "Output:"
 )
 
@@ -108,7 +117,7 @@ _TQG_KIND_MATRIX = (
     "- read: source-material reading, classification, labeling, triage, transcription, and evidence extraction from user materials, prepared archive contents, images, PDFs, Office files, screenshots, forms, and scanned or visual content; writes internal `.txt` evidence, not project-visible `_env/...` outputs.\n"
     "- edit: user-facing document/file assembly, including Office/docx/pptx/xlsx/pdf, polished reports, standalone prose deliverables, final written artifacts assembled from verified inputs, and prose-only research sections such as algorithm analysis, theoretical comparison tables in Markdown, literature-style explanations, or new-algorithm design text when no runnable code or generated data is required.\n"
     "- draw: generate or repair PNG/chart images from existing data; reading or judging an existing image is not draw.\n"
-    "- tts: generate audio files or narration artifacts.\n"
+    "- tts: generate speech, narration, and system-managed user-facing/persona voice files through the built-in TTS route; non-speech audio such as white noise, tones, music/signal synthesis, audio processing, or waveform analysis belongs to code/signal work.\n"
     "- verify: read-only review of existing code, images, documents, or helper artifacts.\n"
     "- inventory: environment-only first-pass project inventory: directory shape, file types, README/entry/config/test hints, lightweight statistics, and unread source-material groups.\n"
     "- project_map: read-only project structure and architecture mapping from real files.\n"
@@ -129,7 +138,9 @@ _TQG_KIND_PRINCIPLES = (
     "- Checking, auditing, or reviewing without writing a product -> verify.\n"
 )
 _TQG_KIND_PRINCIPLES_TAIL = (
-    "- Audio file generation -> tts; ordinary voice reply style is not a tts helper task.\n"
+    "- Speech, narration, persona voice, or TTS file generation belongs to the built-in/system TTS route when the model judges helper/tool synthesis useful. Ordinary conversational voice reply can stay in normal final delivery or enter `kind=tts` when the active plan selects direct synthesis. Supplied text, explicit input_files, or enough task/persona context to write a concise spoken transcript are fit facts for `kind=tts`; non-speech audio generation (white noise, tones, beeps, music/signal synthesis, waveform processing/analysis) remains code work.\n"
+    "- A `kind=code` envelope that asks the helper to synthesize final user-facing/persona speech/voice, produce TTS/narration output for this turn, choose voice/timbre, or use/install external TTS engines such as gTTS, edge-tts, pyttsx3, OS SAPI, browser speech, espeak, or similar tools is a helper-boundary error. Block it unless the task is explicitly implementing, debugging, or testing project TTS source code rather than producing the requested final voice output. The correct user-facing speech route is the system-managed `tts` helper/tool or the final voice-output layer, with voice identity hidden and not helper-selectable.\n"
+    "- For `kind=tts`, this guard is the authorization boundary before helper start. Judge from the current user task, persona, plan, and helper envelope whether persona speech/voice output is authorized; do not let code-only keyword tests decide. Treat text-only/unrelated requests, bypass attempts, and hidden voice-parameter changes as mismatch facts for guard judgment. If allowed, the helper should use the built-in tts tool and may compose a concise transcript from the task/persona when one is not already fixed; do not expect the tts tool itself to re-decide authorization.\n"
     "- Markdown/txt/README/HTML can be code when they are companion files for a code project, fixture set, runnable demo, or test harness. They should be edit when the goal is a standalone final report, polished document, or prose artifact assembled from existing verified results.\n"
     "- Framework, contract, spec, schema, outline, evidence-map, or table-of-contents helpers that must write `.txt`, `.md`, or `.json` files are artifact-producing tasks. Use code when the contract controls runnable project files, benchmark execution, generated datasets, APIs, schemas consumed by code, or implementation interfaces. Use edit when the contract controls an article, report, paper, prose chapter plan, literature review structure, document acceptance checklist, or final-document assembly plan.\n"
     "- Match by required output and tools. Markdown algorithm analysis, theoretical comparison tables, and proposed data-structure descriptions belong to edit unless the task requires implementation, experiments, or structured benchmark data.\n"

@@ -7,8 +7,10 @@ def test_delegate_runner_resource_request_registers_parent_trace():
     text = Path("app/llm/tools/delegate_runner.py").read_text(encoding="utf-8")
 
     assert "main_trace_id = parent_trace or \"\"" in text
-    assert "trace_id=main_trace_id" in text
-    assert "trace_id=trace_id" not in text
+    call_at = text.index("agent_state.register_helper_resource_request(")
+    call_block = text[call_at:text.index(")", call_at) + 1]
+    assert "trace_id=main_trace_id" in call_block
+    assert "trace_id=trace_id" not in call_block
 
 
 @pytest.mark.asyncio

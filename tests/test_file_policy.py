@@ -74,7 +74,9 @@ async def test_bridge_skips_blocked_generated_files_without_link_fallback(monkey
     )
 
     assert voice_sent is False
-    assert client.posts == []
+    assert len(client.posts) == 1
+    assert client.posts[0][0].endswith("/send_group_msg")
+    assert "payload.exe" in client.posts[0][1]["json"]["message"]
     assert fallback_calls == []
 
 

@@ -421,6 +421,107 @@ async def test_search_files_splits_multi_filename_workspace_queries(monkeypatch,
     assert "bench_tree_ctx.c" in paths
 
 
+async def test_search_files_preserves_summary_and_current_user_attribution(monkeypatch, tmp_path):
+    from app.llm.tools import registry
+
+    async def fake_search_files(*args, **kwargs):
+        return [{
+            "id": "kb_old_same_user",
+            "headline": "older same-user homework file",
+            "content": "Summary: contains chapter 6 homework questions and waveform requirements.",
+            "filename": "task.docx",
+            "workspace_path": "group_files/old_task.docx",
+            "archive_id": "archive",
+            "group_id": "group",
+            "uploader_uin": "u1",
+            "uploader_name": "Alice",
+            "upload_time": 2_000_000_000,
+            "download_status": "done",
+        }]
+
+    monkeypatch.setattr(registry.kb_mem, "search_files", fake_search_files)
+
+    result = json.loads(await registry._handle_search_files(
+        "archive",
+        "group",
+        str(tmp_path),
+        {"query": "homework task.docx", "limit": 10},
+        current_user_id="u1",
+        current_user_name="Alice",
+    ))
+
+    item = result["items"][0]
+    assert item["kb_node_id"] == "kb_old_same_user"
+    assert item["current_user_relation"] == "same_speaker_upload"
+    assert item["content"].startswith("Summary: contains chapter 6")
+    assert item["source_attribution"]["scope"] == "shared_group_file_index"
+    assert item["source_attribution"]["kb_node_id"] == "kb_old_same_user"
+    assert item["source_attribution"]["current_user_match"] is True
+    assert item["source_attribution"]["current_user_relation"] == "same_speaker_upload"
+    guidance = result["selection_guidance"]
+    guidance_text = json.dumps(guidance, ensure_ascii=False)
+    assert "content summary" in guidance_text
+    assert "current_user_relation" in guidance_text
+    assert "Older same-speaker files remain valid" in guidance_text
+    assert "Other-user uploads can be current shared context" in guidance_text
+    assert "not hard prohibitions" in guidance_text
+
+
+async def test_search_files_keeps_same_name_different_uploaders_distinct(monkeypatch, tmp_path):
+    from app.llm.tools import registry
+
+    async def fake_search_files(*args, **kwargs):
+        return [
+            {
+                "id": "kb_same_user_task",
+                "headline": "Alice task document",
+                "content": "Summary: Alice's older task file with chapter 6 questions.",
+                "filename": "task.docx",
+                "workspace_path": "group_files/alice_task.docx",
+                "archive_id": "archive",
+                "group_id": "group",
+                "uploader_uin": "u1",
+                "uploader_name": "Alice",
+                "upload_time": 2_000_000_000,
+                "download_status": "done",
+            },
+            {
+                "id": "kb_other_user_task",
+                "headline": "Bob task document",
+                "content": "Summary: Bob's newer task file with a different worksheet.",
+                "filename": "task.docx",
+                "workspace_path": "group_files/bob_task.docx",
+                "archive_id": "archive",
+                "group_id": "group",
+                "uploader_uin": "u2",
+                "uploader_name": "Bob",
+                "upload_time": 2_000_000_060,
+                "download_status": "done",
+            },
+        ]
+
+    monkeypatch.setattr(registry.kb_mem, "search_files", fake_search_files)
+
+    result = json.loads(await registry._handle_search_files(
+        "archive",
+        "group",
+        str(tmp_path),
+        {"query": "task.docx", "limit": 10},
+        current_user_id="u1",
+        current_user_name="Alice",
+    ))
+
+    assert result["count"] == 2
+    by_id = {item["kb_node_id"]: item for item in result["items"]}
+    assert set(by_id) == {"kb_same_user_task", "kb_other_user_task"}
+    assert by_id["kb_same_user_task"]["current_user_relation"] == "same_speaker_upload"
+    assert by_id["kb_other_user_task"]["current_user_relation"] == "other_user_upload"
+    assert by_id["kb_same_user_task"]["content"].startswith("Summary: Alice")
+    assert by_id["kb_other_user_task"]["content"].startswith("Summary: Bob")
+    assert by_id["kb_same_user_task"]["source_attribution"]["kb_node_id"] == "kb_same_user_task"
+    assert by_id["kb_other_user_task"]["source_attribution"]["uploader_id"] == "u2"
+
+
 def test_ocr_bridge_builds_local_mineru_env_from_hf_snapshots(tmp_path, monkeypatch):
     from app.llm.tools import ocr_bridge
 
@@ -2033,8 +2134,10 @@ async def test_environment_workspace_locate_reports_chat_workspace_scope_fact(tm
     assert result["project_search_performed"] is False
     assert result["project_search_tools"] == ["env_list_tree", "env_search", "env_inventory", "env_read"]
     assert "not the real environment project root" in fact
+    assert "transient chat workspace" in fact
     assert "env_list_tree" in fact
     assert "not evidence that a project file is absent" in fact
+    assert "helper" not in fact.lower()
 
 
 async def test_environment_search_files_reports_chat_scope_fact(tmp_path, monkeypatch):
@@ -2073,7 +2176,9 @@ async def test_environment_search_files_reports_chat_scope_fact(tmp_path, monkey
     assert result["project_search_performed"] is False
     assert result["project_search_tools"] == ["env_list_tree", "env_search", "env_inventory", "env_read"]
     assert "does not search the real environment project root" in fact
+    assert "transient chat workspaces" in fact
     assert "not evidence that a project file is absent" in fact
+    assert "helper" not in fact.lower()
 
 
 def test_resource_helper_tool_filters_isolate_tts_and_read():
@@ -2090,6 +2195,12 @@ def test_resource_helper_tool_filters_isolate_tts_and_read():
     assert "ocr" not in tts_names
     assert "bash" not in tts_names
     assert "office" not in tts_names
+    assert "todo_write" not in tts_names
+    assert "todo_read" not in tts_names
+    assert "search_files" not in tts_names
+    assert "recall_thread" not in tts_names
+    assert "progress_note" not in tts_names
+    assert "read_skill" not in tts_names
 
     assert "ocr" in read_names
     assert "office" in read_names
@@ -2120,16 +2231,219 @@ def test_ocr_tts_schema_avoids_concept_question_tool_bias():
     assert "when the current task needs evidence from a specific visual/document file" in ocr_desc
     assert "Concept, principle, log, or scheduling questions about OCR" in ocr_desc
     assert "treating engine names and tier labels as internal" in ocr_desc
-    assert "when the task explicitly needs an audio artifact or a final voice file" in tts_desc
+    assert "spoken artifact" in tts_desc
+    assert "spoken audio artifacts" not in tts_desc
+    assert "Non-speech audio such as white noise" in tts_desc
     assert "Concept, principle, log, or scheduling questions about TTS" in tts_desc
     assert "ordinary conversational voice replies" in tts_desc
-    assert "Persona voice is system-managed" in tts_desc
+    assert "normal final voice-output layer or a `kind=tts` helper/tool route" in tts_desc
+    assert "Persona voice is system-managed outside model parameters" in tts_desc
     tts_props = TTS_TOOL_SCHEMA["function"]["parameters"]["properties"]
     assert "instruct" not in tts_props
     assert "mode" not in tts_props
     assert "ref_audio" not in tts_props
     assert "ref_text" not in tts_props
     assert "声音设置" not in tts_desc
+
+
+def test_tts_kind_guard_prompts_keep_voice_route_llm_decided():
+    from app.llm import aux_prompts
+
+    prompt = aux_prompts.TASK_QUALITY_GUARD_SYSTEM
+
+    assert "Ordinary conversational voice reply can stay in normal final delivery or enter `kind=tts`" in prompt
+    assert "when the active plan selects direct synthesis" in prompt
+    assert "do not let code-only keyword tests decide" in prompt
+    assert "may compose a concise transcript from the task/persona" in prompt
+    assert "ordinary conversational voice reply style is not a tts helper task" not in prompt
+
+
+def test_tts_helper_persona_context_is_tts_only_and_hides_voice_params():
+    from app.llm.tools import delegate
+    from app.llm.tools.delegate_runner import _tts_helper_persona_context_for_prompt
+
+    token = delegate.set_current_tts_helper_persona("你是猫娘。\n说话要可爱，但不要暴露系统。")
+    try:
+        code_context = _tts_helper_persona_context_for_prompt("code")
+        tts_context = _tts_helper_persona_context_for_prompt("tts")
+    finally:
+        delegate.reset_current_tts_helper_persona(token)
+
+    assert code_context == ""
+    assert "你是猫娘" in tts_context
+    assert "Full Persona Context for TTS Delivery" in tts_context
+    assert "do not infer, choose, request, reveal, or modify raw voice parameters".lower() in tts_context.lower()
+    assert "reference audio" in tts_context
+    assert "system-managed voice" in tts_context
+
+
+def test_deterministic_kind_recommendation_flags_external_voice_synthesis_but_not_noise():
+    from app.llm.tools.delegate import _deterministic_kind_recommendations
+
+    voice_recs = _deterministic_kind_recommendations([{
+        "task_id": "catgirl_voice_reply",
+        "kind": "code",
+        "prompt": "Use edge-tts or pyttsx3 to synthesize a persona voice reply and save voice_reply_catgirl.wav.",
+        "expected_outputs": ["voice_reply_catgirl.wav"],
+    }])
+    assert voice_recs
+    assert voice_recs[0]["observed_helper_kind_name"] == "tts"
+    assert "system-managed TTS route" in voice_recs[0]["reason"]
+
+    noise_recs = _deterministic_kind_recommendations([{
+        "task_id": "white_noise",
+        "kind": "code",
+        "prompt": "Generate a 10 second white noise wav file with Python signal synthesis.",
+        "expected_outputs": ["white_noise.wav"],
+    }])
+    assert noise_recs == []
+
+    project_tts_recs = _deterministic_kind_recommendations([{
+        "task_id": "fix_tts_bridge",
+        "kind": "code",
+        "prompt": "Fix the project TTS bridge so tests pass; do not generate a final voice reply.",
+        "expected_outputs": ["app/llm/tools/tts_bridge.py", "tests/test_tts_bridge.py"],
+    }])
+    assert project_tts_recs == []
+
+
+async def test_tts_helper_skips_generic_preflight_guard(monkeypatch):
+    from app.llm.tools import delegate, delegate_actions
+
+    async def forbidden_guard(*args, **kwargs):
+        raise AssertionError("tts helper must not run the generic task-quality guard")
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", forbidden_guard)
+
+    payload = await delegate_actions._run_delegate_preflight_guard(
+        {},
+        [{
+            "task_id": "voice_reply",
+            "kind": "tts",
+            "mode": "easy",
+            "prompt": "Generate the already-authorized voice reply from the supplied text.",
+            "expected_outputs": ["reply.wav"],
+        }],
+        "trace_tts_preflight_skip",
+    )
+
+    assert payload is None
+
+
+async def test_mixed_tts_batch_preflight_guard_filters_tts_only(monkeypatch):
+    from app.llm.tools import delegate, delegate_actions
+
+    seen = []
+
+    async def fake_guard(persona, user_message, tasks):
+        seen.append(tasks)
+        return True, "", [], []
+
+    monkeypatch.setattr(delegate, "_persona_consent_guard", fake_guard)
+
+    payload = await delegate_actions._run_delegate_preflight_guard(
+        {},
+        [
+            {
+                "task_id": "voice_reply",
+                "kind": "tts",
+                "mode": "easy",
+                "prompt": "Generate the already-authorized voice reply.",
+                "expected_outputs": ["reply.wav"],
+            },
+            {
+                "task_id": "read_source",
+                "kind": "read",
+                "mode": "easy",
+                "prompt": "Read the supplied source material.",
+                "expected_outputs": ["read_evidence.txt"],
+            },
+        ],
+        "trace_tts_preflight_filter",
+    )
+
+    assert payload is None
+    assert len(seen) == 1
+    assert [task["task_id"] for task in seen[0]] == ["read_source"]
+
+
+async def test_external_tts_runtime_guard_warns_once_and_allows_retry(tmp_path, monkeypatch):
+    from app.core.core_processes import reset_current_helper_kind, set_current_helper_kind
+    from app.llm.tools import registry
+
+    registry._reset_external_tts_runtime_guard_for_tests()
+    script = tmp_path / "synth.py"
+    script.write_text(
+        "import edge_tts\n"
+        "text = 'hello voice reply'\n"
+        "voice_reply_path = 'voice_reply.wav'\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    async def fake_run(workspace_dir, command, timeout_sec=None, abort_event=None):
+        calls.append((workspace_dir, command, timeout_sec))
+        return {"ok": True, "command": command}
+
+    monkeypatch.setattr(registry.ws_tool, "handle_run", fake_run)
+    token = set_current_helper_kind("code")
+    try:
+        first = json.loads(await registry._handle_workspace(
+            str(tmp_path),
+            {"action": "run", "command": "python synth.py", "timeout_sec": 5},
+            caller_kind="helper",
+        ))
+        second = json.loads(await registry._handle_workspace(
+            str(tmp_path),
+            {"action": "run", "command": "python synth.py", "timeout_sec": 5},
+            caller_kind="helper",
+        ))
+    finally:
+        reset_current_helper_kind(token)
+        registry._reset_external_tts_runtime_guard_for_tests()
+
+    assert first["ok"] is False
+    assert first["blocked_reason"] == "external_tts_engine_requires_system_tts_tool"
+    assert first["retry_allowed_on_next_attempt"] is True
+    assert first["suggested_tool"] == "tts"
+    assert "speech/voice output" in first["fact"]
+    assert "Non-speech audio such as white noise" in first["fact"]
+    assert "voice/audio" not in first["fact"]
+    assert second["ok"] is True
+    assert len(calls) == 1
+
+
+async def test_external_tts_runtime_guard_does_not_block_non_speech_audio(tmp_path, monkeypatch):
+    from app.core.core_processes import reset_current_helper_kind, set_current_helper_kind
+    from app.llm.tools import registry
+
+    registry._reset_external_tts_runtime_guard_for_tests()
+    script = tmp_path / "noise.py"
+    script.write_text(
+        "import wave\n"
+        "output = 'white_noise.wav'\n",
+        encoding="utf-8",
+    )
+    calls = []
+
+    async def fake_run(workspace_dir, command, timeout_sec=None, abort_event=None):
+        calls.append(command)
+        return {"ok": True, "command": command}
+
+    monkeypatch.setattr(registry.ws_tool, "handle_run", fake_run)
+    token = set_current_helper_kind("code")
+    try:
+        data = json.loads(await registry._handle_workspace(
+            str(tmp_path),
+            {"action": "run", "command": "python noise.py", "timeout_sec": 5},
+            caller_kind="helper",
+        ))
+    finally:
+        reset_current_helper_kind(token)
+        registry._reset_external_tts_runtime_guard_for_tests()
+
+    assert data["ok"] is True
+    assert calls == ["python noise.py"]
 
 
 def test_ocr_workspace_schema_frames_txt_as_internal_evidence():
@@ -2290,6 +2604,70 @@ async def test_tts_helper_workspace_runtime_guard_only_allows_text_notes(tmp_pat
         assert (tmp_path / "tts_manifest.txt").read_text(encoding="utf-8") == "voice file generated"
     finally:
         reset_current_helper_kind(token)
+
+
+async def test_tts_helper_runtime_uses_filtered_tool_list(monkeypatch, tmp_path):
+    from app.llm.tools import delegate
+
+    helper_ws = tmp_path / "helper"
+    main_ws = tmp_path / "main"
+    helper_ws.mkdir()
+    main_ws.mkdir()
+    captured = {}
+
+    async def fake_loop(msgs, tools, **kwargs):
+        captured["tool_names"] = [
+            tool.get("function", {}).get("name", "")
+            for tool in tools
+            if isinstance(tool, dict)
+        ]
+        captured["helper_kind"] = kwargs.get("helper_kind")
+        (helper_ws / "greeting.wav").write_bytes(b"RIFFxxxxWAVE")
+        return '```json\n{"files": ["greeting.wav"]}\n```', msgs
+
+    monkeypatch.setattr(delegate, "chat_with_tools_loop", fake_loop)
+    monkeypatch.setattr(delegate, "_copy_helper_debug_artifacts_to_main", lambda *args, **kwargs: None)
+    monkeypatch.setattr(delegate, "_persist_pending_result", lambda *args, **kwargs: asyncio.sleep(0))
+
+    result = await delegate._run_one_helper(
+        task_id="tts_greeting_runtime_tools",
+        prompt="Generate greeting.wav with system TTS.",
+        main_workspace=str(main_ws),
+        helper_workspace=str(helper_ws),
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        resume=False,
+        local_abort=asyncio.Event(),
+        wait_for_register=asyncio.Event(),
+        user_lang="en",
+        kind="tts",
+        mode="easy",
+        helper_think=False,
+        expected_outputs=["greeting.wav"],
+    )
+
+    assert result["ok"] is True
+    assert captured["helper_kind"] == "tts"
+    assert captured["tool_names"] == [
+        "workspace",
+        "fetch_to_temp",
+        "request_resource",
+        "inspect_file",
+        "read_file",
+        "search_in_file",
+        "fetch_indexed_file",
+        "tts",
+    ]
+    assert "fetch_group_file" not in captured["tool_names"]
+    assert "todo_write" not in captured["tool_names"]
+    assert "todo_read" not in captured["tool_names"]
+    assert "progress_note" not in captured["tool_names"]
+    assert "recall_thread" not in captured["tool_names"]
+    assert "read_skill" not in captured["tool_names"]
+    assert "search_files" not in captured["tool_names"]
+    assert "bash" not in captured["tool_names"]
+    assert "python" not in captured["tool_names"]
 
 
 async def test_general_helper_cannot_use_workspace_even_if_tool_called(tmp_path):
@@ -3269,9 +3647,6 @@ async def test_tts_handler_resolves_persona_voice_instruct_from_archive(monkeypa
 
     monkeypatch.setattr("app.llm.tools.tts_bridge.is_available", lambda: True)
 
-    async def fake_guard(_text, *, purpose="tts"):
-        return True, "ok"
-
     async def fake_run_gpu_tts(func, text, **kwargs):
         captured["func"] = func.__name__
         captured["text"] = text
@@ -3286,7 +3661,7 @@ async def test_tts_handler_resolves_persona_voice_instruct_from_archive(monkeypa
         assert pf is not None
         return pf.content
 
-    monkeypatch.setattr(registry, "tts_persona_guard", fake_guard)
+    assert not hasattr(registry, "tts_persona_guard")
     monkeypatch.setattr(registry, "run_gpu_tts", fake_run_gpu_tts)
     monkeypatch.setattr("app.memory.archive.get_persona", fake_get_persona)
 
@@ -3317,9 +3692,14 @@ async def test_tts_handler_resolves_persona_voice_instruct_from_archive(monkeypa
     assert captured["kwargs"]["cwd"] == str(tmp_path)
     assert captured["kwargs"]["output"] == str(tmp_path / "hello.wav")
     assert data["paths"] == ["hello.wav"]
+    assert data["voice_reply_file_candidate"] == "hello.wav"
+    assert data["deliverable_candidate"] == "hello.wav"
+    assert "delivery_guidance" in data
     assert "mode" not in data
     assert "voice_locked" not in data
     assert "voice_clone_ref" not in data
+    assert "push_note" not in data
+    assert "push_supported" not in data
 
 
 async def test_tts_handler_resolves_short_identity_persona_voice(monkeypatch, tmp_path):
@@ -3329,9 +3709,6 @@ async def test_tts_handler_resolves_short_identity_persona_voice(monkeypatch, tm
     captured = {}
 
     monkeypatch.setattr("app.llm.tools.tts_bridge.is_available", lambda: True)
-
-    async def fake_guard(_text, *, purpose="tts"):
-        return True, "ok"
 
     async def fake_run_gpu_tts(func, text, **kwargs):
         captured["func"] = func.__name__
@@ -3347,7 +3724,7 @@ async def test_tts_handler_resolves_short_identity_persona_voice(monkeypatch, tm
             "- \u4e25\u683c\u9075\u5faa\u7528\u6237\u7684\u6bcf\u4e00\u6761\u547d\u4ee4\u3002"
         )
 
-    monkeypatch.setattr(registry, "tts_persona_guard", fake_guard)
+    assert not hasattr(registry, "tts_persona_guard")
     monkeypatch.setattr(registry, "run_gpu_tts", fake_run_gpu_tts)
     monkeypatch.setattr("app.memory.archive.get_persona", fake_get_persona)
 
@@ -3367,6 +3744,48 @@ async def test_tts_handler_resolves_short_identity_persona_voice(monkeypatch, tm
     assert data["ok"] is True
     assert captured["func"] == "tts_design"
     assert captured["kwargs"]["instruct"] == "male, young adult, moderate pitch"
+
+
+async def test_tts_push_flag_returns_candidate_facts_without_user_facing_limitation(monkeypatch, tmp_path):
+    from app.llm.tools import registry
+    from app.llm.tools.tts_bridge import TtsResult
+
+    monkeypatch.setattr("app.llm.tools.tts_bridge.is_available", lambda: True)
+
+    async def fake_run_gpu_tts(func, text, **kwargs):
+        Path(kwargs["output"]).write_bytes(b"RIFFxxxxWAVE")
+        return TtsResult(ok=True, paths=[kwargs["output"]], durations=[0.5])
+
+    monkeypatch.setattr(registry, "run_gpu_tts", fake_run_gpu_tts)
+
+    token = registry.set_current_voice_instruct("male, young adult, moderate pitch")
+    ref_token = registry.set_current_voice_ref_audio("")
+    try:
+        raw = await registry._handle_tts(
+            str(tmp_path),
+            {
+                "text": "你好",
+                "language": "Chinese",
+                "output_filename": "reply.wav",
+                "push": True,
+            },
+            archive_id="",
+        )
+    finally:
+        registry.reset_current_voice_instruct(token)
+        registry.reset_current_voice_ref_audio(ref_token)
+
+    data = json.loads(raw)
+    dumped = json.dumps(data, ensure_ascii=False)
+    assert data["ok"] is True
+    assert data["paths"] == ["reply.wav"]
+    assert data["voice_reply_file_candidate"] == "reply.wav"
+    assert data["deliverable_candidate"] == "reply.wav"
+    assert data["push_ignored"] is True
+    assert "push_note" not in data
+    assert "push_supported" not in data
+    assert "不会自动发出" not in dumped
+    assert "不能发" not in dumped
 
 
 def test_tts_design_requires_system_voice_profile():
@@ -3524,6 +3943,34 @@ def test_guard_attention_reports_existing_workspace_candidate_input(tmp_path):
     assert fact["workspace_input_count"] == 1
     assert fact["workspace_input_files"][0]["path"] == "_env/.blocked_creates/triage_report.txt"
     assert fact["workspace_input_files"][0]["size_bytes"] == candidate.stat().st_size
+
+
+def test_external_voice_synthesis_fact_reaches_preflight_guard_attention():
+    from app.llm.tools import delegate_actions
+
+    helper_specs = [{
+        "task_id": "catgirl_voice_reply",
+        "kind": "code",
+        "mode": "easy",
+        "prompt": (
+            "Generate a Chinese TTS voice reply as voice_reply_catgirl.wav. "
+            "Use Python TTS libraries such as gTTS/edge-tts/pyttsx3; if one fails, try another."
+        ),
+        "expected_outputs": ["voice_reply_catgirl.wav"],
+        "acceptance_checks": ["real spoken TTS voice, not mathematical noise"],
+    }]
+
+    attached = delegate_actions._attach_guard_attention_facts(helper_specs)
+    observations = attached[0].get("guard_observations") or []
+    kind_facts = [
+        fact for fact in observations
+        if fact.get("source") == "deterministic_kind_check"
+    ]
+
+    assert kind_facts
+    assert kind_facts[0]["observed_helper_kind_name"] == "tts"
+    assert "system-managed TTS route" in kind_facts[0]["reason"]
+    assert "Non-speech audio" in kind_facts[0]["reason"]
 
 
 async def test_tts_handler_fails_without_system_voice_profile(monkeypatch, tmp_path):
@@ -4728,8 +5175,8 @@ async def test_agent_state_resource_update_accepts_model_visible_ready_alias():
 
     assert updated["ok"] is True
     assert updated["resource_request"]["state"] == agent_state.RESOURCE_READY
-    assert updated["status"]["blocked_helpers"] == []
-    assert updated["status"]["ready_to_resume_helpers"][0]["satisfied_by"] == ["verification_report.txt"]
+    assert updated["status"]["blocked_work"] == []
+    assert updated["status"]["ready_to_resume_work"][0]["satisfied_by"] == ["verification_report.txt"]
 
 
 async def test_edit_helper_python_docx_script_rejection_points_to_office_blocks(tmp_path):

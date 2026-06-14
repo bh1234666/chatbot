@@ -730,7 +730,7 @@ def _extract_user_request(msgs: list[dict]) -> str:
 
 
 # 2026-05-12 P15.F: 内部文件黑名单(无论 score 多高都不作为产物)
-# 病因(实测 23:46 trace): 主线程 plan.deliverables 空, 系统 fallback auto-added
+# 病因(实测 23:46 trace): 旧交付 fallback 在 plan.deliverables 为空时硬补
 # 8 个全是 .rewrite_count.json/.todos_call_count.json 等元数据 → 用户拿到一堆垃圾。
 # 这些文件是 helper 内部计数器/标识, 不该出现在交付物里。
 _AUTOFIX_INTERNAL_BLACKLIST_PATTERNS = (
@@ -779,6 +779,9 @@ _INTERNAL_DELIVERABLE_DIRS = {
     "_helpers_shared",
     "_shared",
     "_env",
+    "_tool_results",
+    "_scratch",
+    "_downloaded_media",
     "__pycache__",
 }
 

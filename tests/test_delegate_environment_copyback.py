@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.core.filesystem import FileRegistry
 from app.core.filesystem.models import FileKind, Visibility
 from app.llm.tools.delegate_copyback import _copy_results_to_main
+from app.llm.tools import workspace as ws_tool
 
 
 def test_environment_copyback_skips_unexpected_new_env_files(tmp_path):
@@ -143,6 +146,32 @@ def test_read_helper_internal_evidence_is_copied_without_project_visibility(tmp_
     registry = FileRegistry.load(scope_id=f"workspace:{main_ws.resolve()}", workspace_root=main_ws)
     records = registry.list_records(kind=FileKind.HELPER_OUTPUT, visibility=Visibility.INTERNAL)
     assert [record.workspace_path for record in records] == ["read_evidence_docx.txt"]
+
+
+def test_session_temp_copyback_mirrors_outputs_to_persistent_root(tmp_path):
+    persistent_ws = tmp_path / "main"
+    persistent_ws.mkdir()
+    session_ws = ws_tool.ensure_temp_workspace(
+        str(persistent_ws),
+        session_tag="arch:group:user:trace",
+        isolate_session=True,
+    )
+    helper_ws = tmp_path / "helper"
+    helper_ws.mkdir()
+    (helper_ws / "answer.txt").write_text("session answer\n", encoding="utf-8")
+
+    copied, _stats, _file_map = _copy_results_to_main(
+        str(helper_ws),
+        session_ws,
+        "writer",
+        fork_snapshot={},
+        expected_outputs=["answer.txt"],
+        helper_kind="edit",
+    )
+
+    assert copied == ["answer.txt"]
+    assert (Path(session_ws) / "answer.txt").read_text(encoding="utf-8") == "session answer\n"
+    assert (persistent_ws / "answer.txt").read_text(encoding="utf-8") == "session answer\n"
 
 
 def test_copyback_scrubs_internal_env_prefix_in_text_outputs(tmp_path):

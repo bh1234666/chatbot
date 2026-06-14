@@ -562,10 +562,9 @@ def _filter_tools_for_kind(kind: str, all_tools: list) -> list:
         "impact_review": _PROJECT_ANALYSIS_TOOLS,
         "inventory": _INVENTORY_TOOLS,
         "tts": {
-            "tts", "inspect_file", "read_file", "search_in_file", "search_files",
-            "fetch_indexed_file", "fetch_group_file", "fetch_to_temp", "workspace", "todo_write",
-            "todo_read", "recall_thread", "progress_note", "request_resource", "ask_user_question",
-            "read_skill",
+            "tts", "inspect_file", "read_file", "search_in_file",
+            "fetch_indexed_file", "fetch_group_file", "fetch_to_temp", "workspace",
+            "request_resource",
         },
         "read": {
             "inspect_file", "read_file", "search_in_file", "search_files",

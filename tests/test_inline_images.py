@@ -38,3 +38,63 @@ def test_scan_inline_images_returns_empty_when_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(ws_tool, "create_workspace", lambda archive_id, group_id: str(tmp_path))
 
     assert scan_inline_images("a1", "g1") == []
+
+
+def test_annotate_inline_images_marks_current_user_match():
+    from app.core.inline_images import annotate_inline_images
+
+    images = [
+        {"name": "mine.png", "size": 1, "mtime": 2, "mtime_str": "06-13 10:00:00"},
+        {"name": "other.png", "size": 1, "mtime": 1, "mtime_str": "06-13 09:59:00"},
+    ]
+    messages = [
+        {
+            "id": 1,
+            "user_id": "u1",
+            "user_name": "Alice",
+            "content": "[本地image: other.png]",
+        },
+        {
+            "id": 2,
+            "user_id": "u2",
+            "user_name": "Bob",
+            "content": "[本地image: mine.png]",
+        },
+    ]
+
+    annotated = annotate_inline_images(
+        images,
+        messages,
+        current_user_id="u2",
+        current_user_name="Bob",
+    )
+
+    by_name = {item["name"]: item for item in annotated}
+    assert by_name["mine.png"]["current_user_match"] is True
+    assert by_name["mine.png"]["uploader_user_id"] == "u2"
+    assert by_name["other.png"]["current_user_match"] is False
+    assert by_name["other.png"]["uploader_name"] == "Alice"
+
+
+def test_annotate_inline_images_same_nickname_missing_owner_id_is_unknown():
+    from app.core.inline_images import annotate_inline_images
+
+    images = [
+        {"name": "ambiguous.png", "size": 1, "mtime": 2, "mtime_str": "06-13 10:00:00"},
+    ]
+    messages = [
+        {
+            "id": 1,
+            "user_name": "SameNick",
+            "content": "[本地image: ambiguous.png]",
+        },
+    ]
+
+    annotated = annotate_inline_images(
+        images,
+        messages,
+        current_user_id="u2",
+        current_user_name="SameNick",
+    )
+
+    assert annotated[0]["current_user_match"] is None

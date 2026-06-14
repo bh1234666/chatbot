@@ -195,3 +195,20 @@ async def test_artifacts_endpoint_returns_delivered_registry_not_workspace_scan(
     result = await chat.list_workspace_artifacts("arch", "group")
 
     assert result["items"][0]["rel_path"] == "pushed.txt"
+
+
+def test_delivered_artifact_url_query_is_not_part_of_rel_path():
+    from app.memory import bot_artifacts
+
+    item = bot_artifacts._normalize_done_file(
+        "arch",
+        "group",
+        {
+            "name": "delivered.txt",
+            "url": "/v1/chat/files/arch/group/delivered.txt?workspace_token=abc123",
+        },
+    )
+
+    assert item is not None
+    assert item["rel_path"] == "delivered.txt"
+    assert item["workspace_path"] == "delivered.txt"

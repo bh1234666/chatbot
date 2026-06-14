@@ -71,7 +71,7 @@ If the request combines implementation work with a required final document, mark
 ## Special Boundaries
 
 - Voice reply requests are output form, not audio artifact tasks.
-- Generating wav/mp3/TTS/audio attachments is an audio artifact task.
+- Generating speech/TTS voice files or non-speech audio attachments is an artifact task; Round2 chooses TTS only for speech/narration/persona voice and code for signal/noise/music/audio processing.
 - OCR/TTS concept questions are answered directly; reading from a concrete file uses tools.
 
 ## recall_topics + recall_layers
@@ -122,7 +122,7 @@ Base helper kinds:
 - `read`: source-material reading and evidence extraction from text/images/PDF/Office/screenshots/scans/visual content.
 - `edit`: user-facing docx/pptx/xlsx/pdf/markdown/text assembly from verified evidence; may read a small bounded set of explicit input_files for one final text/document artifact.
 - `draw`: image/chart/diagram production from data or clear specs.
-- `tts`: audio file or long narration artifact generation.
+- `tts`: speech, narration, persona voice, or requested TTS-file artifacts; non-speech audio stays `code`.
 - `verify`: read-only review of existing artifacts, claims, algorithms, data, or critical documents.
 - `inventory`, `project_map`, `file_summary`, `impact_review`: environment/project analysis.
 
@@ -136,7 +136,7 @@ First distinguish concept/troubleshooting questions from practical file reading.
 
 Documents/charts are assembled only from confirmed evidence and existing or produced resources. Missing required images, sources, or data are resource blockers, not placeholders. Document facts must trace to CSV/JSON/stdout/source evidence, including numbers, labels, units, seeds, repetitions, and caveats. Placeholder checks should report context and treat normal words such as insertion as ordinary text unless evidence shows a template marker.
 
-Voice reply requests are output style. Generate wav/mp3/TTS/audio attachment requests are `kind='tts'` artifact tasks: create a fresh file for this turn; voice identity and delivery configuration are controlled outside the LLM.
+Voice reply requests are output style. Speech/narration/TTS/persona-voice requests are `kind='tts'` artifact tasks when they need a generated voice file: create a fresh file for this turn through the built-in/system TTS route. User-facing or persona voice synthesis must not be delegated to `code` to install or call external TTS engines such as gTTS, edge-tts, pyttsx3, OS SAPI, browser speech, espeak, or similar tools. Non-speech audio generation such as white noise, tones, beeps, music/signal synthesis, audio processing, or waveform analysis remains code/signal work, not TTS. Voice identity, timbre, reference audio, and delivery configuration are system-managed outside the LLM and must not be selected, exposed, or modified by helper prompts.
 
 文件读取、文档、图表、音频分别按 read/edit/draw/tts 处理；缺资源先说明或续作。
 
@@ -198,7 +198,9 @@ After all needed tools, output exactly one strict JSON object, first character `
 
 When the work is done, the very next assistant message is this JSON object itself. A pre-final summary, contract self-assessment, acceptance checklist, or "the plan would satisfy..." narration costs an extra full-context turn and gets discarded; put completion facts inside `intent`/`key_points`/`internal_note` directly.
 
-`deliverables` lists only generated or freshly accepted user-facing filenames from this round that satisfy the current user request. Exclude uploads, pre-existing files, historical task outputs, helper evidence, framework contracts, scripts, staged copies, caches, and failed versions unless the current request explicitly re-delivers/reuses a pre-existing file and `key_points` states why.
+`intent`, `key_points`, `deliverables`, `delivery_partial`, and voice reply fields are user-facing plan inputs for Round3. Express results, evidence, uncertainty, blockers, and files without internal routing labels such as helper/delegate/producer/background work, unless the user explicitly asks about those implementation labels. Keep internal workflow notes in `internal_note` and phrase them generically.
+
+`deliverables` lists only generated or freshly accepted user-facing filenames from this round that satisfy the current user request. Exclude uploads, pre-existing files, historical task outputs, internal evidence, framework contracts, scripts, staged copies, caches, and failed versions unless the current request explicitly re-delivers/reuses a pre-existing file and `key_points` states why.
 
 For analysis-only, audit, review, optimization, debugging, or root-cause tasks, `key_points` must carry the actual answer facts that Round3 should say to the user: findings, mechanisms, risks, evidence paths, confidence, and missing verification. Keep answer facts in `key_points` rather than completion checklist items such as "files read", "analysis done", or "no code changes"; those belong in `internal_note` unless they directly answer the user. When the user explicitly requests a machine-readable format (JSON, code, CSV) as the entire response, `key_points` carries the complete structured content verbatim as one intact string — not summarized, paraphrased, or split. The plan is the only channel to the reply stage: intermediate assistant text from earlier tool-loop turns is never shown to the user, so "already produced above" content must still be placed in `key_points` in full.
 
@@ -215,7 +217,9 @@ ROUND3_EVIDENCE_PRESENTATION_RULES = """\
   When the user asks whether constraints, preferences, budget, requirements, risks, or feasibility issues truly fit, answer up front before details. The first substantive paragraph should state the verdict and boundary: what fits, what does not fit or only fits partially, and what remaining tradeoff/blocker exists. If no blocker is evidenced, say that from evidence instead of giving only reassurance.
   When evidence shows a real blocker, impossibility, infeasible requirement, missing prerequisite, or partial fit, include an explicit status phrase in the first substantive paragraph such as "Blocked:", "Cannot satisfy as written:", "Missing:", or "Partial fit:" before localized explanation. This keeps cross-language replies auditable while leaving the final reasoning to the evidence.
   When the task intentionally leaves something untouched because of user instruction, authorization boundary, safety risk, uncertainty, or insufficient evidence, state that boundary explicitly with a short status phrase such as "Cannot act on it directly:", "Will not modify/send it:", "Left unchanged:", or "Missing verification:" before the localized explanation. When evidence shows no further action is needed, say the status boundary from evidence, for example "Nothing is blocked; no further action was needed" or "Left unchanged because the existing evidence already satisfied the request", then give the concrete evidence.
-  Internal terms such as OCR, TTS, helper, env_* tool names, workspace paths, and Round are acquisition details. For ordinary delivery, rewrite them as outcome-level language: image text, generated audio file, report chart, project file check.
+  Internal terms such as OCR, TTS, routing labels, helper/delegate labels, persona_guard/voice_guard, resource_required, quality_blocked, env_* tool names, workspace paths, prompt/rule labels, and Round are acquisition details. Use them only as hidden evidence. For ordinary delivery, rewrite them as outcome-level language: image text, generated audio file, report chart, project file check, missing material, not sent, or generation did not complete reliably.
+  Internal execution facts may appear in the response plan or evidence. They are facts to interpret, not words to echo. Convert them into persona-consistent user-facing phrasing; if no natural user-facing phrasing exists, omit the mechanism and state only the outcome, limitation, or next visible result.
+  Before rendering any internal fact, check whether each noun and action would make sense for the assistant's persona to say to a user. Replace routing/system words such as helper, guard, Round, candidate, push flag, schema, JSON field, preflight, toolchain, voice_reply_file, and deliverables with natural visible outcomes, or omit them when the user did not ask about implementation.
   Action claims such as reading, testing, checking, or seeing require evidence in the plan or tool results.
   For rankings, tables, or top-N lists, preserve evidence order, project-relative paths, labels, and numeric values; keep every item identity and number intact.
   When summarizing verified artifacts in another language, keep source proper nouns, file paths, labels, IDs, quoted strings, command names, and numeric fields exactly as evidence states them. Use a localized label only when the evidence provides that localized label.
@@ -224,7 +228,9 @@ ROUND3_EVIDENCE_PRESENTATION_RULES = """\
 
 ### 4. Internal Process Transparency
   Ordinary delivery replies focus on results, evidence, and uncertainty. Concept questions are answered as concepts; tool-name words in user text are interpreted by intent and available evidence.
-  Explain internal process details only when the user asks about tools, logs, scheduling, or concept definitions.
+  Explain internal process details only when the user asks about tools, logs, scheduling, or concept definitions. Even then, prefer generic workflow wording and do not name helper/delegate routing labels unless that exact implementation label is the explicit subject.
+  If internal facts contain a failed TTS/guard/resource/tool-chain status, do not render the internal mechanism name. Say the user-facing result instead, for example that this voice reply was not generated reliably, was not sent as voice, or needs retrying.
+  Do not tell the user "I cannot send voice/audio" merely because an internal evidence item says a direct push flag is unsupported. If the plan marks a voice reply file or the final delivery layer may synthesize the reply, phrase the answer as the intended spoken reply or the generated audio result, not as an implementation limitation. If voice generation failed or was skipped, say the visible outcome in character without naming the route, helper, guard, field, or rule that caused it.
   Rewrite internal paths or tool errors into user-understandable file/material status.
 
 Round3 只基于计划和工具证据表达事实；约束/预算/风险可行性先给正面判定和边界，真实阻塞、不可行、部分符合、按授权不处理、无需继续或缺验证时保留明确状态词，再分清符合、不符合和剩余阻塞；排行表格保留相对路径、顺序、数值和证据中的专名；审计/优化结论保留证据强弱。
@@ -233,14 +239,14 @@ Round3 只基于计划和工具证据表达事实；约束/预算/风险可行�
 ROUND3_HELPER_EXCERPT_RULES = """\
 Evidence use principles:
 - When a Response Plan conflicts with an authoritative tool result, prefer the newer tool result for exact numbers, filenames, command output, and status.
-- Helper excerpts marked as incomplete, interrupted, stuck, or missing outputs are failure/status evidence only, not factual output.
+- Evidence marked as incomplete, interrupted, stuck, or missing outputs is failure/status evidence only, not factual output.
 - Quote concrete numbers, file content, image text, and source line numbers only when they appear in the plan or tool results.
 - Tool results are factual sources, not user-facing wording. Summarize in your own voice.
 - Internal tool terms are acquisition methods. For ordinary replies, express them at the outcome level.
 - Confirmed content may be treated as fact. Possible/uncertain content remains uncertain.
-- Explain internal tools or concepts when the user asks about them.
+- Explain internal tools or concepts when the user asks about them, but keep internal routing labels generic unless the user explicitly asks about that label.
 
-helper 摘录和主线程工具结果是证据来源；失败 helper 只说明失败状态，冲突时以权威工具结果为准。
+生产者摘录和主线程工具结果是证据来源；失败生产者证据只说明失败状态，冲突时以权威工具结果为准。
 """
 
 
@@ -273,11 +279,97 @@ def round3_voice_intent_hint(voice_intent: str | None) -> str:
     return ""
 
 
+def round3_delivery_candidate_hint(delivery_candidate: str | None) -> str:
+    if delivery_candidate == "voice":
+        return (
+            "\n## Candidate delivery form: possible voice reply\n"
+            "This is one candidate for possible voice delivery. The user did not necessarily request voice unless the current user message explicitly says so.\n"
+            "- If selected, this exact text may be synthesized and sent as the final voice reply. Write it as voice-ready speech: concise, conversational, and natural when spoken when the same information can still be preserved.\n"
+            "- Do not turn a completed answer into a wait/status placeholder merely because this is the voice candidate. If the plan contains answer facts, include those facts here too.\n"
+            "- Keep the same user-facing information boundary as the response plan and text candidate. Delivery form may change wording, but must not omit required facts, caveats, URLs, filenames, code, or structured details when the active task needs readable output.\n"
+            "- If the required answer is dense, structured, copyable, or revisitable, preserve the facts faithfully instead of overshortening; the delivery decision can choose text when the faithful answer is not comfortable as voice.\n"
+            "\n语音候选只表示可能的交付形态，不等于用户明确要求语音。\n"
+        )
+    if delivery_candidate == "text":
+        return (
+            "\n## Candidate delivery form: possible text reply\n"
+            "This is one candidate for possible text delivery. The user did not necessarily request text unless the current user message explicitly says so.\n"
+            "- Written structure, lists, code blocks, and links are fine when useful.\n"
+            "- Keep the same user-facing information boundary as the response plan and voice candidate; do not add or drop facts only because this is the text candidate. If the voice candidate cannot preserve the same facts in a comfortable spoken form, that is evidence for routing/review, not permission for either candidate to omit facts.\n"
+            "\n文字候选只表示可能的交付形态，不等于用户明确要求文字。\n"
+        )
+    return ""
+
+
+def round3_shared_output_shape_hint(
+    output_shape_facts: dict | None,
+    delivery_candidate: str | None = None,
+) -> str:
+    """Expose the same output-shape facts used by voice/text delivery routing."""
+    if not isinstance(output_shape_facts, dict) or not output_shape_facts:
+        return ""
+    ordered = [
+        "length_hint",
+        "key_point_count",
+        "deliverable_count",
+        "partial_delivery_count",
+        "content_unit_count",
+        "has_user_facing_files",
+        "likely_readable",
+        "likely_structured",
+        "likely_multi_sentence",
+        "predicted_output_envelope",
+        "delivery_visibility_evidence",
+        "request_visibility_evidence",
+        "information_boundary",
+    ]
+    lines: list[str] = []
+    for key in ordered:
+        if key not in output_shape_facts:
+            continue
+        value = output_shape_facts.get(key)
+        if isinstance(value, bool):
+            rendered = "yes" if value else "no"
+        else:
+            rendered = str(value or "").strip()
+        if rendered:
+            lines.append(f"- {key}: {rendered}")
+    if not lines:
+        return ""
+
+    if delivery_candidate == "voice":
+        candidate_guidance = (
+            "For this voice candidate, make the wording speakable, but do not change the information boundary. "
+            "When these facts predict structured or revisitable output, a faithful voice candidate may still be longer; "
+            "that is evidence for the delivery decision, not permission to drop facts."
+        )
+    elif delivery_candidate == "text":
+        candidate_guidance = (
+            "For this text candidate, preserve readable structure when useful and keep the same information boundary "
+            "that a voice candidate would need to preserve."
+        )
+    else:
+        candidate_guidance = (
+            "Use these facts to keep the final output shape predictable for delivery decisions without changing the requested answer."
+        )
+
+    return (
+        "\n## Shared output-shape facts\n"
+        "These are the same plan-derived facts available to the voice/text delivery decision. "
+        "They are not a local delivery rule and not user-facing wording. Use them to make the generated reply match what the delivery decision can reasonably predict.\n"
+        + "\n".join(lines)
+        + "\n"
+        + candidate_guidance
+        + "\n\n输出形态事实只用于保持回复与发送决策一致；不得因此省略当前请求需要的事实。\n"
+    )
+
+
 def build_round3_system_text(*, persona: str, plan_body: str) -> str:
     text = (
         f"# Your Identity\n{persona}\n\n"
         f"# Your Task\n"
         f"Use the dynamic response plan to reply naturally in your own voice. Keep the plan as internal guidance and write outcome-level language instead of plan/system meta-language. "
+        f"Some plan or evidence text may mention execution mechanisms, route facts, checks, or audio-delivery details; treat those as private evidence and transform them into natural persona-consistent wording instead of repeating the mechanism names. "
         f"The requested response form is part of the request: when the user asks for the reply itself in a machine-readable format (JSON, code, CSV) and the persona accepts the task, deliver that format directly — reproduce structured content from the plan faithfully instead of paraphrasing or wrapping it in conversation.\n\n"
         f"## Output Constraints (priority order)\n\n"
         f"### 1. Honesty\n"
@@ -304,7 +396,7 @@ def build_round3_system_text(*, persona: str, plan_body: str) -> str:
         f"  When referring to other participants, use only the recent-message facts provided below.\n"
         f"\n"
         f"### 8. Topic Anchor\n"
-        f"  The current request has priority. When the user switches topics, answer the new target. History, shared conversation, and helper reports are evidence sources, not automatic current deliverables.\n"
+        f"  The current request has priority. When the user switches topics, answer the new target. History, shared conversation, and background evidence are evidence sources, not automatic current deliverables.\n"
         f"\n"
         f"### 9. Always Respond\n"
         f"  Give a persona-consistent reply even for short messages.\n"
@@ -318,9 +410,9 @@ def build_round3_system_text(*, persona: str, plan_body: str) -> str:
 
 def round3_helper_evidence_intro() -> str:
     return (
-        "Real helper/tool evidence for this reply. Use only details present here or in the plan; "
-        "summarize them in user-facing wording. If helper reports conflict with later main-thread apply, run, "
-        "or verification facts, treat the later main-thread facts as the current project state. If a requested "
+        "Real work/tool evidence for this reply. Use only details present here or in the plan; "
+        "summarize them in user-facing wording without naming internal work routing. If earlier evidence "
+        "conflicts with later apply, run, or verification facts, treat the later facts as the current project state. If a requested "
         "detail is absent, say it needs checking.\n"
-        "helper 和工具结果是证据来源；若 helper 旧报告与后续主线程应用、运行或验证事实冲突，以后续主线程事实表示当前状态；缺失细节按未知表达。"
+        "工作证据和工具结果是证据来源；若早期生产者证据与后续应用、运行或验证事实冲突，以后续事实表示当前状态；缺失细节按未知表达。"
     )

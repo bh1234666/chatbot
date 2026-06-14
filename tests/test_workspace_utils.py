@@ -88,6 +88,11 @@ def test_derive_permanent_root():
     temp_dir = os.path.join(base, ".temp")
     os.makedirs(temp_dir, exist_ok=True)
     assert _derive_permanent_root(temp_dir) == base
+    session_dir = os.path.join(temp_dir, "_sessions", "s_abc")
+    helper_dir = os.path.join(session_dir, "_delegate_user_task")
+    os.makedirs(helper_dir, exist_ok=True)
+    assert _derive_permanent_root(session_dir) == base
+    assert _derive_permanent_root(helper_dir) == base
     # 非 .temp 路径返回 None
     assert _derive_permanent_root(base) is None
     assert _derive_permanent_root("") is None

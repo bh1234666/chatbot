@@ -407,17 +407,23 @@ SEARCH_FILES_SCHEMA = {
     "function": {
         "name": "search_files",
         "description": (
-            "Search the shared file index by keyword. Prefer the visible Shared Files index first because it already contains "
-            "the complete list and summaries; use this tool only to filter many files or locate historical generated artifacts. "
-            "Returns filename, description, and workspace path.\n\n"
-            "按关键词过滤共享文件索引；多数情况先看共享文件列表。"
+            "Search historical files and the shared file index by keyword. Prefer the visible Shared Files window first "
+            "when the candidate is already shown there, but use this tool to locate older files, files outside that "
+            "window, same-name uploads from different users, or historical generated artifacts. Returned entries include "
+            "filename, uploader/time metadata, workspace path, and the `content` summary; fetch a ready file by its node ID "
+            "before reading concrete file content.\n\n"
+            "按关键词检索历史/共享文件；返回文件名、上传者/时间、路径和 content 摘要，需读取正文时再按节点 ID 提取。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Search keyword matched against file descriptions and names.\n\n搜索关键词。",
+                    "description": (
+                        "Search keyword matched against filenames, headlines, and indexed content summaries. Use concrete "
+                        "filename words, uploader/topic words, or terms from the user reference.\n\n"
+                        "搜索文件名、标题和已索引内容摘要。"
+                    ),
                 },
                 "limit": {
                     "type": "integer",
@@ -1203,7 +1209,7 @@ DELEGATE_TOOL_SCHEMA = {
                                 "default": "code",
                                 "description": (
                                     "Product family: code=implementation/commands/benchmarks/data computation, including browser-automation evidence that requires running Playwright/Puppeteer/Selenium/Chromium-style commands; read=source-material reading/classification/triage/extraction (internal .txt evidence); "
-                                    "edit=final document/text assembly (may read small explicit input_files); draw=charts/images from data; tts=audio; verify=read-only review; "
+                                    "edit=final document/text assembly (may read small explicit input_files); draw=charts/images from data; tts=speech/narration/persona voice/TTS-file artifacts; non-speech audio stays code; verify=read-only review; "
                                     "inventory/project_map/file_summary/impact_review=project analysis. Broad/visual/uncertain extraction goes read-first.\n"
                                     "\u6309\u4ea7\u7269\u548c\u80fd\u529b\u9009 kind\uff1b\u9700\u8fd0\u884c\u6d4f\u89c8\u5668\u81ea\u52a8\u5316\u547d\u4ee4\u7684\u8bc1\u636e\u7528 code\uff0c\u5e7f\u6cdb\u6750\u6599\u5148 read\u3002"
                                 ),
@@ -2002,12 +2008,13 @@ TTS_TOOL_SCHEMA = {
     "function": {
         "name": "tts",
         "description": (
-            "Offline TTS audio generation for user-facing audio artifacts or final voice files. "
-            "For conceptual TTS questions, logs, scheduling, or ordinary voice-reply preference, answer directly or let the normal final voice-output layer handle it.\n"
+            "Offline TTS speech generation for user-facing narration, spoken artifacts, or final voice files. "
+            "For conceptual TTS questions, logs, scheduling, or general discussion of ordinary conversational voice replies, answer directly instead of generating audio.\n"
             "\n"
             "## Boundary\n"
-            "- Voice-reply requests set the final reply form; keep the final text short and spoken, then let the post-processing voice layer handle it.\n"
-            "- Audio-file requests use this tool to generate an audio artifact and return paths for deliverables.\n"
+            "- Voice-reply requests set the final reply form; either the normal final voice-output layer or a `kind=tts` helper/tool route may synthesize it when the active plan selects that route.\n"
+            "- Speech, narration, persona voice, and TTS-file requests use this tool to generate a spoken artifact and return paths for deliverables.\n"
+            "- Non-speech audio such as white noise, tones, beeps, music/signal synthesis, waveform processing, or audio analysis is code/signal work, not TTS.\n"
             "- Persona voice identity and voice policy are stable runtime settings. When the user asks to change voice identity inside the conversation, explain the boundary and continue with valid audio generation if possible.\n"
             "\n"
             "## Text Capabilities\n"
@@ -2018,11 +2025,11 @@ TTS_TOOL_SCHEMA = {
             "Normalize numbers into spoken form when useful.\n"
             "\n"
             "## Delivery\n"
-            "push=true is a legacy parameter; generation returns a file path rather than pushing automatically. "
-            "If the audio is this round's final voice reply, set final JSON `voice_reply_file` to the wav path. "
-            "If the audio is a file attachment or standalone artifact, list it in `plan.deliverables`.\n"
+            "Generation returns path facts and candidate fields; the final JSON decides how to use them. "
+            "If the generated speech file is this round's final voice reply, copy `voice_reply_file_candidate` into final JSON `voice_reply_file` and do not list it as a normal deliverable. "
+            "If the audio is a file attachment or standalone artifact, copy `deliverable_candidate` into `plan.deliverables`.\n"
             "\n"
-            "Use this tool for explicit audio-file generation, long-text narration into a file, or audio attachments for documents and reports.\n\n"
+            "Use this tool for explicit speech/voice-file generation, long-text narration into a file, or spoken audio attachments for documents and reports.\n\n"
             "TTS 用于生成音频文件或最终语音文件；普通语音回复由后置语音层处理，角色声音策略保持运行时设置。"
         ),
         "parameters": {
@@ -2046,7 +2053,7 @@ TTS_TOOL_SCHEMA = {
                 },
                 "push": {
                     "type": "boolean",
-                    "description": "[未实现] 历史遗留参数。设 true 不会推送语音,仅返回提示信息。要让用户听到语音见 description 里的三种正确做法。默认 false。",
+                    "description": "历史兼容字段；不改变合成过程。最终是否作为语音回复或普通附件由返回的候选字段和最终 ResponsePlan 决定。默认 false。",
                 },
             },
             "required": ["text"],

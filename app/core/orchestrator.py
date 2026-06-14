@@ -84,7 +84,10 @@ from app.core.delegate_cleanup import (
     cleanup_inactive_delegate_dirs as _cleanup_inactive_delegate_dirs,
     cleanup_stale_helpers_shared as _cleanup_stale_helpers_shared,
 )
-from app.core.inline_images import scan_inline_images as _scan_inline_images
+from app.core.inline_images import (
+    annotate_inline_images as _annotate_inline_images,
+    scan_inline_images as _scan_inline_images,
+)
 from app.core.workspace_lifecycle import delayed_workspace_unregister as _delayed_workspace_unregister
 from app.core.helper_activity import (
     scan_active_helpers as _scan_active_helpers,
@@ -243,7 +246,7 @@ def _explicit_current_turn_constraint_facts(
     *,
     max_items: int = 6,
     max_chars_each: int = 360,
-) -> list[str]:
+) -> dict[str, list[str]]:
     """Extract factual current-turn procedural constraints for task contracts.
 
     This does not decide whether a constraint is feasible or already satisfied.
@@ -507,7 +510,8 @@ from app.core.orchestrator_checks import (  # noqa: F401
     _AUTOFIX_FILE_INTENT_KEYWORDS,
     _AUTOFIX_FINAL_DELIVERABLE_EXTS,
     _check_sibling_files,
-    _autofix_deliverables,
+    _collect_deliverable_candidates,
+    _collect_voice_reply_file_candidates,
 )
 from app.core.orchestrator_utils import _is_internal_deliverable_file
 
@@ -602,7 +606,16 @@ def _extract_fresh_ocr_source_paths(message: str, inline_images: list[dict] | No
     ):
         _add(m.group(1))
 
-    for img in (inline_images or [])[:3]:
+    has_owner_facts = any(
+        isinstance(img, dict) and "current_user_match" in img
+        for img in (inline_images or [])
+    )
+    implicit_candidates = [
+        img for img in (inline_images or [])
+        if isinstance(img, dict)
+        and (not has_owner_facts or img.get("current_user_match") is True)
+    ]
+    for img in implicit_candidates[:3]:
         if isinstance(img, dict):
             _add(str(img.get("name") or ""))
     return out[:5]
@@ -896,7 +909,7 @@ def _helper_result_is_clean_producer_verified(item: dict) -> bool:
 
 
 def _clean_helper_boundary_note(item: dict) -> str:
-    """Build a compact Round3 fact for clean helper-owned outputs."""
+    """Build a compact Round3 fact for clean generated outputs."""
     paths: list[str] = []
 
     def add(value) -> None:
@@ -929,12 +942,12 @@ def _clean_helper_boundary_note(item: dict) -> str:
     more = f", +{len(paths) - len(shown)} more" if len(paths) > len(shown) else ""
     path_text = ", ".join(shown) + more if shown else "reported outputs"
     return (
-        "[CLEAN_HELPER_PRODUCER_BOUNDARY]\n"
-        "This helper reported outputs_complete=true and producer_self_verified=true with no blocking warnings. "
-        "Treat its report, output map, and self-check facts as the helper-owned content boundary; the main process "
-        "should not re-read helper-owned artifact bodies or re-run helper-owned checks solely to verify content. "
-        f"Helper-owned outputs: {path_text}.\n"
-        "helper 已自验且无阻塞；主进程消费短报告和文件映射，不为复验内容而读回产物正文。"
+        "[VERIFIED_OUTPUT_BOUNDARY]\n"
+        "This generation step reported outputs_complete=true and output_self_verified=true with no blocking warnings. "
+        "Treat its report, output map, and self-check facts as the generated-content boundary; the coordinator "
+        "should not re-read generated artifact bodies or re-run already covered checks solely to verify content. "
+        f"Verified outputs: {path_text}.\n"
+        "生成步骤已自验且无阻塞；协调层消费短报告和文件映射，不为重复复验内容而读回产物正文。"
     )
 
 
@@ -987,7 +1000,7 @@ def _should_continue_incomplete_complex_plan(
                 continue
             if data.get("ok") is False or data.get("outputs_complete") is False:
                 return True
-            for key in ("outputs_missing", "blocking_quality_warnings", "blocked_helpers"):
+            for key in ("outputs_missing", "blocking_quality_warnings", "blocked_work", "blocked_helpers"):
                 if data.get(key):
                     return True
             for key in ("failed_count", "incomplete_count", "resource_required_count", "quality_blocked_count"):
@@ -1092,36 +1105,6 @@ from app.core.orchestrator_prompts import (  # noqa: E402,F401
 # 想要可修改的实例 → 调 _make_default_plan() / _make_easy_plan()。
 _DEFAULT_PLAN = _make_default_plan()
 _EASY_PLAN = _make_easy_plan()
-
-
-async def _persona_voice_reply_guard(
-    persona: str,
-    user_message: str,
-    voice_target: str,
-) -> tuple[bool, str]:
-    """Check whether persona permits sending the Round2 TTS result as final voice reply."""
-    if not voice_target.strip():
-        return True, "empty voice target"
-    try:
-        from app.llm.client import chat_json
-        from app.core import guard_prompts as _gp
-        msgs = [
-            {"role": "system", "content": _gp.PERSONA_VOICE_GUARD_SYSTEM},
-            {"role": "user", "content": _gp.PERSONA_VOICE_GUARD_USER_TEMPLATE.format(
-                persona=(persona or "(none)")[:800],
-                user_message=user_message or "(empty)",
-                voice_target=voice_target[:500],
-            )},
-        ]
-        raw = await chat_json(
-            msgs,
-            lite=True,
-            reasoning="disabled",
-            metrics_tag="json.persona_voice_guard",
-        )
-        return bool(raw.get("allow", True)), str(raw.get("reason", ""))[:200]
-    except Exception as e:
-        return True, f"guard_error: {e}"
 
 
 # Delegate workspace cleanup lives in app.core.delegate_cleanup.
@@ -1415,6 +1398,18 @@ def _self_check_deliverable_skip_reason(name: str, actual_files: list[str]) -> s
             return "prefixed_candidate_has_clean_sibling"
     return ""
 
+class _SelfCheckCandidates(dict):
+    def __init__(self, *, deliverables: list[str] | None = None, key_points: list[str] | None = None):
+        super().__init__(
+            deliverables=list(deliverables or []),
+            key_points=list(key_points or []),
+        )
+
+    def __eq__(self, other):
+        if isinstance(other, list):
+            return self.get("deliverables", []) == other
+        return super().__eq__(other)
+
 
 async def _self_check_plan(
     plan: ResponsePlan,
@@ -1422,10 +1417,10 @@ async def _self_check_plan(
     *,
     trace_id: str = "?",
     timeout_sec: float = 3.0,
-) -> None:
+) -> _SelfCheckCandidates:
     """plan 自检(2026-05-02 part10 P6):hard 路径出 plan 后用 lite 核对完整性。
 
-    只 mutate plan,不返回。失败 / 超时不抛(调用方已包 try/except)。
+    只直接补 key_points；deliverables 只返回候选文件名交给 LLM 交付审核。
 
     检查点:
     - workspace 里实际新生成的文件是否都被 plan.deliverables 覆盖
@@ -1456,10 +1451,10 @@ async def _self_check_plan(
             except OSError:
                 continue
     except OSError:
-        return  # workspace 不可读,跳过自检
+        return _SelfCheckCandidates()
 
     if not actual_files:
-        return  # 没产物,无需自检
+        return _SelfCheckCandidates()
 
     from app.core import guard_prompts as _gp
     user_payload = (
@@ -1517,22 +1512,22 @@ async def _self_check_plan(
             "round2.self_check.timeout",
             f"plan self-check exceeded {timeout_sec}s; using plan as-is",
         )
-        return
+        return _SelfCheckCandidates()
 
     content = resp.choices[0].message.content or ""
     try:
         parsed = json.loads(content)
     except (json.JSONDecodeError, ValueError):
         log.warning("[%s] self_check returned non-JSON: %s", trace_id, content[:200])
-        return
+        return _SelfCheckCandidates()
     if not isinstance(parsed, dict):
-        return
+        return _SelfCheckCandidates()
 
     missing_d = parsed.get("missing_deliverables") or []
     missing_kp = parsed.get("missing_key_points") or []
 
-    added_d = 0
-    added_kp = 0
+    candidate_d: list[str] = []
+    candidate_kp: list[str] = []
     if isinstance(missing_d, list):
         existing_d = set(plan.deliverables or [])
         for item in missing_d:
@@ -1547,25 +1542,193 @@ async def _self_check_plan(
                 )
                 continue
             if item_clean in actual_files:
-                if item_clean not in existing_d:
-                    plan.deliverables.append(item_clean)
-                    existing_d.add(item_clean)
-                    added_d += 1
+                if item_clean not in existing_d and item_clean not in candidate_d:
+                    candidate_d.append(item_clean)
 
     if isinstance(missing_kp, list):
         for item in missing_kp[:3]:  # 上限 3 条
             if isinstance(item, str) and item.strip() and len(item.strip()) <= 200:
-                if item.strip() not in (plan.key_points or []):
-                    plan.key_points.append(item.strip())
-                    added_kp += 1
+                text = item.strip()
+                if text not in (plan.key_points or []) and text not in candidate_kp:
+                    candidate_kp.append(text)
 
-    if added_d or added_kp:
+    if candidate_d or candidate_kp:
         debug.log(
-            "round2.self_check.applied",
-            f"self-check added: deliverables+={added_d}, key_points+={added_kp}",
+            "round2.self_check.candidates",
+            "self-check found candidate facts for Round2 review",
+            {"deliverables": candidate_d, "key_points": candidate_kp},
         )
     else:
         debug.log("round2.self_check.ok", "plan looks complete; no additions")
+    return _SelfCheckCandidates(deliverables=candidate_d, key_points=candidate_kp)
+
+
+async def _ask_round2_to_revise_plan_for_delivery_candidates(
+    plan: ResponsePlan,
+    *,
+    round2_messages: list[dict],
+    model_spec,
+    user_message: str,
+    candidate_files: list[str],
+    candidate_key_points: list[str] | None = None,
+    candidate_voice_reply_files: list[str] | None = None,
+    voice_reply_review_facts: list[dict] | None = None,
+    trace_id: str = "?",
+    timeout_sec: float = 20.0,
+) -> list[dict] | None:
+    """Ask the same Round2 context to decide whether candidate facts belong in the plan."""
+    clean_candidates = []
+    seen = set()
+    for item in candidate_files:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        clean_candidates.append(text)
+    clean_key_points: list[str] = []
+    seen_key_points: set[str] = set()
+    for item in candidate_key_points or []:
+        text = str(item or "").strip()
+        if not text or text in seen_key_points:
+            continue
+        seen_key_points.add(text)
+        clean_key_points.append(text)
+    clean_voice_candidates: list[str] = []
+    seen_voice_candidates: set[str] = set()
+    for item in candidate_voice_reply_files or []:
+        text = str(item or "").strip()
+        if not text or text in seen_voice_candidates:
+            continue
+        seen_voice_candidates.add(text)
+        clean_voice_candidates.append(text)
+    clean_voice_review_facts: list[dict] = []
+    for item in voice_reply_review_facts or []:
+        if isinstance(item, dict) and item:
+            clean_voice_review_facts.append(item)
+    if not clean_candidates and not clean_key_points and not clean_voice_candidates and not clean_voice_review_facts:
+        return None
+
+    messages: list[dict] = []
+    try:
+        try:
+            plan_payload = plan.model_dump()
+        except AttributeError:
+            plan_payload = plan.dict()
+        candidate_payload = {
+            "candidate_files": clean_candidates[:12],
+            "candidate_key_points": clean_key_points[:8],
+            "candidate_voice_reply_files": clean_voice_candidates[:8],
+            "voice_reply_review_facts": clean_voice_review_facts[:4],
+            "facts": [
+                "These are candidate file facts, not automatic deliverables.",
+                "Candidate key points are review facts, not automatic plan facts.",
+                "Candidate voice reply files are generated-speech facts for the current turn, not automatic attachments.",
+                "Voice reply review facts are timing/provenance facts for an already selected voice_reply_file, not commands.",
+                "Candidates were found after internal/input/scratch paths were filtered out.",
+                "Candidates have current Round2 toolchain production evidence when collected from tool messages.",
+                "A candidate voice reply file belongs in voice_reply_file only if it is the final spoken reply for this current answer. If it is an audio artifact the user requested as a file, it may belong in deliverables. Otherwise leave it out.",
+                "Old files, files from other concurrent users/turns, internal evidence, scratch scripts, caches, input media, or recovery-only files must remain out of deliverables and voice_reply_file unless current evidence explicitly reuses them for this request.",
+            ],
+        }
+        messages = [m.copy() if isinstance(m, dict) else m for m in round2_messages]
+        messages.append({
+            "role": "user",
+            "content": (
+                "## Delivery Candidate Facts For Current Round2 Plan\n"
+                "Use the same active-task context above. Decide whether the current ResponsePlan should add any candidate files to deliverables, "
+                "whether any candidate voice reply file should become voice_reply_file, and whether candidate key points belong in key_points. "
+                "Return the full revised ResponsePlan JSON object, not a patch. Preserve existing correct plan fields. "
+                "Add a candidate to deliverables only if it clearly belongs to the current user request, was produced or accepted by this current toolchain, and should be sent as a user-facing file. "
+                "Set voice_reply_file only to a listed candidate_voice_reply_files item when that generated speech file is the final spoken reply for the current turn; do not also add that same file to deliverables unless the user requested an audio attachment/file. "
+                "If voice_reply_review_facts say the current plan's voice_reply_file pre-existed this round or lacks current TTS/helper evidence, keep it only when the active-task context explicitly reuses it as this turn's final spoken reply; otherwise return an empty voice_reply_file. "
+                "Add candidate key points only when they are necessary user-facing facts for this same active task. "
+                "If the task failed, was interrupted, or the user asked for inspection/analysis rather than a file, prefer keeping deliverables empty unless current evidence explicitly says a final file is ready.\n\n"
+                "当前候选文件只是事实，不是交付决定；由本 Round2 上下文决定是否补入 deliverables。\n\n"
+                "Current user request:\n"
+                f"{user_message or ''}\n\n"
+                "Current ResponsePlan JSON:\n"
+                f"{json.dumps(plan_payload, ensure_ascii=False, sort_keys=True)}\n\n"
+                "Candidate facts JSON:\n"
+                f"{json.dumps(candidate_payload, ensure_ascii=False, sort_keys=True)}"
+            ),
+        })
+        raw = await asyncio.wait_for(
+            llm.chat_json(
+                messages,
+                model_spec=model_spec,
+                reasoning="disabled",
+                metrics_tag="json.round2_delivery_revision",
+            ),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        debug.log(
+            "round2.delivery_revision.timeout",
+            f"delivery revision exceeded {timeout_sec}s; leaving deliverables unchanged",
+        )
+        return None
+    except Exception as exc:
+        log.warning("[%s] delivery revision failed: %s", trace_id, str(exc)[:200])
+        return None
+
+    allowed = set(clean_candidates)
+    allowed_voice = set(clean_voice_candidates)
+    added: list[str] = []
+    existing = set(plan.deliverables or [])
+    revised_deliverables = raw.get("deliverables") or []
+    for item in revised_deliverables:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if name in allowed and name not in existing:
+            plan.deliverables.append(name)
+            existing.add(name)
+            added.append(name)
+    old_voice_reply_file = (plan.voice_reply_file or "").strip()
+    revised_voice_reply_file = str(raw.get("voice_reply_file") or "").strip()
+    voice_added = ""
+    if revised_voice_reply_file in allowed_voice:
+        plan.voice_reply_file = revised_voice_reply_file
+        voice_added = revised_voice_reply_file
+        if revised_voice_reply_file in plan.deliverables:
+            plan.deliverables = [item for item in plan.deliverables if item != revised_voice_reply_file]
+    elif revised_voice_reply_file and revised_voice_reply_file != old_voice_reply_file:
+        debug.log(
+            "round2.delivery_revision.voice_candidate_ignored",
+            f"ignored voice_reply_file outside current candidates: {revised_voice_reply_file!r}",
+            {"allowed_voice": clean_voice_candidates},
+        )
+    elif clean_voice_review_facts and not revised_voice_reply_file:
+        plan.voice_reply_file = ""
+    kp_added = 0
+    for item in (raw.get("key_points") or [])[:8]:
+        if isinstance(item, str) and item.strip() and len(item.strip()) <= 200:
+            if item.strip() not in (plan.key_points or []):
+                plan.key_points.append(item.strip())
+                kp_added += 1
+    debug.log(
+        "round2.delivery_revision",
+        f"Round2 revised files={len(clean_candidates)} key_points={len(clean_key_points)}, "
+        f"voice_candidates={len(clean_voice_candidates)}, added deliverables={added}, "
+        f"voice_reply_file={voice_added or '(unchanged)'}, key_points+={kp_added}",
+        {
+            "candidates": clean_candidates,
+            "candidate_key_points": clean_key_points,
+            "candidate_voice_reply_files": clean_voice_candidates,
+            "added": added,
+            "voice_reply_file": plan.voice_reply_file,
+            "intent": str(raw.get("intent") or "")[:200],
+            "internal_note": str(raw.get("internal_note") or "")[:200],
+        },
+    )
+    try:
+        messages.append({
+            "role": "assistant",
+            "content": json.dumps(raw, ensure_ascii=False),
+        })
+    except Exception:
+        pass
+    return messages
 
 
 
@@ -1940,6 +2103,7 @@ async def _round2(
         return await tool_dispatch(
             name, args,
             archive_id=archive_id, group_id=group_id, user_id=user_id,
+            user_name="",
             workspace_dir=workspace_dir,
         )
 
@@ -2470,10 +2634,10 @@ async def _round2(
                                 excerpt = boundary_note
                         if helper_incomplete:
                             excerpt = (
-                                "[INCOMPLETE_HELPER_RESULT]\n"
-                                "This helper did not complete successfully. Treat the following text only as failure/blocker "
+                                "[INCOMPLETE_WORK_RESULT]\n"
+                                "This producer step did not complete successfully. Treat the following text only as failure/blocker "
                                 "status, not as factual task output, statistics, file content, benchmark data, or verified deliverable evidence.\n"
-                                "该 helper 未成功完成；下面内容只能用于说明失败/阻塞，不能当作任务结果或统计事实。\n\n"
+                                "该生产步骤未成功完成；下面内容只能用于说明失败/阻塞，不能当作任务结果或统计事实。\n\n"
                                 f"{excerpt}"
                             )
                         helper_excerpts[tid] = excerpt
@@ -2573,7 +2737,7 @@ async def _round2(
                 evidence_required=[
                     "current user turn",
                     "prior plan/toolchain/agent_state facts when the turn refers back",
-                    "verified tool or helper evidence for final deliverables",
+                    "verified tool or producer evidence for final deliverables",
                     *[
                         "evidence compared with explicit current-turn constraint: " + item.split(": ", 1)[-1]
                         for item in _explicit_constraints[:4]
@@ -3099,6 +3263,10 @@ async def _round2(
     # 失败/超时不阻塞主流程,只 log 提示。
     # 2026-06-11: clean helper producer boundary 已经是内容验收边界；主进程不再用
     # plan 自检补充读取/验证压力，避免把 producer 自检产物重新拉回主上下文。
+    delivery_candidate_files: list[str] = []
+    self_check_key_point_candidates: list[str] = []
+    voice_reply_candidate_files: list[str] = []
+    voice_reply_review_facts: list[dict] = []
     if (think                             # main 模型(说明走了 medium_coding / hard / veryhard)
             and not (abort_event and abort_event.is_set())
             and workspace_dir
@@ -3106,14 +3274,89 @@ async def _round2(
             and not plan.upgrade_to_hard  # 这个 plan 是终态(没有再升级请求)
             and not plan.upgrade_to_veryhard):
         try:
-            await _self_check_plan(
+            self_check_candidates = await _self_check_plan(
                 plan, workspace_dir,
                 trace_id=debug.current_trace_id() or "?",
             )
+            if isinstance(self_check_candidates, dict):
+                delivery_candidate_files.extend(self_check_candidates.get("deliverables") or [])
+                self_check_key_point_candidates.extend(self_check_candidates.get("key_points") or [])
+            else:
+                delivery_candidate_files.extend(self_check_candidates or [])
         except asyncio.TimeoutError:
             debug.log("round2.self_check.timeout", "self-check exceeded 3s; skipped")
         except Exception:
             log.exception("round2 plan self-check failed (non-fatal)")
+
+    if (
+        workspace_dir
+        and not plan.upgrade_to_hard
+        and not plan.upgrade_to_veryhard
+    ):
+        try:
+            from app.core.runtime_mode import is_environment_mode as _is_environment_mode
+            _env_mode_for_deliverables = bool(_is_environment_mode())
+        except Exception:
+            _env_mode_for_deliverables = False
+        if not _env_mode_for_deliverables:
+            try:
+                delivery_candidate_files.extend(_collect_deliverable_candidates(
+                    plan,
+                    user_message=user_message_text or user_message_for_fallback,
+                    needs_tools=needs_tools,
+                    workspace_dir=workspace_dir,
+                    files_before=set(macro_signals.get("workspace_snapshot") or set()),
+                    current_tool_messages=final_msgs if "final_msgs" in locals() else [],
+                    require_current_evidence=True,
+                ))
+            except Exception:
+                log.exception("round2 delivery candidate collection failed (non-fatal)")
+        try:
+            voice_reply_candidate_files.extend(
+                _collect_voice_reply_file_candidates(final_msgs if "final_msgs" in locals() else [])
+            )
+        except Exception:
+            log.exception("round2 voice reply candidate collection failed (non-fatal)")
+        planned_voice_reply_file = str(getattr(plan, "voice_reply_file", "") or "").strip()
+        if planned_voice_reply_file:
+            planned_voice_basename = os.path.basename(planned_voice_reply_file.replace("\\", "/"))
+            workspace_snapshot = {
+                os.path.basename(str(item).replace("\\", "/"))
+                for item in (macro_signals.get("workspace_snapshot") or set())
+            }
+            current_voice_candidates = {
+                os.path.basename(str(item).replace("\\", "/"))
+                for item in voice_reply_candidate_files
+            }
+            if planned_voice_basename and planned_voice_basename not in current_voice_candidates:
+                voice_reply_review_facts.append({
+                    "voice_reply_file": planned_voice_basename,
+                    "preexisting_at_round_start": planned_voice_basename in workspace_snapshot,
+                    "has_current_tts_or_helper_candidate": False,
+                    "fact": (
+                        "The plan selected this voice_reply_file, but current tool messages did not "
+                        "provide it as a current TTS/helper voice candidate. Treat this as a provenance "
+                        "fact for LLM review, not an automatic rejection."
+                    ),
+                })
+    if (
+        (delivery_candidate_files or self_check_key_point_candidates or voice_reply_candidate_files or voice_reply_review_facts)
+        and not plan.upgrade_to_hard
+        and not plan.upgrade_to_veryhard
+    ):
+        revised_msgs = await _ask_round2_to_revise_plan_for_delivery_candidates(
+            plan,
+            round2_messages=final_msgs if "final_msgs" in locals() else msgs,
+            model_spec=_spec,
+            user_message=user_message_text or user_message_for_fallback,
+            candidate_files=delivery_candidate_files,
+            candidate_key_points=self_check_key_point_candidates,
+            candidate_voice_reply_files=voice_reply_candidate_files,
+            voice_reply_review_facts=voice_reply_review_facts,
+            trace_id=debug.current_trace_id() or "?",
+        )
+        if revised_msgs:
+            final_msgs = revised_msgs
 
     debug.log("round2.checkpoint", "before push helper_excerpts")
 
@@ -3530,13 +3773,17 @@ async def _round3(
     delivered_as_zip: bool = False,
     zip_member_count: int = 0,
     voice_intent: str = "neutral",
+    delivery_candidate: str | None = None,
+    output_shape_facts: dict | None = None,
 ) -> AsyncIterator[str]:
     """流式输出回复。abort_event 设置后立即停止 yield 后续 token。
 
     think: True → reasoning-capable model; False → fast non-reasoning model。
     tier: "low" / "mid" / "high" capability level。
     delivered_as_zip / zip_member_count: 2026-05-09 Patch 34 加,Round 3 措辞用。
-    voice_intent: 2026-05-16 Round 14 加. "demand"/"refuse"/"neutral", 影响 prompt 文字策略。
+    voice_intent: 2026-05-16 Round 14 加. "demand"/"refuse"/"neutral", 表示当前用户真实语音/文字意图。
+    delivery_candidate: 并行生成时的候选交付形态("text"/"voice"), 不表示用户意图。
+    output_shape_facts: 与语音/文字路由共用的计划输出形态事实。
     """
     from app.llm.model_pool import resolve_task
     _r3_spec = resolve_task("round3_easy" if tier == "low" else "round3_normal")
@@ -3550,6 +3797,8 @@ async def _round3(
         delivered_as_zip=delivered_as_zip,
         zip_member_count=zip_member_count,
         voice_intent=voice_intent,
+        delivery_candidate=delivery_candidate,
+        output_shape_facts=output_shape_facts,
     )
 
     # 2026-05-02 part10 (A3):TTFT 期间 abort racing。
@@ -3624,26 +3873,66 @@ async def _round3_parallel(
 ) -> AsyncIterator[str]:
     """三者并行 round3:
        1. 决策 task (lite, 几百 ms): 看 plan/人设/最近对话决定 voice or text
-       2. 文字版 round3 task: voice_intent='refuse', 走文字风格 prompt
-       3. 语音版 round3 task: voice_intent='demand', 走口语短句 prompt
+       2. 文字版 round3 task: delivery_candidate='text', 走文字候选 prompt
+       3. 语音版 round3 task: delivery_candidate='voice', 走口语候选 prompt
 
     决策出来后, cancel 败者, flush 胜者 buffer 给用户. 之后 stream 胜者剩余 token.
     
     资源代价: 2x round3 LLM 调用 (决策 lite 几乎 0). 换取用户**0 延迟感知**.
     设计来自用户 (2026-05-16): "三者并行...决策出来废弃一边"
     """
-    from app.llm.voice_output import decide_voice_with_context_lite
+    from app.llm.voice_output import (
+        decide_voice_with_context_lite,
+        _project_reply_shape_facts,
+        _round3_voice_route_snapshot,
+    )
+    _round3_voice_route_snapshot.set(None)
     
     # 三个 task buffer
     text_buf: list[str] = []
     voice_buf: list[str] = []
     text_done = asyncio.Event()
     voice_done = asyncio.Event()
+    text_preview_ready = asyncio.Event()
+    voice_preview_ready = asyncio.Event()
     text_error: BaseException | None = None
     voice_error: BaseException | None = None
     
+    current_voice_intent = "neutral"
+    route_preview_target_chars = 120
+    voice_preference = max(0.0, min(1.0, float(voice_preference or 0.0)))
+    has_user_facing_files = bool(
+        files
+        or delivered_as_zip
+        or (getattr(plan, "deliverables", None) if plan else None)
+        or (getattr(plan, "delivery_partial", None) if plan else None)
+    )
+    projected_reply_shape_facts = _project_reply_shape_facts(
+        plan,
+        has_user_facing_files=has_user_facing_files,
+        user_message=message,
+    )
+
+    def _candidate_route_fact(buf: list[str], done_ev: asyncio.Event, *, limit: int = 320) -> dict:
+        raw_text = "".join(buf)
+        visible_chars = len("".join(raw_text.split()))
+        preview = " ".join(raw_text.split())
+        truncated = len(preview) > limit
+        if truncated:
+            preview = preview[:limit].rstrip() + "..."
+        return {
+            "text": preview,
+            "raw_chars": len(raw_text),
+            "visible_chars": visible_chars,
+            "done": done_ev.is_set(),
+            "truncated": truncated,
+        }
+
+    def _visible_preview_chars(buf: list[str]) -> int:
+        return len("".join("".join(buf).split()))
+
     async def _drive_side(buf: list[str], done_ev: asyncio.Event,
-                          voice_intent: str, side_name: str) -> None:
+                          side_name: str, preview_ev: asyncio.Event) -> None:
         nonlocal text_error, voice_error
         try:
             async for tok in _round3(
@@ -3656,9 +3945,16 @@ async def _round3_parallel(
                 think=think, tier=tier,
                 delivered_as_zip=delivered_as_zip,
                 zip_member_count=zip_member_count,
-                voice_intent=voice_intent,
+                voice_intent=current_voice_intent,
+                delivery_candidate=side_name,
+                output_shape_facts=projected_reply_shape_facts,
             ):
                 buf.append(tok)
+                if (
+                    not preview_ev.is_set()
+                    and _visible_preview_chars(buf) >= route_preview_target_chars
+                ):
+                    preview_ev.set()
         except asyncio.CancelledError:
             raise
         except BaseException as e:
@@ -3667,75 +3963,112 @@ async def _round3_parallel(
             else:
                 voice_error = e
         finally:
+            preview_ev.set()
             done_ev.set()
     
-    # 同时启动三者
-    voice_preference = max(0.0, min(1.0, float(voice_preference or 0.0)))
+    # 同时启动候选；路由分类器也并发启动，但读取 prompt 前的实时缓冲快照。
     decision_task: asyncio.Task | None = None
     voice_task: asyncio.Task | None = None
+    route_snapshot: dict | None = None
 
-    if 0.0 < voice_preference < 1.0:
-        decision_task = asyncio.create_task(
-            decide_voice_with_context_lite(
-                plan=plan, persona=persona, user_message=message,
-                recent_messages=recent_group_messages or hot_user,
-                voice_preference=voice_preference,
-            ),
-            name="round3_decision",
+    def _current_candidate_previews() -> dict:
+        return {
+            "text": _candidate_route_fact(text_buf, text_done),
+            "voice": _candidate_route_fact(voice_buf, voice_done),
+        }
+
+    def _log_route_input(candidate_previews: dict, *, phase: str) -> None:
+        debug.log(
+            "round3.parallel_route_input",
+            f"phase={phase} candidate_preview "
+            f"text_chars={candidate_previews['text']['visible_chars']} "
+            f"voice_chars={candidate_previews['voice']['visible_chars']} "
+            f"shape={projected_reply_shape_facts.get('why', '')} "
+            f"text_done={text_done.is_set()} voice_done={voice_done.is_set()} "
+            f"text_truncated={candidate_previews['text']['truncated']} "
+            f"voice_truncated={candidate_previews['voice']['truncated']} "
+            "preview_wait_policy=none",
         )
+
+    debug.log(
+        "round3.parallel_deciding",
+        f"voice_preference={voice_preference:.2f} user_voice_intent={current_voice_intent} "
+        f"has_user_facing_files={has_user_facing_files} plan_present={plan is not None}",
+    )
     text_task = asyncio.create_task(
-        _drive_side(text_buf, text_done, "refuse", "text"),
+        _drive_side(text_buf, text_done, "text", text_preview_ready),
         name="round3_text",
     )
     if voice_preference > 0.0:
         voice_task = asyncio.create_task(
-            _drive_side(voice_buf, voice_done, "demand", "voice"),
+            _drive_side(voice_buf, voice_done, "voice", voice_preview_ready),
             name="round3_voice",
         )
+    else:
+        voice_preview_ready.set()
+
+    if 0.0 < voice_preference < 1.0:
+        candidate_previews = _current_candidate_previews()
+        route_snapshot = {
+            "projected_reply_shape": projected_reply_shape_facts,
+            "candidate_previews": candidate_previews,
+            "voice_preference": voice_preference,
+            "user_voice_intent": current_voice_intent,
+            "has_user_facing_files": has_user_facing_files,
+            "preview_wait_timed_out": False,
+            "preview_wait_policy": "none; classifier starts in parallel with round3 candidates",
+        }
+        _round3_voice_route_snapshot.set(route_snapshot)
+        _log_route_input(candidate_previews, phase="initial")
+
+        async def _decide_delivery_route() -> str:
+            live_previews = _current_candidate_previews()
+            if route_snapshot is not None:
+                route_snapshot["candidate_previews"] = live_previews
+            _log_route_input(live_previews, phase="classifier_prompt")
+            return await decide_voice_with_context_lite(
+                plan=plan, persona=persona, user_message=message,
+                recent_messages=recent_group_messages or hot_user,
+                voice_preference=voice_preference,
+                has_user_facing_files=has_user_facing_files,
+                candidate_previews=live_previews,
+            )
+
+        decision_task = asyncio.create_task(
+            _decide_delivery_route(),
+            name="round3_decision",
+        )
     
-    # 等 lite 分流决策完成；即使 Round3 两侧先完成，也不再用 length_hint fallback 抢跑。
+    # Route authorization is needed before TTS synthesis, not before visible
+    # text streaming. Do not serialize the user's first token on the voice
+    # classifier.
     if voice_preference <= 0.0:
         decision = "text"
     elif voice_preference >= 1.0:
         decision = "voice"
     else:
-        assert decision_task is not None
-        while not decision_task.done() and not text_buf and not text_done.is_set():
-            if abort_event is not None and abort_event.is_set():
-                break
-            await asyncio.sleep(0.02)
-        if not decision_task.done() and (text_buf or text_done.is_set() or (abort_event is not None and abort_event.is_set())):
-            decision_task.cancel()
-            decision = "text"
-        else:
-            decision = await decision_task
+        decision = "unavailable"
     
-    # lite 决策一完成就选边；未选中的边如果还没完成，立刻取消，然后直接输出胜者 buffer/后续 token。
-    if decision == "voice":
-        assert voice_task is not None
-        loser_task = text_task
-        chosen_task = voice_task
-        chosen_buf = voice_buf
-        chosen_done = voice_done
-        chosen_side = "voice"
-    else:
-        loser_task = voice_task
-        chosen_task = text_task
-        chosen_buf = text_buf
-        chosen_done = text_done
-        chosen_side = "text"
+    # The route decision authorizes delivery mode only. The actual reply text
+    # remains the canonical text candidate so the final voice review and TTS
+    # synthesize the same complete reply the user would otherwise read.
+    loser_task = voice_task
+    chosen_task = text_task
+    chosen_buf = text_buf
+    chosen_done = text_done
+    chosen_side = "text"
 
     loser_was_done = bool(loser_task is not None and loser_task.done())
-    if loser_task is not None and not loser_was_done:
-        loser_task.cancel()
 
     # 2026-05-16: 设 ContextVar 让后置 decide_voice 跳过重复决策
     from app.llm.voice_output import _round3_parallel_decision
-    _round3_parallel_decision.set(chosen_side)
+    _round3_parallel_decision.set(decision if decision in {"voice", "text", "unavailable"} else chosen_side)
     
     debug.log(
         "round3.parallel_decided",
-        f"winner={chosen_side} (loser {'already done' if loser_was_done else 'cancelled'}, buf_at_decision={len(chosen_buf)} tokens)",
+        f"winner={chosen_side} delivery_authorization={decision} "
+        f"voice_preference={voice_preference:.2f} user_voice_intent={current_voice_intent} "
+        f"(other candidate {'already done' if loser_was_done else 'running'}, buf_at_decision={len(chosen_buf)} tokens)",
     )
     
     # Flush 胜者 buffer + 继续 stream
@@ -3773,6 +4106,39 @@ async def _round3_parallel(
             for tok in loser_buf_actual:
                 yield tok
                 fallback_yielded = True
+
+        if 0.0 < voice_preference < 1.0 and decision_task is not None:
+            if abort_event is not None and abort_event.is_set():
+                decision_task.cancel()
+            if not decision_task.cancelled():
+                try:
+                    routed_decision = await decision_task
+                except asyncio.CancelledError:
+                    routed_decision = "unavailable"
+                except Exception:
+                    debug.log(
+                        "round3.parallel_decision_unavailable",
+                        "classifier task failed; no LLM voice/text decision; "
+                        f"voice_preference={voice_preference:.2f}",
+                    )
+                    routed_decision = "unavailable"
+                if routed_decision not in {"voice", "text"}:
+                    debug.log(
+                        "round3.parallel_decision_unavailable",
+                        f"classifier returned {routed_decision!r}; no LLM voice/text decision; "
+                        "voice delivery not authorized; keeping visible text reply "
+                        f"(voice_preference={voice_preference:.2f}, "
+                        f"has_user_facing_files={has_user_facing_files}, plan_present={plan is not None}, "
+                        f"text_buf={len(text_buf)})",
+                    )
+                    routed_decision = "unavailable"
+                decision = routed_decision
+                _round3_parallel_decision.set(decision)
+                debug.log(
+                    "round3.parallel_authorization_ready",
+                    f"delivery_authorization={decision} "
+                    f"voice_preference={voice_preference:.2f} text_tokens={len(text_buf)}",
+                )
     finally:
         # 清理 tasks (yield 不能在这里, 上面已经 yield 完了)
         for t in (decision_task, chosen_task, loser_task):

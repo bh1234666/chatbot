@@ -343,30 +343,37 @@ def _derive_permanent_root(main_ws: str) -> str | None:
     """从 .temp/ 路径推导永久根 (P46 辅助)。
 
     入参典型: `<root>/<archive>/<group>/.temp` (主线程的 cwd)
+    也接受会话隔离目录: `<root>/<archive>/<group>/.temp/_sessions/<session>`
+    以及其下的 `_delegate_*` helper 沙箱。
     返回:     `<root>/<archive>/<group>`   (永久根, 跨会话保留)
 
-    如果入参不是 .temp/ 路径, 返回 None (避免误操作)。
+    如果入参不在 .temp/ 树内, 返回 None (避免误操作)。
     """
     if not main_ws:
         return None
     _norm = main_ws.rstrip("/\\")
-    if os.path.basename(_norm) != ".temp":
-        return None  # 不是 .temp/, 不是双层结构
-    _parent = os.path.dirname(_norm)
-    if not _parent or not os.path.isdir(_parent):
-        return None
-    return _parent
+    cur = _norm
+    while cur:
+        if os.path.basename(cur) == ".temp":
+            _parent = os.path.dirname(cur)
+            if _parent and os.path.isdir(_parent):
+                return _parent
+            return None
+        parent = os.path.dirname(cur)
+        if not parent or parent == cur:
+            return None
+        cur = parent
 
 
-def _extract_reported_output_files(report: str) -> list[str]:
+def _extract_reported_output_files(report: str, *, allow_inline: bool = True) -> list[str]:
     """Extract strictly formatted helper-declared output files.
 
     Helpers are instructed to report a JSON block such as
     `{"files": ["_env/out.md"]}` under an `Output files` report section. Disk
-    recovery accepts fenced JSON or a bare JSON block on the next line, but it
-    must not repair malformed inline helper reports by scraping arbitrary text;
-    malformed format is evidence for retrying the helper/report, not evidence
-    of success.
+    recovery accepts fenced JSON or a bare JSON block on the next line. Live
+    helper reports may also use a same-line JSON declaration because the same
+    run can still validate copied files; disk recovery keeps that form disabled
+    so stale malformed reports do not become verified success.
 
     磁盘恢复只信任规范输出区块；格式错误交给 LLM 续作修正。
     """
@@ -376,9 +383,13 @@ def _extract_reported_output_files(report: str) -> list[str]:
         text,
     )
     if not section_match:
+        section_match = re.search(
+            r"(?is)(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:##\s*)?Output files(?:\*\*)?\s*(?:\n|\r\n)+\s*(\{[^\n\r]*?\"files\"\s*:\s*\[[^\n\r]*?\][^\n\r]*?\})",
+            text,
+        )
+    if not section_match and allow_inline:
         # Inline form `Output files: {"files": [...]}` (same line) is an
-        # explicit machine-readable declaration too; requiring a newline made
-        # the runner burn a full repair LLM turn on an already-valid report.
+        # explicit machine-readable declaration in a live helper result.
         section_match = re.search(
             r"(?is)(?:^|\n)\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:##\s*)?Output files(?:\*\*)?\s*[:：]?\s*(?:\n|\r\n)?\s*(\{[^\n\r]*?\"files\"\s*:\s*\[[^\n\r]*?\][^\n\r]*?\})",
             text,
@@ -402,7 +413,7 @@ def _extract_reported_output_files(report: str) -> list[str]:
     return candidates[:50]
 
 
-def _has_malformed_output_files_attempt(report: str) -> bool:
+def _has_malformed_output_files_attempt(report: str, *, allow_inline: bool = True) -> bool:
     """Return true when a helper tried to declare files but missed the contract."""
     text = str(report or "")
     if not text:
@@ -410,7 +421,7 @@ def _has_malformed_output_files_attempt(report: str) -> bool:
     low = text.lower()
     if "output files" in low or '"files"' in text or "'files'" in text:
         try:
-            return not bool(_extract_reported_output_files(text))
+            return not bool(_extract_reported_output_files(text, allow_inline=allow_inline))
         except Exception:
             return True
     return False
@@ -458,8 +469,11 @@ def _disk_result_for_collect(
             report = f.read()
     except OSError:
         return None
-    reported_files = _extract_reported_output_files(report)
-    malformed_output_files = not reported_files and _has_malformed_output_files_attempt(report)
+    reported_files = _extract_reported_output_files(report, allow_inline=False)
+    malformed_output_files = (
+        not reported_files
+        and _has_malformed_output_files_attempt(report, allow_inline=False)
+    )
     resolved_files: list[str] = []
     missing_files: list[str] = []
     for reported in reported_files:

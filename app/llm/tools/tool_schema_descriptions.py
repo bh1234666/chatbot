@@ -155,10 +155,19 @@ def _apply_english_schema_descriptions() -> None:
     _set_prop_description(TTS_WORKSPACE_TOOL_SCHEMA, "content", "Short transcript, manifest, or quality note for the main thread.", "给主线程看的短文本材料。")
     _set_tool_description(
         SEARCH_FILES_SCHEMA,
-        "Search the file knowledge index by keyword and return matching filenames, descriptions, and workspace paths.",
-        "按关键词搜索文件知识索引。",
+        (
+            "Search the shared chat-file knowledge index by keyword, including historical files that are not currently "
+            "shown in the visible Shared Files window. Results include file metadata plus the indexed `content` summary; "
+            "use that summary to choose whether a file should be fetched for full inspection."
+        ),
+        "按关键词搜索共享聊天文件索引；结果包含文件元数据和 content 摘要。",
     )
-    _set_prop_description(SEARCH_FILES_SCHEMA, "query", "Search keywords matched against file names and descriptions.", "搜索关键词。")
+    _set_prop_description(
+        SEARCH_FILES_SCHEMA,
+        "query",
+        "Search keywords matched against file names, headlines, and indexed content summaries.",
+        "搜索关键词会匹配文件名、标题和摘要。",
+    )
     _set_prop_description(SEARCH_FILES_SCHEMA, "limit", "Maximum number of results to return.", "返回结果数量上限。")
     _set_tool_description(
         FETCH_GROUP_FILE_SCHEMA,
@@ -551,9 +560,9 @@ def _apply_english_schema_descriptions() -> None:
             "materials, prepared archive contents, text files, images, PDFs, Office files, screenshots, forms, and scanned "
             "or visual content; script or library wording stays read when the script is only a reading method. For many source files, split into parallel read helpers by group or batch before downstream code/edit work. A bounded final text/Markdown/Office synthesis task with explicit `input_files` can be `edit` directly. Use `edit` for "
             "documents, prose/report sections assembled from verified evidence, and Office/PDF assembly. For document-delivery tasks, benchmark/code outputs are inputs to edit, not substitutes for the final document. Use `draw` for final image/chart files from data or specs, `verify` for checking "
-            "existing code/images/documents, `tts` for audio generation, and "
+            "existing code/images/documents, `tts` for speech, narration, persona voice, or requested TTS-file generation, and "
             "`project_map`/`file_summary`/`impact_review` for project analysis; selected source/config file summaries "
-            "in a code project stay `file_summary`. Use mode='hard' for stronger retries while "
+            "in a code project stay `file_summary`. Non-speech audio such as white noise, tones, beeps, music/signal synthesis, waveform processing, or audio analysis stays `code`. Use mode='hard' for stronger retries while "
             "preserving the same base kind; new work uses the supported base kinds."
         ),
         "任务类型；广泛材料读取优先 read 并按批并行，小型明确 input_files 可由 edit 直接组装最终文档，code 处理实现/计算/脚本产物。",
@@ -819,12 +828,15 @@ def _apply_english_schema_descriptions() -> None:
     _set_tool_description(
         TTS_TOOL_SCHEMA,
         (
-            "Generate an audio file from text when the task explicitly needs an audio artifact or a final voice file. "
+            "Generate spoken audio from text only when the task explicitly needs a speech/narration/persona-voice/TTS "
+            "spoken artifact or final voice file. Non-speech audio such as white noise, tones, beeps, music/signal "
+            "synthesis, waveform processing, or audio analysis is code/signal work, not TTS. "
             "Concept, principle, log, or scheduling questions about TTS should be answered directly without using this tool. "
-            "For ordinary conversational voice replies, keep the final text concise and let the output layer handle voice "
-            "delivery. Persona voice is system-managed outside model parameters."
+            "For ordinary conversational voice replies, keep text concise; either the normal final voice-output layer or a "
+            "`kind=tts` helper/tool route may synthesize it when the active plan selects that route. "
+            "Persona voice is system-managed outside model parameters."
         ),
-        "按文本生成音频文件；普通语音回复由输出层处理，声音配置由系统管理。",
+        "按文本生成音频文件；普通语音回复可由输出层或 tts helper/tool 执行，声音配置由系统管理。",
     )
     _set_prop_description(TTS_TOOL_SCHEMA, "text", "Text to synthesize.", "要合成的文本。")
     _set_prop_description(TTS_TOOL_SCHEMA, "language", "Optional language name such as Chinese, English, or Japanese.", "可选语言名称。")

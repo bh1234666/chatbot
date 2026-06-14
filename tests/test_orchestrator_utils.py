@@ -86,7 +86,7 @@ def test_voice_instruct_resolves_from_short_identity_persona():
     assert persona_files.persona_voice_instruct_by_content(short_persona) == (
         "male, young adult, moderate pitch"
     )
-    assert persona_files.persona_voice_preference_by_content(short_persona, -1) == 0.2
+    assert persona_files.persona_voice_preference_by_content(short_persona, -1) == 0.1
     assert persona_files.persona_intermediate_feedback_preference_by_content(short_persona, -1) == 0.9
     assert "Accept normal user tasks" in persona_files.persona_round2_instruct_by_content(short_persona)
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import hashlib
 import json
 import logging
 import os
@@ -477,8 +478,10 @@ from app.llm.tools.workspace_paths import (  # noqa: E402,F401
 
 
 # ── 工作区生命周期 ────────────────────────────────────────────
-# Registry: group_key → workspace_dir（供下载 API 查找）
-_workspace_registry: dict[str, str] = {}
+# Registry: group_key -> active workspace dirs (oldest..newest, for download APIs).
+# A single group can have concurrent per-user turns; keeping only one path lets
+# a later turn overwrite the current download workspace for an earlier turn.
+_workspace_registry: dict[str, list[str]] = {}
 
 # 注意:这里曾经有个 _SOURCE_EXTENSIONS 集合(.py/.js/.ts/.sh/.bat/.cmd/.ps1),
 # 用于在 list_generated_files 里把"源码"过滤掉。
@@ -488,7 +491,7 @@ _workspace_registry: dict[str, str] = {}
 #   workspace.missing 报: {'qlearning.py','environment.py','dqn.py','benchmark_rl.py'}
 #   ↑ 全是 .py,被这里过滤掉了
 # 删除该过滤——是否交付应该完全由 plan.deliverables 决定,
-# orchestrator 的 _autofix_deliverables 已经有 _AUTOFIX_INTERMEDIATE_SCRIPT_PREFIXES
+# orchestrator 的交付候选收集已经会过滤中间脚本前缀
 # 来处理"中间脚本"的 fallback,不需要在这里做。
 
 
@@ -746,6 +749,18 @@ def get_temp_workspace(main_ws: str) -> str:
     return os.path.join(main_ws, _TEMP_DIRNAME)
 
 
+def _session_temp_slug(session_tag: str) -> str:
+    tag = str(session_tag or "").strip()
+    if not tag:
+        tag = uuid.uuid4().hex
+    return "s_" + hashlib.sha1(tag.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def get_session_temp_workspace(main_ws: str, session_tag: str) -> str:
+    """Return an isolated temp workspace path for one chat turn."""
+    return os.path.join(get_temp_workspace(main_ws), "_sessions", _session_temp_slug(session_tag))
+
+
 def get_prev_workspace(main_ws: str) -> str:
     """上一轮临时工作区的快照路径(只读历史)。"""
     return os.path.join(main_ws, _PREV_DIRNAME)
@@ -815,7 +830,7 @@ def rotate_temp_to_prev(main_ws: str) -> str | None:
         debug.log(
             "workspace.temp.p46_sync",
             f"P46-B: 从永久根 sync {_synced_count} 个文件/目录到新 .temp/, "
-            f"主线程能看到上轮 helper 工作",
+            f"主线程能看到上轮后台工作",
         )
 
     _write_session_manifest(temp_ws, main_ws)
@@ -956,7 +971,13 @@ def fetch_to_temp(
     return copied, skipped
 
 
-def ensure_temp_workspace(main_ws: str, *, force_resync: bool = False, session_tag: str = "") -> str:
+def ensure_temp_workspace(
+    main_ws: str,
+    *,
+    force_resync: bool = False,
+    session_tag: str = "",
+    isolate_session: bool = False,
+) -> str:
     """确保 .temp/ 临时工作区存在（v2 三层隔离架构）。
 
     会话首次调用时自动 rotate: .temp/ → .prev/ → 新建 .temp/。
@@ -970,6 +991,8 @@ def ensure_temp_workspace(main_ws: str, *, force_resync: bool = False, session_t
         main_ws: 主工作区路径
         force_resync: True 时强制重置 temp
         session_tag: 当前会话的短标识，用于跨任务检测
+        isolate_session: True 时在 .temp/_sessions/<hash>/ 下创建本轮工作区，
+            避免同群多用户并发时把“当前产物”混到同一个 .temp 根目录。
 
     Returns:
         temp_ws 路径
@@ -978,10 +1001,11 @@ def ensure_temp_workspace(main_ws: str, *, force_resync: bool = False, session_t
         return ""
     os.makedirs(main_ws, exist_ok=True)
 
-    temp_ws = get_temp_workspace(main_ws)
+    temp_root = get_temp_workspace(main_ws)
+    temp_ws = temp_root
 
     # 每次进程启动(新会话)首次调用时强制轮转: .temp/ → .prev/ → 新建 .temp/
-    # 根因修复: 旧逻辑 `if not os.path.isdir(temp_ws)` 只在 .temp/ 不存在时轮转,
+    # 根因修复: 旧逻辑 `if not os.path.isdir(temp_root)` 只在 .temp/ 不存在时轮转,
     # 若上次会话残留 .temp/(含 PDF/DOCX 等污染文件),新会话直接复用 → helper 被污染 → 卡 loop。
     # 现在用进程级 flag 保证每次新会话都拿到干净的 .temp/。
     global _rotation_done
@@ -993,7 +1017,12 @@ def ensure_temp_workspace(main_ws: str, *, force_resync: bool = False, session_t
         rotate_temp_to_prev(main_ws)
         _rotated_main_workspaces.add(_main_key)
     else:
+        os.makedirs(temp_root, exist_ok=True)
+
+    if isolate_session:
+        temp_ws = get_session_temp_workspace(main_ws, session_tag)
         os.makedirs(temp_ws, exist_ok=True)
+        debug.log("workspace.temp.session", f"isolated temp workspace: {temp_ws}")
 
     if force_resync:
         # 仅删除非 _delegate_* 内容
@@ -1574,15 +1603,46 @@ def create_zip_archive(
 
 
 def register_workspace(group_key: str, ws_dir: str) -> None:
-    _workspace_registry[group_key] = ws_dir
+    if not group_key or not ws_dir:
+        return
+    entries = [p for p in _workspace_registry.get(group_key, []) if p != ws_dir]
+    entries.append(ws_dir)
+    _workspace_registry[group_key] = entries
 
 
-def unregister_workspace(group_key: str) -> None:
-    _workspace_registry.pop(group_key, None)
+def unregister_workspace(group_key: str, ws_dir: str | None = None) -> None:
+    if not group_key:
+        return
+    if ws_dir is None:
+        _workspace_registry.pop(group_key, None)
+        return
+    entries = [p for p in _workspace_registry.get(group_key, []) if p != ws_dir]
+    if entries:
+        _workspace_registry[group_key] = entries
+    else:
+        _workspace_registry.pop(group_key, None)
 
 
 def get_workspace(group_key: str) -> str | None:
-    return _workspace_registry.get(group_key)
+    entries = _workspace_registry.get(group_key) or []
+    return entries[-1] if entries else None
+
+
+def get_registered_workspaces(group_key: str) -> list[str]:
+    entries = _workspace_registry.get(group_key) or []
+    return list(reversed(entries))
+
+
+def workspace_token(ws_dir: str) -> str:
+    if not ws_dir:
+        return ""
+    norm = os.path.normcase(os.path.abspath(ws_dir))
+    return hashlib.sha1(norm.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def token_matches_workspace(ws_dir: str, token: str) -> bool:
+    token = str(token or "").strip()
+    return bool(token and ws_dir and workspace_token(ws_dir) == token)
 
 
 # 已知框架/工具自动生成的中间产物（非用户可见文件）
@@ -1945,6 +2005,12 @@ def list_generated_files(ws_dir: str) -> list[str]:
     for entry in ws_path.rglob("*"):
         if not entry.is_file():
             continue
+        rel = str(entry.relative_to(ws_path)).replace("\\", "/")
+        top = rel.split("/", 1)[0]
+        if top in {".temp", ".prev", "archive"}:
+            continue
+        if ws_path.name == ".temp" and top == "_sessions":
+            continue
         name = entry.name
         if name.startswith(_ARTIFACT_PREFIXES):
             continue
@@ -1956,7 +2022,6 @@ def list_generated_files(ws_dir: str) -> list[str]:
             continue
         if entry.suffix.lower() in _NON_DELIVERABLE_EXTS:
             continue
-        rel = str(entry.relative_to(ws_path)).replace("\\", "/")
         if rel.startswith("_delegate_"):
             continue
         if rel.startswith("_env/"):

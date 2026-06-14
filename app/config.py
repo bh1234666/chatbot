@@ -178,6 +178,10 @@ class Settings(BaseSettings):
         default=True,
         validation_alias="LITE_ROUND3_FOR_EASY",
     )
+    voice_classifier_timeout_sec: float = Field(
+        default=8.0,
+        validation_alias="VOICE_CLASSIFIER_TIMEOUT_SEC",
+    )
 
     # ── 2026-05-15 运维可调阈值(集中管理,避免散落代码)──
     # 这些常量原先散在 delegate.py / orchestrator.py / registry.py / api/chat.py 里,

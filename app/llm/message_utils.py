@@ -9,11 +9,64 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Optional
 
 from app.llm.json_utils import stable_prompt_json
 
 log = logging.getLogger(__name__)
+
+
+def _first_present(mapping: dict, *keys: str, default=None):
+    for key in keys:
+        if key in mapping:
+            value = mapping.get(key)
+            if value is not None:
+                return value
+    return default
+
+
+def _sanitize_delegate_fold_text(value) -> str:
+    text = str(value or "")
+    replacements = (
+        ("helpers_initially_spawned", "processing_records_started"),
+        ("helpers_requested", "processing_records_requested"),
+        ("helpers_completed", "results_returned"),
+        ("helpers_returned", "results_returned"),
+        ("helpers_still_running", "processing_records_running"),
+        ("helpers_unavailable", "processing_records_unavailable"),
+        ("helpers_forked_during_run", "processing_records_started_during_run"),
+        ("background_work_started", "processing_records_started"),
+        ("background_work_requested", "processing_records_requested"),
+        ("background_work_running", "processing_records_running"),
+        ("background_work_unavailable", "processing_records_unavailable"),
+        ("background_work_started_during_run", "processing_records_started_during_run"),
+        ("helper_resource_required", "processing_record_resource_required"),
+        ("background_work_resource_required", "processing_record_resource_required"),
+        ("helper_runaway_requires_intervention", "processing_record_runaway_requires_intervention"),
+        ("background_work_runaway_requires_intervention", "processing_record_runaway_requires_intervention"),
+        ("helper_still_running_prompt_dropped", "processing_record_still_running_prompt_dropped"),
+        ("background_work_still_running_prompt_dropped", "processing_record_still_running_prompt_dropped"),
+        ("helper_producer_self_verified", "output_self_verified"),
+        ("producer_self_verified", "output_self_verified"),
+    )
+    for old, new in replacements:
+        text = text.replace(old, new)
+    text = re.sub(r"\bdelegation\b", "processing step", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdelegated\b", "routed", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdelegating\b", "routing", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bdelegate\b", "route", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:helper|producer)[-_ ]owned\b", "generated", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:helper|producer)\s+reports\b", "available evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b(?:helper|producer)\s+report\b", "available evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\s+evidence\b", "evidence", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bbackground_work\b", "processing_records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bbackground\s+(?:tasks?|work|producers?|branches?)\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducers\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bproducer\b", "processing record", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhelpers\b", "processing records", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bhelper\b", "processing record", text, flags=re.IGNORECASE)
+    return text
 
 
 def _is_thinking_enabled(extra_body: dict) -> bool:
@@ -306,7 +359,7 @@ def _tool_result_signal(content: str) -> tuple[bool, str]:
                     bits.append(f"resource_required={r.get('resource_required_count')}")
                 if r.get("failed_count"):
                     bits.append(f"failed={r.get('failed_count')}")
-                return False, ("delegate blocked " + ", ".join(bits))[:80]
+                return False, ("processing blocked " + ", ".join(bits))[:80]
             # part14 加:test_summary 优先(它已经是 PASS/FAIL 提炼)
             test_summary = r.get("test_summary")
             if test_summary:
@@ -337,7 +390,7 @@ def _short_action_desc(name: str, args: dict) -> str:
         return f"ws.{action}"
     if name == "delegate":
         n = len(args.get("tasks", []))
-        return f"delegate({n} tasks)"
+        return f"processing_records({n} tasks)"
     return name
 
 
@@ -544,9 +597,16 @@ def _soft_compact_redundant_tool_results(msgs: list[dict]) -> int:
                 if not isinstance(parsed, dict):
                     continue
                 # 抽简短统计；helpers_completed 表示返回结果数，不等于成功完成数。
-                helpers_returned = parsed.get("helpers_completed", "?")
+                results_returned = _first_present(parsed, "results_returned", "helpers_completed", default="?")
+                results_returned = _first_present(parsed, "results_returned", "helpers_completed", default="?")
                 success_count = parsed.get("success_count", 0)
-                helpers_running = parsed.get("helpers_still_running", 0)
+                background_running = _first_present(
+                    parsed,
+                    "processing_records_running",
+                    "background_work_running",
+                    "helpers_still_running",
+                    default=0,
+                )
                 task_ok = parsed.get("task_ok")
                 incomplete_count = parsed.get("incomplete_count")
                 resource_required_count = parsed.get("resource_required_count")
@@ -554,21 +614,22 @@ def _soft_compact_redundant_tool_results(msgs: list[dict]) -> int:
                 any_stuck = parsed.get("any_stuck", False)
                 old_msg["content"] = stable_prompt_json({
                     "_folded": True,
-                    "_redundant": "delegate_excerpts_already_extracted",
-                    "summary": (
-                        f"delegate returned_results={helpers_returned}, success_count={success_count}, "
-                        f"still_running={helpers_running}, any_stuck={any_stuck}; "
+                    "_redundant": "processing_record_excerpts_already_extracted",
+                    "summary": _sanitize_delegate_fold_text(
+                        f"processing records returned_results={results_returned}, success_count={success_count}, "
+                        f"still_running={background_running}, any_stuck={any_stuck}; "
                         f"task_ok={task_ok}, incomplete={incomplete_count}, "
                         f"resource_required={resource_required_count}; "
-                        "详细 helper 报告已被主线程抽 excerpt 给 round3"
+                        "详细后台工作报告已被主线程抽 excerpt 给 round3"
                     ),
                     "task_ok": task_ok,
                     "success_count": success_count,
-                    "helpers_returned": helpers_returned,
+                    "results_returned": results_returned,
+                    "processing_records_running": background_running,
                     "incomplete_count": incomplete_count,
                     "resource_required_count": resource_required_count,
                     "_task_status": task_status,
-                    "_evidence_policy": parsed.get("_evidence_policy"),
+                    "_evidence_policy": _sanitize_delegate_fold_text(parsed.get("_evidence_policy")),
                 })
                 old_msg["_folded"] = True
                 folded += 1
