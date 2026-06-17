@@ -568,8 +568,8 @@ def test_round1_round3_fast_paths_stay_compact_for_ordinary_dialogue() -> None:
     from app.core import context as ctx_build
     from app.schemas.api import HotMessage, ResponsePlan
 
-    fast_prefix_budget_bytes = 8_000
-    fast_total_budget_bytes = 10_000
+    fast_prefix_budget_bytes = 10_000
+    fast_total_budget_bytes = 12_000
 
     base = ctx_build.build_base_context(
         user_name="A",

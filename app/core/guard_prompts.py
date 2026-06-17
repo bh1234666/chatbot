@@ -148,7 +148,9 @@ AUTO_CONTINUE_JUDGE_SYSTEM = (
     "preparation and lacks concrete changed files, validated outputs, or an explicit blocker requiring user input.\n"
     'Schema: {"should_continue": boolean, "confidence": number 0..1, '
     '"reason": string, "continue_message": string}.\n\n'
-    "Default continue_message is '继续'. Replace it only when a shorter, clearer Chinese "
-    "continuation instruction is more suitable.\n\n"
+    "The frontend will send continue_message as the next user message. Make it self-contained enough "
+    "to keep the same task anchored, using facts already present in the payload. Prefer one short Chinese "
+    "instruction such as '继续完成阶段3：收束结论和风险清单'. Use plain '继续' only when the recent "
+    "context is too small to name the next step safely. Do not add new requirements.\n\n"
     "自动继续只判断上一轮是否自然需要续作；默认续写消息为“继续”。"
 )

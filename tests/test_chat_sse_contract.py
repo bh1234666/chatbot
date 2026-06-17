@@ -134,7 +134,7 @@ async def test_auto_continue_check_calls_model_and_normalizes(monkeypatch):
 
     assert result.should_continue is True
     assert result.confidence == pytest.approx(0.91)
-    assert result.continue_message == "继续"
+    assert result.continue_message.startswith("继续完成同一任务：")
     assert seen["model_spec"].model
     assert "assistant_reply" in seen["messages"][1]["content"]
     assert seen["messages"][1]["content"].startswith('{"assistant_reply":')
@@ -165,6 +165,15 @@ def test_auto_continue_user_payload_is_stable_compact_json():
     )
 
 
+def test_auto_continue_prompt_requests_self_contained_continue_message():
+    from app.core.guard_prompts import AUTO_CONTINUE_JUDGE_SYSTEM
+
+    assert "self-contained" in AUTO_CONTINUE_JUDGE_SYSTEM
+    assert "same task anchored" in AUTO_CONTINUE_JUDGE_SYSTEM
+    assert "Use plain" in AUTO_CONTINUE_JUDGE_SYSTEM
+    assert "Do not add new requirements" in AUTO_CONTINUE_JUDGE_SYSTEM
+
+
 @pytest.mark.asyncio
 async def test_auto_continue_check_time_limit_skips_model(monkeypatch):
     from app.api import chat
@@ -186,6 +195,33 @@ async def test_auto_continue_check_time_limit_skips_model(monkeypatch):
 
     assert result.should_continue is False
     assert result.reason == "auto_continue_time_limit_reached"
+
+
+@pytest.mark.asyncio
+async def test_auto_continue_plain_continue_is_anchored(monkeypatch):
+    from app.api import chat
+    from app.llm import model_pool
+    from app.schemas.api import AutoContinueCheckRequest
+
+    async def fake_chat_json(messages, *, model_spec=None, **kwargs):
+        return {
+            "should_continue": True,
+            "confidence": 0.9,
+            "reason": "same task remains incomplete",
+            "continue_message": "继续",
+        }
+
+    monkeypatch.setattr(model_pool, "chat_json", fake_chat_json)
+
+    result = await chat.auto_continue_check(AutoContinueCheckRequest(
+        user_message="修复 app/core/orchestrator.py 中的中断问题并运行测试",
+        assistant_reply="已定位问题，下一步继续修改。",
+        auto_continue_elapsed_sec=5,
+        max_auto_continue_sec=600,
+    ))
+
+    assert result.should_continue is True
+    assert result.continue_message == "继续完成同一任务：修复 app/core/orchestrator.py 中的中断问题并运行测试"
 
 
 @pytest.mark.asyncio
@@ -313,7 +349,7 @@ async def test_auto_continue_check_http_contract(monkeypatch):
         "should_continue": True,
         "confidence": 0.8,
         "reason": "partial reply",
-        "continue_message": "继续",
+        "continue_message": "继续完成同一任务：完成一个长报告",
     }
 
 
@@ -614,6 +650,9 @@ async def test_chat_stream_passes_interrupt_messages_getter(monkeypatch):
         async def is_busy(self, *args, **kwargs):
             return True
 
+        async def signal_abort(self, *args, **kwargs):
+            return True
+
     monkeypatch.setattr(chat.archive_dao, "get_archive", fake_get_archive)
     monkeypatch.setattr(chat.bot_config, "get_active_archive", fake_active)
     monkeypatch.setattr(chat, "orchestrate", fake_orchestrate)
@@ -633,6 +672,104 @@ async def test_chat_stream_passes_interrupt_messages_getter(monkeypatch):
 
     assert captured["messages"] == ["停，顺便告诉我进度"]
     assert chat._interrupt_messages == {}
+
+
+async def test_chat_stream_interrupt_payload_cache_shares_queue(monkeypatch):
+    from app.api import chat
+    from collections import deque
+    import time
+
+    seen = {}
+
+    async def fake_get_archive(archive_id):
+        return {"archive_id": archive_id}
+
+    async def fake_active(group_id):
+        return "archive"
+
+    async def fake_orchestrate(req, trace_id, **kwargs):
+        seen["messages"] = kwargs["interrupt_messages_getter"]()
+        seen["payloads"] = kwargs["interrupt_payloads_getter"]()
+        seen["payloads_again"] = kwargs["interrupt_payloads_getter"]()
+        yield "done", {"trace_id": trace_id}
+        yield "complete", {"trace_id": trace_id}
+
+    class Guard:
+        async def acquire(self, *args, **kwargs):
+            return None
+
+        async def release(self, *args, **kwargs):
+            return True
+
+        async def is_busy(self, *args, **kwargs):
+            return True
+
+    monkeypatch.setattr(chat.archive_dao, "get_archive", fake_get_archive)
+    monkeypatch.setattr(chat.bot_config, "get_active_archive", fake_active)
+    monkeypatch.setattr(chat, "orchestrate", fake_orchestrate)
+    monkeypatch.setattr(chat, "get_group_guard", lambda: Guard())
+    chat._interrupt_messages.clear()
+    chat._interrupt_messages[("archive", "group", "user")] = deque([
+        {
+            "message": "????",
+            "client_msg_id": "bg1",
+            "kind": "background",
+            "source": "env_background_finished",
+            "meta": {"task_id": "bg-task"},
+            "ts": time.monotonic(),
+        }
+    ])
+
+    req = ChatRequest(archive_id="archive", group_id="group", user_id="user", message="start")
+    resp = await chat.chat_stream(req)
+    await _collect_sse(resp)
+
+    assert seen["messages"] == []
+    assert len(seen["payloads"]) == 1
+    assert seen["payloads"][0]["kind"] == "background"
+    assert seen["payloads"][0]["source"] == "env_background_finished"
+    assert seen["payloads_again"] == seen["payloads"]
+    assert chat._interrupt_messages == {}
+
+
+def test_mid_turn_control_interrupt_keeps_original_task():
+    from app.core.orchestrator_entry import _message_with_user_interrupts
+
+    base = "请检查当前工程里和中断、自动继续、文件上传、记忆回忆有关的几个接口。"
+    payloads = [
+        {
+            "message": "请中断当前回答并重新整理。",
+            "kind": "user",
+            "source": "chat_interrupt",
+        }
+    ]
+
+    merged = _message_with_user_interrupts(base, payloads)
+
+    assert base in merged
+    assert "Mid-turn control interruption" in merged
+    assert "重新整理" in merged
+    assert "Treat it as the latest instruction" not in merged
+
+
+def test_mid_turn_non_control_interrupt_overrides_original_task():
+    from app.core.orchestrator_entry import _message_with_user_interrupts
+
+    base = "请检查当前工程里和中断、自动继续、文件上传、记忆回忆有关的几个接口。"
+    payloads = [
+        {
+            "message": "改为总结 test_deliverable_boundaries 的真实测试结果。",
+            "kind": "user",
+            "source": "chat_interrupt",
+        }
+    ]
+
+    merged = _message_with_user_interrupts(base, payloads)
+
+    assert base in merged
+    assert "Mid-turn user interruption" in merged
+    assert "Treat it as the latest instruction" in merged
+    assert "Mid-turn control interruption" not in merged
 
 
 async def test_chat_interrupt_message_resolves_environment_project(monkeypatch, tmp_path):
@@ -655,6 +792,13 @@ async def test_chat_interrupt_message_resolves_environment_project(monkeypatch, 
             seen["busy"] = (archive_id, group_id, user_id)
             return archive_id == "arch_env" and group_id == "env_user_user"
 
+        def get_stage(self, archive_id, group_id, user_id):
+            return "round2"
+
+        async def signal_abort(self, **kwargs):
+            seen["abort"] = kwargs
+            return True
+
     monkeypatch.setattr(chat, "resolve_environment_project", fake_resolve_environment_project)
     monkeypatch.setattr(chat, "get_group_guard", lambda: Guard())
     chat._interrupt_messages.clear()
@@ -669,13 +813,18 @@ async def test_chat_interrupt_message_resolves_environment_project(monkeypatch, 
         project_id="project-a",
     ))
 
-    assert ok == {"ok": True}
+    assert ok == {"ok": True, "queued": True, "aborted": True, "stage": "round2", "reason": ""}
     assert seen["resolve"] == {
         "user_id": "user",
         "current_dir": str(tmp_path),
         "project_id": "project-a",
     }
     assert seen["busy"] == ("arch_env", "env_user_user", "user")
+    assert seen["abort"] == {
+        "archive_id": "arch_env",
+        "group_id": "env_user_user",
+        "user_id": "user",
+    }
     assert chat._pop_interrupt_messages("arch_env", "env_user_user", "user") == ["插入当前任务"]
 
 
@@ -686,6 +835,12 @@ async def test_chat_and_environment_interrupt_queues_are_shared(monkeypatch):
 
     class Guard:
         async def is_busy(self, *args, **kwargs):
+            return True
+
+        def get_stage(self, *args, **kwargs):
+            return "round2"
+
+        async def signal_abort(self, **kwargs):
             return True
 
     monkeypatch.setattr(environment, "get_group_guard", lambda: Guard())
@@ -699,8 +854,43 @@ async def test_chat_and_environment_interrupt_queues_are_shared(monkeypatch):
         client_msg_id="shared",
     ))
 
-    assert ok == {"ok": True}
+    assert ok == {"ok": True, "queued": True, "aborted": True, "stage": "round2", "reason": ""}
     assert chat._pop_interrupt_messages("archive", "group", "user") == ["stop"]
+
+
+async def test_interrupt_message_round3_queues_without_preempting(monkeypatch):
+    from app.api import chat
+    from app.schemas.api import InterruptMessageRequest
+
+    class Guard:
+        async def is_busy(self, *args, **kwargs):
+            return True
+
+        def get_stage(self, *args, **kwargs):
+            return "round3"
+
+        async def signal_abort(self, **kwargs):
+            return False
+
+    monkeypatch.setattr(chat, "get_group_guard", lambda: Guard())
+    chat._interrupt_messages.clear()
+
+    ok = await chat.interrupt_message(InterruptMessageRequest(
+        archive_id="archive",
+        group_id="group",
+        user_id="user",
+        message="下一轮再处理",
+        client_msg_id="r3",
+    ))
+
+    assert ok == {
+        "ok": True,
+        "queued": True,
+        "aborted": False,
+        "stage": "round3",
+        "reason": "queued_no_preempt",
+    }
+    assert chat._pop_interrupt_messages("archive", "group", "user") == ["下一轮再处理"]
 
 
 async def test_chat_command_monitor_aliases(monkeypatch):

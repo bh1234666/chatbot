@@ -100,13 +100,16 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
             pass
         except (ConnectionError, TimeoutError, socket.timeout, http.client.HTTPException, OSError) as exc:
-            self.send_response(502, "Bad Gateway")
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(f"backend unavailable: {exc}".encode("utf-8", errors="replace"))
+            try:
+                self.send_response(502, "Bad Gateway")
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(f"backend unavailable: {exc}".encode("utf-8", errors="replace"))
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+                pass
         finally:
             conn.close()
 

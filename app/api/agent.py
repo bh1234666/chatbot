@@ -24,6 +24,7 @@ from app.core.file_preview import preview_file
 from app.llm.tools.environment import _augment_pytest_command
 from app.llm.tools.command_risk import analyze_command
 from app.llm.tools.output_spill import spill_text_field, write_tool_output_spill
+from app.llm.tools.process_utils import _kill_process_tree
 from app.memory import archive as archive_dao
 from app.memory import bot_config
 from app.memory import persona_files
@@ -333,10 +334,17 @@ async def project_run(project_id: str, body: dict, user_id: str) -> dict:
     except asyncio.TimeoutError:
         timed_out = True
         try:
-            proc.kill()
-        except ProcessLookupError:
+            _kill_process_tree(proc.pid, proc_obj=proc)
+        except (ProcessLookupError, OSError):
             pass
-        stdout_b, stderr_b = await proc.communicate()
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=1.0)
+        except Exception:
+            stdout_b, stderr_b = b"", b""
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+            except Exception:
+                pass
     stdout = stdout_b.decode("utf-8", errors="replace")
     stderr = stderr_b.decode("utf-8", errors="replace")
     result = {

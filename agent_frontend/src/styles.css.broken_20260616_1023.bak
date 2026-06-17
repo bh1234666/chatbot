@@ -1019,32 +1019,6 @@ mark {
   overflow: auto;
   padding-right: 2px;
 }
-.background-task-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  padding: 4px 6px;
-  border: 1px solid #bfdbfe;
-  border-radius: 6px;
-  background: #f8fbff;
-  font-size: 12px;
-}
-
-.background-task-row span,
-.background-task-row code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.background-task-row code {
-  color: var(--muted);
-  background: transparent;
-  padding: 0;
-}
 
 .background-task-card {
   border: 1px solid #bfdbfe;
@@ -1191,49 +1165,6 @@ mark {
   color: var(--muted);
   padding: 18px;
   text-align: center;
-}
-
-.ui-dialog-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 90;
-  background: rgba(15, 23, 42, 0.52);
-  display: grid;
-  place-items: center;
-  padding: 16px;
-}
-
-.ui-dialog {
-  width: min(520px, calc(100vw - 32px));
-  background: var(--panel-bg);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: 0 18px 60px rgba(15, 23, 42, 0.28);
-  padding: 16px;
-  display: grid;
-  gap: 12px;
-}
-
-.ui-dialog-title {
-  font-weight: 650;
-  font-size: 15px;
-}
-
-.ui-dialog-message {
-  color: var(--muted);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-size: 13px;
-}
-
-.ui-dialog-input {
-  width: 100%;
-  min-height: 72px;
-  resize: vertical;
-}
-
-.ui-dialog-actions {
-  justify-content: flex-end;
 }
 
 @media (max-width: 1180px) {

@@ -178,6 +178,8 @@ from app.llm.tools.workspace import (
 
 )
 
+from app.llm.tools.environment_background import ENV_BACKGROUND_SCHEMA
+
 
 
 log = logging.getLogger(__name__)
@@ -2963,6 +2965,8 @@ _HELPER_TOOLS = [
     FETCH_GROUP_FILE_SCHEMA,
 
     OCR_TOOL_SCHEMA,
+
+    ENV_BACKGROUND_SCHEMA,
 
     TTS_TOOL_SCHEMA,
 

@@ -137,8 +137,6 @@ let workflowPointerActive = false;
 let transcriptLastScrollSnapshot = null;
 let tooltipEl = null;
 let tooltipTarget = null;
-let activeDialog = null;
-let activeDialogResolve = null;
 const sendingArchiveIds = new Set();
 
 const $ = (selector) => document.querySelector(selector);
@@ -433,63 +431,6 @@ function hideButtonTooltip(target = null) {
   if (target && tooltipTarget && target !== tooltipTarget) return;
   tooltipTarget = null;
   tooltipEl?.classList.remove("open");
-}
-
-function openUiDialog(options = {}) {
-  if (activeDialogResolve) {
-    activeDialogResolve(null);
-    activeDialogResolve = null;
-  }
-  activeDialog = {
-    id: uid("dialog"),
-    type: options.type || "alert",
-    title: options.title || "",
-    message: options.message || "",
-    defaultValue: options.defaultValue || "",
-    placeholder: options.placeholder || "",
-    multiline: Boolean(options.multiline),
-  };
-  render();
-  requestAnimationFrame(() => {
-    const input = $("#dialogInput");
-    const primary = $("#dialogPrimaryBtn");
-    (input || primary)?.focus();
-    if (input) {
-      input.selectionStart = 0;
-      input.selectionEnd = input.value.length;
-    }
-  });
-  return new Promise((resolve) => {
-    activeDialogResolve = resolve;
-  });
-}
-
-function closeUiDialog(value) {
-  const resolve = activeDialogResolve;
-  activeDialog = null;
-  activeDialogResolve = null;
-  render();
-  if (resolve) resolve(value);
-}
-
-async function promptText(title, defaultValue = "", options = {}) {
-  const value = await openUiDialog({
-    type: "prompt",
-    title,
-    defaultValue,
-    placeholder: options.placeholder || "",
-    multiline: Boolean(options.multiline),
-  });
-  return value === null ? null : String(value);
-}
-
-async function confirmText(message, title = "确认") {
-  if (state.settings.reduceConfirmations) return true;
-  return Boolean(await openUiDialog({ type: "confirm", title, message }));
-}
-
-async function alertText(message, title = "提示") {
-  await openUiDialog({ type: "alert", title, message });
 }
 
 function loadState() {
@@ -1430,11 +1371,11 @@ function moveQueueItem(queueId, direction) {
   render();
 }
 
-async function editQueueItem(queueId) {
+function editQueueItem(queueId) {
   const conv = activeConversation();
   const item = conv?.queue.find((q) => q.id === queueId);
   if (!item) return;
-  const next = await promptText("编辑队列消息", item.text, { multiline: true });
+  const next = prompt("编辑队列消息", item.text);
   if (next === null) return;
   const trimmed = next.trim();
   if (!trimmed) return;
@@ -1443,10 +1384,10 @@ async function editQueueItem(queueId) {
   render();
 }
 
-async function clearQueue() {
+function clearQueue() {
   const conv = activeConversation();
   if (!conv?.queue.length) return;
-  if (!await confirmText("清空当前存档的本地队列？")) return;
+  if (!confirm("清空当前存档的本地队列？")) return;
   conv.queue = [];
   saveState();
   render();
@@ -1621,7 +1562,7 @@ async function prepareMessageForSend(text, fileIds, { queuedItem = null, mode = 
   if (queuedItem?.longInputConverted) {
     return { text, fileIds, converted: false };
   }
-  const ok = await confirmAction(
+  const ok = confirmAction(
     `当前输入约 ${text.length.toLocaleString()} 个字符，直接发送会挤占主进程上下文并可能失败。\n\n` +
     `是否将其转换为 bot 文件区 txt 附件，并只发送一条短指令让 bot 读取该文件？`
   );
@@ -1907,7 +1848,7 @@ async function refreshRunSnapshot() {
   const conv = activeConversation();
   const run = conv?.workflowRuns?.[0];
   if (!archive || !account || !run?.traceId) {
-    await alertText("当前没有可恢复的 trace。");
+    alert("当前没有可恢复的 trace。");
     return;
   }
   try {
@@ -2590,7 +2531,7 @@ async function uploadSingleBotFile(file, { autoAttach = true, notifySuccess = tr
   if (!archive || !account || !file) throw new Error("缺少当前账号或存档");
   if (!archive.archiveId) await ensureBackendArchive(archive, account);
   if (file.size > LARGE_FILE_WARN_BYTES) {
-    const ok = await confirmAction(`${file.name} 大小为 ${fmtSize(file.size)}，上传和索引可能较慢。继续上传？`);
+    const ok = confirmAction(`${file.name} 大小为 ${fmtSize(file.size)}，上传和索引可能较慢。继续上传？`);
     if (!ok) throw new Error("用户取消上传");
   }
   const url =
@@ -2727,7 +2668,7 @@ async function deleteFile(fileId) {
   const archive = activeArchive();
   const file = (state.files[archive?.id] || []).find((f) => f.id === fileId);
   if (!archive || !file) return;
-  if (!await confirmAction(`删除 bot 文件区文件：${file.name}？`)) return;
+  if (!confirmAction(`删除 bot 文件区文件：${file.name}？`)) return;
   try {
     if (archive.archiveId) {
       await fetchJson(`/v1/chat/files/${encodeURIComponent(archive.archiveId)}/${encodeURIComponent(archive.groupId)}/${encodeURIComponent(fileId)}`, {
@@ -2969,9 +2910,9 @@ function copyText(text) {
   );
 }
 
-async function confirmAction(message) {
+function confirmAction(message) {
   if (state.settings.reduceConfirmations) return true;
-  return confirmText(message);
+  return confirm(message);
 }
 
 function detailTail(detail) {
@@ -2990,13 +2931,13 @@ function setQueueAutoRun(enabled) {
   render();
 }
 
-async function createAccount() {
-  const displayName = await promptText("账号名称", "本地用户");
+function createAccount() {
+  const displayName = prompt("账号名称", "本地用户");
   if (!displayName) return;
-  let userId = await promptText("用户 ID（必须以字母开头）", `local-${Date.now()}`);
+  let userId = prompt("用户 ID（必须以字母开头）", `local-${Date.now()}`);
   if (!userId) return;
   if (!/^[a-zA-Z]/.test(userId)) {
-    await alertText("用户 ID 必须以字母开头（a-z 或 A-Z）。");
+    alert("用户 ID 必须以字母开头（a-z 或 A-Z）。");
     return;
   }
   state.accounts.push({ userId, displayName, createdAt: nowIso(), lastUsedAt: nowIso() });
@@ -3011,10 +2952,10 @@ async function createAccount() {
   render();
 }
 
-async function renameAccount() {
+function renameAccount() {
   const account = activeAccount();
   if (!account) return;
-  const next = await promptText("账号名称", account.displayName);
+  const next = prompt("账号名称", account.displayName);
   if (!next) return;
   account.displayName = next;
   account.lastUsedAt = nowIso();
@@ -3022,14 +2963,14 @@ async function renameAccount() {
   render();
 }
 
-async function deleteLocalAccount() {
+function deleteLocalAccount() {
   const account = activeAccount();
   if (!account) return;
   if (state.accounts.length <= 1) {
-    await alertText("至少保留一个账号。");
+    alert("至少保留一个账号。");
     return;
   }
-  if (!await confirmAction(`删除本地账号：${account.displayName}？后端存档不会被删除。`)) return;
+  if (!confirmAction(`删除本地账号：${account.displayName}？后端存档不会被删除。`)) return;
   const archiveIds = state.archives.filter((a) => a.userId === account.userId).map((a) => a.id);
   state.accounts = state.accounts.filter((a) => a.userId !== account.userId);
   state.archives = state.archives.filter((a) => a.userId !== account.userId);
@@ -3047,12 +2988,12 @@ async function deleteLocalAccount() {
   recoverFromBackend();
 }
 
-async function createArchive() {
+function createArchive() {
   const account = activeAccount();
   if (!account) return;
-  const title = await promptText("存档名称", "新存档");
+  const title = prompt("存档名称", "新存档");
   if (!title) return;
-  const currentDir = (await promptText("项目目录路径，可为空", "")) || "";
+  const currentDir = prompt("项目目录路径，可为空", "") || "";
   const archive = makeLocalArchive(account.userId, title, currentDir);
   state.archives.push(archive);
   state.conversations[archive.id] = emptyConversation(archive.id);
@@ -3096,7 +3037,7 @@ async function syncArchive() {
 async function renameArchive() {
   const archive = activeArchive();
   if (!archive) return;
-  const next = await promptText("存档名称", archive.title);
+  const next = prompt("存档名称", archive.title);
   if (!next) return;
   archive.title = next;
   archive.lastUsedAt = nowIso();
@@ -3108,7 +3049,7 @@ async function renameArchive() {
 async function editArchiveDir() {
   const archive = activeArchive();
   if (!archive) return;
-  const next = await promptText("项目目录路径，可为空", archive.currentDir || "");
+  const next = prompt("项目目录路径，可为空", archive.currentDir || "");
   if (next === null) return;
   archive.currentDir = next;
   archive.localOnly = true;
@@ -3133,10 +3074,10 @@ async function updateBackendProject() {
   }
 }
 
-async function deleteLocalArchive() {
+function deleteLocalArchive() {
   const archive = activeArchive();
   if (!archive) return;
-  if (!await confirmAction(`仅删除本地前端记录：${archive.title}？后端存档不会被删除。`)) return;
+  if (!confirmAction(`仅删除本地前端记录：${archive.title}？后端存档不会被删除。`)) return;
   state.archives = state.archives.filter((a) => a.id !== archive.id);
   delete state.conversations[archive.id];
   delete state.files[archive.id];
@@ -3168,9 +3109,9 @@ function archiveLocalOnly(action) {
   render();
 }
 
-async function clearTranscript() {
+function clearTranscript() {
   const conv = activeConversation();
-  if (!conv || !await confirmAction("清空当前前端 transcript？后端记忆不会删除。")) return;
+  if (!conv || !confirmAction("清空当前前端 transcript？后端记忆不会删除。")) return;
   conv.messages = [];
   conv.workflowRuns = [];
   conv.queue = [];
@@ -3195,12 +3136,12 @@ function exportMarkdown() {
   downloadBlob(`${archive.title || "bot"}-${Date.now()}.md`, lines.join("\n"), "text/markdown;charset=utf-8");
 }
 
-async function exportWorkflow(format = "json") {
+function exportWorkflow(format = "json") {
   const archive = activeArchive();
   const conv = activeConversation();
   const run = conv?.workflowRuns?.[0];
   if (!archive || !run) {
-    await alertText("当前没有可导出的工作流。");
+    alert("当前没有可导出的工作流。");
     return;
   }
   if (format === "md") {
@@ -3240,11 +3181,11 @@ function exportStateJson() {
 function importStateJson(file) {
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = async () => {
+  reader.onload = () => {
     try {
       const parsed = JSON.parse(String(reader.result || "{}"));
       const next = normalizeState({ ...defaultState, ...parsed });
-      if (!await confirmAction("导入会替换当前前端本地状态，后端数据不会被删除。继续？")) return;
+      if (!confirmAction("导入会替换当前前端本地状态，后端数据不会被删除。继续？")) return;
       state = next;
       attachedFileIds = [];
       currentDraft = "";
@@ -3253,7 +3194,7 @@ function importStateJson(file) {
       render();
       recoverFromBackend();
     } catch (err) {
-      await alertText(`导入失败：${err.message || err}`);
+      alert(`导入失败：${err.message || err}`);
     }
   };
   reader.readAsText(file, "utf-8");
@@ -3283,25 +3224,25 @@ function cleanupLocalData() {
   });
 }
 
-async function openCommandPalette() {
-  const cmd = await promptText("命令：new / rename / dir / sync / files / clear / export / workflow / state / import / cleanup / settings / abort / 模板关键词", "");
+function openCommandPalette() {
+  const cmd = prompt("命令：new / rename / dir / sync / files / clear / export / workflow / state / import / cleanup / settings / abort / 模板关键词", "");
   if (!cmd) return;
   const key = cmd.trim().toLowerCase();
-  if (key === "new") await createArchive();
-  else if (key === "rename") await renameArchive();
-  else if (key === "dir") await editArchiveDir();
+  if (key === "new") createArchive();
+  else if (key === "rename") renameArchive();
+  else if (key === "dir") editArchiveDir();
   else if (key === "sync") syncArchive();
   else if (key === "files") toggleFilePanel();
   else if (key === "project") toggleProjectPanel();
-  else if (key === "clear") await clearTranscript();
+  else if (key === "clear") clearTranscript();
   else if (key === "export") exportMarkdown();
-  else if (key === "workflow") await exportWorkflow("json");
+  else if (key === "workflow") exportWorkflow("json");
   else if (key === "state") exportStateJson();
   else if (key === "import") promptImportStateJson();
   else if (key === "cleanup") cleanupLocalData();
   else if (key === "settings") toggleSettings();
   else if (key === "abort") abortRun();
-  else if (key === "queue") await clearQueue();
+  else if (key === "queue") clearQueue();
   else if (key === "trace") copyText(activeConversation()?.workflowRuns?.[0]?.traceId || "");
   else if (key === "search") {
     $("#transcriptSearch")?.focus();
@@ -3354,7 +3295,6 @@ function render() {
       ${renderPreviewPanel()}
       ${renderNodeDetailsPanel()}
       ${renderBackgroundTasksWindow()}
-      ${renderUiDialog()}
       <div id="notifications">${renderNotifications()}</div>
     </div>
   `;
@@ -3502,26 +3442,6 @@ function renderNotificationsOnly() {
   el.innerHTML = renderNotifications();
   bindNotificationEvents();
   enhanceButtonTooltips(el);
-}
-
-function renderUiDialog() {
-  if (!activeDialog) return "";
-  const isConfirm = activeDialog.type === "confirm";
-  const isPrompt = activeDialog.type === "prompt";
-  return `
-    <div class="ui-dialog-backdrop" data-dialog-backdrop="1">
-      <div class="ui-dialog" role="dialog" aria-modal="true" aria-labelledby="uiDialogTitle">
-        <div class="ui-dialog-title" id="uiDialogTitle">${escapeHtml(activeDialog.title || (isConfirm ? "确认" : "提示"))}</div>
-        ${activeDialog.message ? `<div class="ui-dialog-message">${escapeHtml(activeDialog.message)}</div>` : ""}
-        ${isPrompt ? `
-          <textarea id="dialogInput" class="ui-dialog-input" rows="${activeDialog.multiline ? 5 : 1}" placeholder="${escapeHtml(activeDialog.placeholder || "")}">${escapeHtml(activeDialog.defaultValue || "")}</textarea>
-        ` : ""}
-        <div class="row ui-dialog-actions">
-          ${isConfirm ? `<button id="dialogCancelBtn">取消</button><button id="dialogPrimaryBtn" class="primary">确定</button>` : `<button id="dialogPrimaryBtn" class="primary">确定</button>`}
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 function renderSidebar() {
@@ -4781,7 +4701,6 @@ function bindEvents() {
   bindWorkflowEvents();
   bindDropZone();
   bindNotificationEvents();
-  bindUiDialogEvents();
 }
 
 function bindArtifactEvents() {
@@ -4815,26 +4734,6 @@ function bindArtifactEvents() {
 function bindNotificationEvents() {
   document.querySelectorAll("[data-dismiss-notice]").forEach((el) => {
     el.addEventListener("click", () => dismissNotification(el.dataset.dismissNotice));
-  });
-}
-
-function bindUiDialogEvents() {
-  if (!activeDialog) return;
-  const input = $("#dialogInput");
-  const submit = () => {
-    if (activeDialog?.type === "prompt") closeUiDialog(input?.value ?? "");
-    else closeUiDialog(true);
-  };
-  $("#dialogPrimaryBtn")?.addEventListener("click", submit);
-  $("#dialogCancelBtn")?.addEventListener("click", () => closeUiDialog(null));
-  document.querySelector("[data-dialog-backdrop]")?.addEventListener("click", (event) => {
-    if (event.target?.dataset?.dialogBackdrop) closeUiDialog(null);
-  });
-  input?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !activeDialog.multiline) {
-      event.preventDefault();
-      submit();
-    }
   });
 }
 
@@ -4979,11 +4878,6 @@ window.addEventListener("keydown", (e) => {
     saveState();
     render();
   } else if (e.key === "Escape") {
-    if (activeDialog) {
-      e.preventDefault();
-      closeUiDialog(null);
-      return;
-    }
     state.ui.filePanelOpen = false;
     state.ui.projectPanelOpen = false;
     state.ui.settingsOpen = false;

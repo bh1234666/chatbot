@@ -8,7 +8,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.interrupts import interrupt_messages_raw, pop_interrupt_messages, push_interrupt_message
+from app.api.interrupts import interrupt_messages_raw, pop_interrupt_messages, pop_interrupt_payloads, push_interrupt_message
 from app.core.locks import get_group_guard
 from app.core.environment_monitor import monitor as env_monitor
 from app.core.environment_projects import resolve_environment_project
@@ -28,6 +28,10 @@ def _push_interrupt_message(req: InterruptMessageRequest) -> None:
 
 def _pop_interrupt_messages(archive_id: str, group_id: str, user_id: str) -> list[str]:
     return pop_interrupt_messages(archive_id, group_id, user_id)
+
+
+def _pop_interrupt_payloads(archive_id: str, group_id: str, user_id: str) -> list[dict]:
+    return pop_interrupt_payloads(archive_id, group_id, user_id)
 
 
 def _sse(event_name: str, payload: dict) -> dict:
@@ -88,6 +92,20 @@ async def interrupt_message(req: InterruptMessageRequest) -> dict:
     if active:
         queue_req = req.model_copy(update={"archive_id": archive_id, "group_id": group_id, "user_id": user_id})
         _push_interrupt_message(queue_req)
+        guard = get_group_guard()
+        stage = guard.get_stage(archive_id, group_id, user_id) if hasattr(guard, "get_stage") else ""
+        signaled = await guard.signal_abort(
+            archive_id=archive_id,
+            group_id=group_id,
+            user_id=user_id,
+        )
+        return {
+            "ok": active,
+            "queued": True,
+            "aborted": signaled,
+            "stage": stage,
+            "reason": "" if signaled else ("queued_no_preempt" if stage in {"round3", "round2_5"} else "not_preempted"),
+        }
     return {"ok": active}
 
 

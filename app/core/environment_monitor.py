@@ -110,11 +110,19 @@ class EnvironmentMonitor:
             user_id=user_id,
             trace_id=trace_id,
         )
+        background_tasks = await _active_background_tasks_snapshot(
+            archive_id=archive_id,
+            group_id=group_id,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
         return {
             "active_commands": commands,
             "active_command_count": len(commands),
             "active_helpers": helpers,
             "active_helper_count": len(helpers),
+            "active_background_tasks": background_tasks,
+            "active_background_task_count": len(background_tasks),
         }
 
     async def history(
@@ -306,6 +314,36 @@ async def _active_helpers_snapshot(
                 continue
             helpers.append(item)
         return helpers
+    except Exception:
+        return []
+
+
+async def _active_background_tasks_snapshot(
+    *,
+    archive_id: str = "",
+    group_id: str = "",
+    user_id: str = "",
+    trace_id: str = "",
+) -> list[dict]:
+    try:
+        from app.llm.tools.environment_background import list_running_background_tasks
+    except Exception:
+        return []
+    try:
+        tasks = []
+        for item in await list_running_background_tasks():
+            if str(item.get("status") or "") != "running":
+                continue
+            if archive_id and item.get("archive_id") and item.get("archive_id") != archive_id:
+                continue
+            if group_id and item.get("group_id") and item.get("group_id") != group_id:
+                continue
+            if user_id and item.get("user_id") and item.get("user_id") != user_id:
+                continue
+            if trace_id and item.get("trace_id") != trace_id:
+                continue
+            tasks.append(item)
+        return tasks
     except Exception:
         return []
 

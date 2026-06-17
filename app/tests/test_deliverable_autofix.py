@@ -4,6 +4,7 @@ from app.core.orchestrator_checks import (
     _add_mentioned_existing_deliverables,
     _collect_deliverable_candidates,
 )
+from app.core.orchestrator_entry import _autofix_deliverables
 from app.schemas.api import ResponsePlan
 
 
@@ -127,6 +128,26 @@ def test_delivery_candidates_prefer_new_audio_over_internal_python_temp(tmp_path
     )
 
     assert second_plan.deliverables == []
+
+
+def test_entry_autofix_applies_candidates_to_plan(tmp_path):
+    (tmp_path / "final_report.docx").write_bytes(b"docx bytes")
+    plan = ResponsePlan(
+        intent="生成报告",
+        key_points=[],
+        tone="plain",
+        length_hint="short",
+    )
+
+    _autofix_deliverables(
+        plan,
+        user_message="输出报告文件",
+        needs_tools=True,
+        workspace_dir=str(tmp_path),
+        files_before=set(),
+    )
+
+    assert plan.deliverables == ["final_report.docx"]
 
 
 def test_delivery_candidates_do_not_scan_session_temp_from_main_workspace(tmp_path):

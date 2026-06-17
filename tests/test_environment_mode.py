@@ -5117,11 +5117,13 @@ async def test_environment_interrupt_active_and_abort(monkeypatch):
 
     ))
 
-    assert ok == {"ok": True}
+    assert ok == {"ok": True, "queued": True, "aborted": True, "stage": "", "reason": ""}
 
     assert api._pop_interrupt_messages("arch_env", "env_user_u", "u") == ["停一下"]
 
 
+
+    assert signaled == {"archive_id": "arch_env", "group_id": "env_user_u", "user_id": "u"}
 
     active = await api.list_active()
 

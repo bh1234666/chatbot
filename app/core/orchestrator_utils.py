@@ -24,6 +24,9 @@ _RESPONSE_PLAN_KEYS = {
     "delivery_partial",
     "upgrade_to_hard",
     "upgrade_to_veryhard",
+    "round2_complexity",
+    "round2_needs_tools",
+    "round2_needs_recall",
 }
 
 
@@ -232,6 +235,16 @@ def _normalize_round2_plan_dict(raw: dict | None) -> dict:
     normalized.setdefault("voice_reply_file", "")
     normalized.setdefault("upgrade_to_hard", False)
     normalized.setdefault("upgrade_to_veryhard", False)
+    route_complexity = str(raw.get("round2_complexity") or "").strip().lower()
+    if route_complexity in {"medium", "hard"}:
+        normalized["round2_complexity"] = route_complexity
+    else:
+        normalized["round2_complexity"] = None
+    for key in ("round2_needs_tools", "round2_needs_recall"):
+        if isinstance(raw.get(key), bool):
+            normalized[key] = raw.get(key)
+        else:
+            normalized[key] = None
     return normalized
 
 

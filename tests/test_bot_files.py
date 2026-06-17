@@ -212,3 +212,13 @@ def test_delivered_artifact_url_query_is_not_part_of_rel_path():
     assert item is not None
     assert item["rel_path"] == "delivered.txt"
     assert item["workspace_path"] == "delivered.txt"
+
+
+def test_file_preview_scenario_uses_workspace_path_contract():
+    src = Path("_longrun_test/scenario_runner.py").read_text(encoding="utf-8")
+
+    assert 'listed[0].get("workspace_path")' in src
+    assert '"preview_endpoint_ok": preview_status == 200' in src
+    assert '"download_endpoint_ok": download_status == 200' in src
+    assert "preview_endpoint_reached" not in src
+    assert "download_endpoint_reached" not in src

@@ -1,0 +1,5025 @@
+﻿const STORAGE_KEY = "bot-agent-state-v2";
+const DB_NAME = "bot-agent-frontend";
+const DB_STORE = "kv";
+const DB_VERSION = 1;
+const CLEANUP_MARKER_URL = ".cleanup_state.json";
+const CLEANUP_MARKER_LOCAL_KEY = "bot-agent-cleanup-id";
+const LARGE_FILE_WARN_BYTES = 50 * 1024 * 1024;
+const LONG_MESSAGE_FILE_THRESHOLD = 7000;
+const DEFAULT_MAX_WORKFLOW_RUNS = 80;
+
+const PROMPT_TEMPLATES = [
+  {
+    id: "project_scan",
+    group: "宸ョ▼",
+    title: "姊崇悊宸ョ▼",
+    text: "璇峰厛蹇€熸⒊鐞嗗綋鍓嶉」鐩粨鏋勩€佸叧閿叆鍙ｃ€佽繍琛屾柟寮忓拰娼滃湪椋庨櫓锛岀粰鍑虹畝鏄庣粨璁哄拰涓嬩竴姝ュ缓璁€?",
+  },
+  {
+    id: "project_tests",
+    group: "宸ョ▼",
+    title: "杩愯娴嬭瘯",
+    text: "璇锋鏌ュ綋鍓嶉」鐩彲鐢ㄧ殑娴嬭瘯/鏋勫缓鍛戒护锛岄€夋嫨鍚堥€傜殑鏈€灏忛獙璇侀泦杩愯锛屽苟鏍规嵁缁撴灉淇鏄捐憲闂銆?",
+  },
+  {
+    id: "project_diff",
+    group: "宸ョ▼",
+    title: "妫€鏌ユ敼鍔?",
+    text: "璇锋鏌ュ綋鍓嶉」鐩渶杩戞敼鍔紝閲嶇偣鎵捐涓哄洖褰掋€侀仐婕忔祴璇曘€佹浠ｇ爜鍜屽彲浠ヤ綆椋庨櫓浼樺寲鐨勭偣銆?",
+  },
+  {
+    id: "continue_task",
+    group: "宸ョ▼",
+    title: "缁х画浠诲姟",
+    text: "璇峰熀浜庡綋鍓嶅璇濆拰椤圭洰鐘舵€佺户缁帹杩涙湭瀹屾垚浠诲姟锛屽厛纭褰撳墠杩涘害锛屽啀瀹屾垚涓嬩竴姝ュ苟楠岃瘉銆?",
+  },
+  {
+    id: "file_summary",
+    group: "鏂囦欢",
+    title: "鍒嗘瀽闄勪欢",
+    text: "璇峰垎鏋愭湰杞檮鍔犵殑 bot 鏂囦欢鍖烘枃浠讹紝鎻愬彇鍏抽敭淇℃伅銆佸紓甯哥偣鍜屽彲鎵ц寤鸿銆?",
+  },
+  {
+    id: "report",
+    group: "鏂囦欢",
+    title: "鐢熸垚鎶ュ憡",
+    text: "璇峰熀浜庡綋鍓嶆潗鏂欑敓鎴愪竴浠界粨鏋勬竻鏅扮殑鎶ュ憡锛屽尯鍒嗕簨瀹炪€佹帹鏂€侀闄╁拰寤鸿銆?",
+  },
+  {
+    id: "chat_summary",
+    group: "瀵硅瘽",
+    title: "鎬荤粨涓婁笅鏂?",
+    text: "璇锋€荤粨褰撳墠瀵硅瘽涓凡缁忕‘瀹氱殑缁撹銆佸緟鍔炰簨椤广€侀樆濉炵偣鍜屼笅涓€姝ヤ紭鍏堢骇銆?",
+  },
+  {
+    id: "ask_precise",
+    group: "瀵硅瘽",
+    title: "绮剧‘鍥炵瓟",
+    text: "璇风洿鎺ュ洖绛斾笂涓€涓棶棰橈紝浼樺厛缁欑粨璁猴紝鍐嶅垪蹇呰渚濇嵁锛涗笉灞曞紑鏃犲叧鑳屾櫙銆?",
+  },
+];
+
+const defaultState = {
+  settings: {
+    backendUrl: "http://127.0.0.1:8000",
+    monitorEnabled: true,
+    insertMode: "inject_only",
+    maxWorkflowRuns: DEFAULT_MAX_WORKFLOW_RUNS,
+    reduceConfirmations: false,
+    logTailLines: 200,
+    theme: "light",
+    fontSize: 14,
+    codeFont: "Consolas, Courier New, monospace",
+    autoRunQueue: true,
+    autoContinue: false,
+    autoContinueMaxSec: 900,
+    defaultSendMode: "normal",
+    workflowOpen: true,
+    sidebarOpen: true,
+  },
+  accounts: [],
+  activeAccountId: "",
+  archives: [],
+  activeArchiveId: "",
+  conversations: {},
+  files: {},
+  artifacts: {},
+  ui: {
+    filePanelOpen: false,
+    artifactPanelOpen: false,
+    fileSearch: "",
+    settingsOpen: false,
+    previewOpen: false,
+    previewFileId: "",
+    previewText: "",
+    previewStatus: "idle",
+    projectPanelOpen: false,
+    projectTree: [],
+    projectTreePath: ".",
+    projectTreeStatus: "idle",
+    projectPreviewPath: "",
+    projectPreviewText: "",
+    projectPreviewStatus: "idle",
+    projectSearch: "",
+    projectSearchResults: [],
+    projectCommand: "",
+    projectCommandOutput: "",
+    projectDiffPath: "",
+    projectDiffComparePath: "",
+    projectDiffText: "",
+    workflowFilter: "all",
+    workflowSearch: "",
+    workflowViewMode: "detailed",
+    transcriptSearch: "",
+    workflowOpenNodeIds: [],
+    selectedNodeId: "",
+    archiveSearch: "",
+    notifications: [],
+    backgroundTasks: [],
+  },
+};
+
+let state = loadState();
+let activeController = null;
+let monitorController = null;
+let startupRecovered = false;
+let attachedFileIds = [];
+let currentDraft = "";
+let draftHistoryIndex = -1;
+let stateChannel = null;
+let idbReady = false;
+let uploadProgress = {};
+let workflowScrollRestoreSeq = 0;
+let workflowRenderTimer = null;
+let workflowRenderOptions = null;
+let workflowLastScrollSnapshot = null;
+let workflowPointerActive = false;
+let transcriptLastScrollSnapshot = null;
+let tooltipEl = null;
+let tooltipTarget = null;
+const sendingArchiveIds = new Set();
+
+const $ = (selector) => document.querySelector(selector);
+
+function cssEscape(value) {
+  if (globalThis.CSS?.escape) return CSS.escape(String(value));
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function uid(prefix = "id") {
+  if (globalThis.crypto?.randomUUID) return `${prefix}_${crypto.randomUUID()}`;
+  return `${prefix}_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function fmtTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function fmtSize(size) {
+  const n = Number(size || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function downloadBlob(filename, content, type = "text/plain;charset=utf-8") {
+  const blob = content instanceof Blob ? content : new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function setDraft(text, append = false) {
+  currentDraft = append && currentDraft ? `${currentDraft.trimEnd()}\n\n${text}` : text;
+  syncDraftToConversation();
+  saveState();
+  render();
+  requestAnimationFrame(() => {
+    const input = $("#draftInput");
+    if (input) {
+      input.focus();
+      input.selectionStart = input.selectionEnd = input.value.length;
+    }
+  });
+}
+
+function addDraftText(text) {
+  setDraft(text, false);
+}
+
+function syncDraftToConversation() {
+  const conv = activeConversation();
+  if (!conv) return;
+  conv.draft = currentDraft;
+  conv.draftAttachments = attachedFileIds.slice();
+}
+
+function loadDraftFromConversation() {
+  const conv = activeConversation();
+  currentDraft = conv?.draft || "";
+  attachedFileIds = Array.isArray(conv?.draftAttachments) ? conv.draftAttachments.slice() : [];
+  draftHistoryIndex = -1;
+}
+
+function pushInputHistory(text) {
+  const conv = activeConversation();
+  const trimmed = (text || "").trim();
+  if (!conv || !trimmed) return;
+  conv.inputHistory = (conv.inputHistory || []).filter((item) => item !== trimmed);
+  conv.inputHistory.push(trimmed);
+  conv.inputHistory = conv.inputHistory.slice(-100);
+}
+
+function notify(title, detail = "", kind = "info", nodeId = "") {
+  state.ui.notifications = [
+    {
+      id: uid("notice"),
+      title,
+      detail,
+      kind,
+      nodeId,
+      createdAt: nowIso(),
+    },
+    ...(state.ui.notifications || []),
+  ].slice(0, 8);
+  saveState();
+  renderNotificationsOnly();
+}
+
+function dismissNotification(id) {
+  state.ui.notifications = (state.ui.notifications || []).filter((item) => item.id !== id);
+  saveState();
+  renderNotificationsOnly();
+}
+
+function queueTemplateText(text) {
+  const conv = activeConversation();
+  const archive = activeArchive();
+  if (!conv || !text.trim()) return;
+  conv.queue.push({ id: uid("queue"), text: text.trim(), attachments: attachedFileIds.slice(), createdAt: nowIso(), fromTemplate: true });
+  saveState();
+  render();
+  if (archive && conv.autoRunQueue !== false && state.settings.autoRunQueue !== false && conv.status !== "running") {
+    setTimeout(() => drainQueueIfIdle(archive.id), 0);
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+const BUTTON_TOOLTIPS = {
+  newAccountBtn: "鏂板缓涓€涓湰鍦拌处鍙枫€傝处鍙风敤浜庨殧绂诲瓨妗ｃ€佹枃浠跺尯銆佸璇濈姸鎬佸拰椤圭洰鐩綍閰嶇疆銆?",
+  renameAccountBtn: "淇敼褰撳墠鏈湴璐﹀彿鏄剧ず鍚嶃€傚彧褰卞搷鍓嶇鏄剧ず锛屼笉鏀瑰彉鍚庣鐢ㄦ埛鏍囪瘑銆?",
+  deleteAccountBtn: "鍒犻櫎褰撳墠璐﹀彿鍦ㄦ湰鍓嶇淇濆瓨鐨勬湰鍦扮姸鎬併€備細绉婚櫎璇ヨ处鍙蜂笅鐨勬湰鍦板瓨妗ｅ拰瀵硅瘽璁板綍銆?",
+  newArchiveBtn: "涓哄綋鍓嶈处鍙锋柊寤轰竴涓瓨妗ｃ€傛瘡涓瓨妗ｅ彲浠ョ粦瀹氫竴涓」鐩洰褰曪紝涔熷彲浠ョ暀绌轰綔涓烘櫘閫?bot 瀵硅瘽銆?",
+  duplicateTabBtn: "澶嶅埗褰撳墠瀛樻。涓烘柊鐨勬湰鍦板璇濈獥鍙ｏ紝鐢ㄤ簬骞惰缁存姢鍚屼竴椤圭洰鐨勪笉鍚屼换鍔＄嚎銆?",
+  toggleSidebarBtn: "鏄剧ず鎴栭殣钘忓乏渚ф爮銆傚乏渚ф爮鍖呭惈璐﹀彿銆佸瓨妗ｅ垪琛ㄣ€佸璇濇悳绱㈠拰鏈湴鐘舵€併€?",
+  toggleWorkflowBtn: "鏄剧ず鎴栭殣钘忓彸渚у伐浣滄祦闈㈡澘銆傚伐浣滄祦闈㈡澘灞曠ず涓昏繘绋嬨€乭elper銆佸伐鍏疯皟鐢ㄥ拰鍛戒护杩涘害銆?",
+  recoverBtn: "浠庡悗绔仮澶嶅綋鍓嶈处鍙?瀛樻。鐨勯」鐩槧灏勩€佹椿璺冧换鍔″拰鏈€杩戠洃鎺т簨浠躲€?",
+  syncArchiveBtn: "鎶婂綋鍓嶅瓨妗ｄ笌鍚庣 archive/group/project 鏄犲皠鍚屾锛岀‘淇濆墠绔拰鍚庣鎸囧悜鍚屼竴浼氳瘽銆?",
+  renameArchiveBtn: "淇敼褰撳墠瀛樻。鏍囬銆傚彧鏀瑰彉鍓嶇鏄剧ず鍚嶇О锛屼笉褰卞搷椤圭洰鐩綍銆?",
+  editDirBtn: "璁剧疆鎴栨竻绌哄綋鍓嶅瓨妗ｇ粦瀹氱殑椤圭洰鐩綍銆傜洰褰曚负绌烘椂浣滀负鏅€?bot 瀵硅瘽浣跨敤銆?",
+  pinArchiveBtn: "鍥哄畾鎴栧彇娑堝浐瀹氬綋鍓嶅瓨妗ｃ€傚浐瀹氬瓨妗ｄ細鍦ㄥ乏渚у瓨妗ｅ垪琛ㄤ腑闈犲墠鏄剧ず銆?",
+  archiveArchiveBtn: "褰掓。鎴栧彇娑堝綊妗ｅ綋鍓嶅瓨妗ｃ€傚綊妗ｅ悗榛樿闅愯棌锛屽彲鍦ㄥ瓨妗ｆ悳绱腑杈撳叆 archived 鏌ョ湅銆?",
+  projectPanelBtn: "鎵撳紑椤圭洰鐩綍闈㈡澘銆傚彲鏌ョ湅鐩綍鏍戙€佹悳绱㈤」鐩枃浠躲€侀瑙堟枃浠躲€佽繍琛屽懡浠ゅ拰鏌ョ湅 diff銆?",
+  filePanelBtn: "鎵撳紑 bot 鏂囦欢鍖恒€傝繖閲岀鐞嗕笂浼犵粰 bot 鐨勮緭鍏ユ枃浠讹紝鍙檮鍔犲埌娑堟伅銆侀瑙堛€佷笅杞芥垨鍒犻櫎銆?",
+  artifactPanelBtn: "鎵撳紑 bot 浜х墿鍖恒€傝繖閲屾樉绀?bot 鐢熸垚骞跺彲涓嬭浇鐨勬姤鍛娿€佸浘鐗囥€侀煶棰戙€佸帇缂╁寘绛変骇鐗┿€?",
+  settingsBtn: "鎵撳紑鍓嶇璁剧疆銆傚彲閰嶇疆鍚庣鍦板潃銆佺洃鎺ф祦銆侀槦鍒椼€佽嚜鍔ㄧ户缁€佸瓧鍙峰拰鏈湴鏁版嵁瀵煎叆瀵煎嚭銆?",
+  abortBtn: "璇锋眰涓柇褰撳墠姝ｅ湪杩愯鐨勪换鍔°€備細淇濈暀鐜版湁瀵硅瘽銆侀槦鍒楀拰宸蹭骇鐢熺殑宸ヤ綔娴佽褰曘€?",
+  abortClearBtn: "璇锋眰涓柇褰撳墠浠诲姟骞舵竻绌哄綋鍓嶇獥鍙ｆ湰鍦伴槦鍒椼€傞€傚悎瑕佺珛鍗冲仠姝㈠悗缁嚜鍔ㄤ换鍔℃椂浣跨敤銆?",
+  uploadBtn: "閫夋嫨鏂囦欢涓婁紶鍒?bot 鏂囦欢鍖恒€備笂浼犲悗鍙湪鏈娑堟伅鍙戦€佸墠闄勫姞鎴栨挙鍥炪€?",
+  clearDraftBtn: "娓呯┖褰撳墠杈撳叆妗嗗唴瀹癸紝骞舵挙鍥炴湰娆℃秷鎭皻鏈彂閫佺殑闄勪欢銆?",
+  queueBtn: "鎶婂綋鍓嶈緭鍏ュ姞鍏ュ綋鍓嶅瓨妗ｇ殑鏈湴闃熷垪銆傞槦鍒楄嚜鍔ㄥ紑鍚椂浼氬湪褰撳墠浠诲姟缁撴潫鍚庣户缁彂閫併€?",
+  insertBtn: "鍦ㄥ綋鍓嶄换鍔¤繍琛屼腑鎻掑叆涓€鏉＄敤鎴疯緭鍏ワ紝杩涘叆涓€斾粙鍏ユ祦绋嬶紱浠诲姟缁撴潫鍚庢寜璁剧疆鍐冲畾鏄惁缁х画涓嬩竴杞€?",
+  paletteBtn: "鎵撳紑鍛戒护闈㈡澘锛屽揩閫熷～鍏ュ父鐢ㄥ伐绋嬨€佹枃浠舵垨瀵硅瘽浠诲姟妯℃澘銆傚揩鎹烽敭 Ctrl+K銆?",
+  toggleQueueAutoBtn: "鍒囨崲褰撳墠瀵硅瘽闃熷垪鐨勮嚜鍔ㄦ墽琛岀姸鎬併€傝嚜鍔ㄦ椂浠诲姟缁撴潫鍚庣户缁彂閫佷笅涓€鏉￠槦鍒楁秷鎭€?",
+  sendBtn: "鍙戦€佸綋鍓嶈緭鍏ュ拰宸查檮鍔犳枃浠躲€侲nter 涔熶細鍙戦€侊紝Shift+Enter 鎹㈣銆?",
+  exportWorkflowJsonBtn: "瀵煎嚭褰撳墠宸ヤ綔娴佸師濮?JSON锛屼究浜庤皟璇曘€佸鐩樻垨鎻愪氦闂銆?",
+  exportWorkflowMdBtn: "瀵煎嚭褰撳墠宸ヤ綔娴?Markdown 鎽樿锛屼究浜庨槄璇诲拰鍒嗕韩銆?",
+  refreshRunBtn: "鎸夊綋鍓?trace 浠庡悗绔埛鏂版渶杩戠洃鎺у巻鍙诧紝琛ュ洖鏂嚎鎴栭〉闈㈠埛鏂版湡闂寸殑宸ヤ綔娴佷簨浠躲€?",
+  refreshFilesBtn: "鍒锋柊 bot 鏂囦欢鍖哄垪琛ㄥ拰涓婁紶鐘舵€併€?",
+  closeFilePanelBtn: "鍏抽棴 bot 鏂囦欢鍖洪潰鏉裤€?",
+  refreshArtifactsBtn: "鍒锋柊 bot 浜х墿鍖哄垪琛紝鍙樉绀?bot 鎺ㄩ€佹垨鐢熸垚鐨勫彲浜や粯鏂囦欢銆?",
+  closeArtifactPanelBtn: "鍏抽棴 bot 浜х墿鍖洪潰鏉裤€?",
+  refreshProjectTreeBtn: "鍒锋柊褰撳墠椤圭洰鐩綍鏍戙€備娇鐢ㄤ笂鏂圭浉瀵圭洰褰曚綔涓烘祻瑙堣捣鐐广€?",
+  closeProjectPanelBtn: "鍏抽棴椤圭洰鐩綍闈㈡澘銆?",
+  projectSearchBtn: "鍦ㄧ粦瀹氶」鐩洰褰曚腑鎼滅储鏂囦欢鍐呭鎴栬矾寰勶紝缁撴灉鍙偣鍑婚瑙堛€?",
+  projectRunBtn: "鍦ㄧ粦瀹氶」鐩洰褰曚腑杩愯鍛戒护銆傚懡浠や細缁忚繃鍚庣椋庨櫓绛栫暐澶勭悊銆?",
+  projectDiffBtn: "璇诲彇鎸囧畾椤圭洰鏂囦欢鐨?diff锛涘彲閫夊～鍐欏姣旀枃浠躲€?",
+  projectDiffExplainBtn: "鎶婂綋鍓?diff 鍐呭濉叆杈撳叆妗嗭紝璇?bot 瑙ｉ噴鏀瑰姩銆侀闄╁拰楠岃瘉寤鸿銆?",
+  closeSettingsBtn: "鍏抽棴璁剧疆闈㈡澘銆?",
+  saveSettingsBtn: "淇濆瓨褰撳墠鍓嶇璁剧疆锛屽苟绔嬪嵆搴旂敤鍚庣鍦板潃銆佺洃鎺с€侀槦鍒椼€佸瓧鍙风瓑閰嶇疆銆?",
+  clearTranscriptBtn: "娓呯┖褰撳墠瀛樻。鐨勬湰鍦?transcript 鏄剧ず璁板綍銆備笉浼氬垹闄ゅ悗绔蹇嗘垨鏂囦欢銆?",
+  exportBtn: "鎶婂綋鍓?transcript 瀵煎嚭涓?Markdown 鏂囦欢銆?",
+  exportStateBtn: "瀵煎嚭鏁翠釜鍓嶇鏈湴鐘舵€?JSON锛屼究浜庡浠芥垨杩佺Щ銆?",
+  importStateBtn: "浠?JSON 瀵煎叆鍓嶇鏈湴鐘舵€侊紝浼氳鐩栧綋鍓嶆湰鍦扮姸鎬併€?",
+  cleanupBtn: "娓呯悊鍓嶇鏈湴缂撳瓨鍜岃繃鏈熺姸鎬侊紝淇濈暀蹇呰閰嶇疆銆?",
+  deleteArchiveBtn: "鍒犻櫎褰撳墠鏈湴瀛樻。鍙婂叾鍓嶇鐘舵€併€備笉浼氱洿鎺ュ垹闄ょ湡瀹為」鐩洰褰曘€?",
+  closePreviewBtn: "鍏抽棴鏂囦欢棰勮闈㈡澘銆?",
+  closeNodeDetailsBtn: "鍏抽棴宸ヤ綔娴佽妭鐐硅鎯呴潰鏉裤€?",
+};
+
+const BUTTON_TEXT_TOOLTIPS = {
+  "鏂板缓": "鏂板缓褰撳墠鍖哄煙瀵瑰簲鐨勫璞★紝渚嬪璐﹀彿鎴栧瓨妗ｃ€?",
+  "鏀瑰悕": "淇敼褰撳墠閫変腑瀵硅薄鐨勬樉绀哄悕绉般€?",
+  "鍒犻櫎": "鍒犻櫎褰撳墠鏉＄洰銆傚垹闄ゅ墠浼氭寜鍦烘櫙杩涜纭銆?",
+  "鍏抽棴": "鍏抽棴褰撳墠闈㈡澘銆侀€氱煡鎴栬鎯呰鍥俱€?",
+  "鍒锋柊": "閲嶆柊浠庡悗绔垨鏈湴鐘舵€佽鍙栨渶鏂板唴瀹广€?",
+  "棰勮": "鍦ㄥ彸渚ч瑙堥潰鏉挎墦寮€璇ユ枃浠讹紱鏀寔鏂囨湰銆佸浘鐗囥€丳DF銆侀煶棰戝拰瑙嗛绛夊父瑙佺被鍨嬨€?",
+  "涓嬭浇": "鍦ㄦ祻瑙堝櫒涓墦寮€鎴栦笅杞借鏂囦欢銆?",
+  "澶嶅埗": "澶嶅埗褰撳墠浠ｇ爜鍧楀唴瀹瑰埌鍓创鏉裤€?",
+  "澶嶅埗 URL": "澶嶅埗璇ユ枃浠剁殑鍚庣涓嬭浇鍦板潃鍒板壀璐存澘銆?",
+  "澶嶅埗璺緞": "澶嶅埗璇ユ枃浠跺湪宸ヤ綔鍖烘垨椤圭洰涓殑璺緞銆?",
+  "闄勫姞": "鎶婅鏂囦欢闄勫姞鍒颁笅涓€鏉″皢鍙戦€佺粰 bot 鐨勬秷鎭€?",
+  "鎬荤粨": "鎶婅鏂囦欢鍔犲叆杈撳叆妗嗭紝璇?bot 鎬荤粨鍐呭鍜岃鐐广€?",
+  "鎻愬彇": "鎶婅鏂囦欢鍔犲叆杈撳叆妗嗭紝璇?bot 鎻愬彇缁撴瀯鍖栧唴瀹规垨鍏抽敭鏂囧瓧銆?",
+  "鎶ュ憡": "鎶婅鏂囦欢鍔犲叆杈撳叆妗嗭紝璇?bot 鍩轰簬鏂囦欢鐢熸垚鎶ュ憡銆?",
+  "鎼滅储": "鎵ц褰撳墠杈撳叆鐨勬悳绱€?",
+  "杩愯": "鎵ц褰撳墠杈撳叆鐨勫懡浠ゃ€?",
+  "Diff": "鏌ョ湅褰撳墠鏂囦欢璺緞瀵瑰簲鐨勫樊寮傚唴瀹广€?",
+  "瑙ｉ噴 diff": "鎶婂綋鍓?diff 浜ょ粰 bot 鍒嗘瀽銆?",
+  "璇︾粏": "鍒囨崲鍒拌缁嗗伐浣滄祦瑙嗗浘锛屾寜涓昏繘绋嬪拰 helper 鍒嗗眰灞曠ず浜嬩欢銆?",
+  "绠€娲?: "鍒囨崲鍒扮畝娲佸伐浣滄祦瑙嗗浘锛屾瘡琛屾樉绀烘渶鏂板姩浣滃拰鐘舵€併€?,
+  "灞曞紑": "灞曞紑褰撳墠宸ヤ綔娴佽妭鐐癸紝鏌ョ湅瀛愭楠ゃ€佽繘搴︽垨娴佸紡鍐呭銆?",
+  "鏀惰捣": "鏀惰捣褰撳墠宸ヤ綔娴佽妭鐐癸紝鍑忓皯宸ヤ綔娴侀潰鏉垮崰鐢ㄧ┖闂淬€?",
+  "鍙戦€?: "鎸夊綋鍓嶅彂閫佹ā寮忔彁浜よ緭鍏ャ€?,
+  "闃熷垪鑷姩": "褰撳墠闃熷垪浼氬湪浠诲姟缁撴潫鍚庤嚜鍔ㄧ户缁彂閫佷笅涓€鏉°€?",
+  "闃熷垪鎵嬪姩": "褰撳墠闃熷垪涓嶄細鑷姩缁х画锛岄渶瑕佹墜鍔ㄥ彂閫佹垨鍒囧洖鑷姩銆?",
+  "娓呯┖": "娓呯┖褰撳墠鍒楄〃鎴栭槦鍒楀唴瀹广€?",
+  "涓婄Щ": "鎶婅闃熷垪椤瑰悜鍓嶇Щ鍔紝浼樺厛鎵ц銆?",
+  "涓嬬Щ": "鎶婅闃熷垪椤瑰悜鍚庣Щ鍔紝闄嶄綆鎵ц浼樺厛绾с€?",
+  "缂栬緫": "缂栬緫璇ラ槦鍒楅」鍐呭銆?",
+};
+
+function buttonTooltip(el) {
+  if (!el) return "";
+  if (el.id && BUTTON_TOOLTIPS[el.id]) return BUTTON_TOOLTIPS[el.id];
+  const text = (el.textContent || "").replace(/\s+/g, " ").trim();
+  if (el.dataset.templateId) {
+    const item = PROMPT_TEMPLATES.find((tpl) => tpl.id === el.dataset.templateId);
+    return item ? `宸﹂敭濉叆杈撳叆妗嗭紱鍙抽敭鍔犲叆闃熷垪銆俓n\n妯℃澘鍐呭锛?{item.text}` : "蹇嵎浠诲姟妯℃澘銆傚乏閿～鍏ヨ緭鍏ユ锛屽彸閿姞鍏ラ槦鍒椼€?";
+  }
+  if (el.dataset.dismissNotice) return "鍏抽棴杩欐潯鍓嶇閫氱煡銆?";
+  if (el.dataset.detachFile) return "浠庢湰娆″緟鍙戦€佹秷鎭腑鎾ゅ洖杩欎釜闄勪欢锛涗笉浼氬垹闄ゆ枃浠跺尯涓殑鍘熸枃浠躲€?";
+  if (el.dataset.clearQueue) return "娓呯┖褰撳墠瀵硅瘽鐨勬湰鍦版秷鎭槦鍒椼€?";
+  if (el.dataset.moveQueue) return el.dataset.dir === "-1" ? "鎶婅繖鏉￠槦鍒楁秷鎭笂绉讳竴浣嶃€? : "鎶婅繖鏉￠槦鍒楁秷鎭笅绉讳竴浣嶃€?;
+  if (el.dataset.editQueue) return "缂栬緫杩欐潯闃熷垪娑堟伅鐨勬枃鏈€?";
+  if (el.dataset.removeQueue) return "浠庡綋鍓嶉槦鍒椾腑鍒犻櫎杩欐潯灏氭湭鍙戦€佺殑娑堟伅銆?";
+  if (el.dataset.workflowView) return el.dataset.workflowView === "compact"
+    ? "鍒囨崲鍒扮畝娲佸伐浣滄祦瑙嗗浘锛屽彧鎸夋椂闂存樉绀轰竴琛屼竴鏉＄殑鏈€鏂板姩浣溿€?
+    : "鍒囨崲鍒拌缁嗗伐浣滄祦瑙嗗浘锛屾寜涓昏繘绋嬪拰 helper 鍒嗗眰灞曠ず浜嬩欢銆?";
+  if (el.dataset.toggleNode) return text === "鏀惰捣"
+    ? "鏀惰捣褰撳墠宸ヤ綔娴佽妭鐐圭殑璇︽儏鍜屽瓙姝ラ銆?
+    : "灞曞紑褰撳墠宸ヤ綔娴佽妭鐐圭殑璇︽儏銆佸瓙姝ラ鍜屾祦寮忓唴瀹广€?";
+  if (el.dataset.copyCode !== undefined) return "澶嶅埗杩欎釜浠ｇ爜鍧楃殑鍏ㄩ儴鍐呭鍒板壀璐存澘銆?";
+  if (el.dataset.attachFile) return "鎶婅鏂囦欢鍔犲叆褰撳墠杈撳叆鐨勯檮浠跺垪琛紝闅忎笅涓€鏉℃秷鎭彂閫佺粰 bot銆?";
+  if (el.dataset.previewFile) return "鍦ㄩ瑙堥潰鏉挎墦寮€璇ユ枃浠躲€?";
+  if (el.dataset.downloadFile) return "鎵撳紑璇ユ枃浠剁殑涓嬭浇鍦板潃銆?";
+  if (el.dataset.copyFilePath) return "澶嶅埗璇ユ枃浠跺湪 bot 鏂囦欢鍖轰腑鐨勫伐浣滃尯璺緞銆?";
+  if (el.dataset.copyFileUrl) return "澶嶅埗璇ユ枃浠剁殑涓嬭浇 URL銆?";
+  if (el.dataset.fileAction === "summary") return "鎶婅繖涓枃浠剁敓鎴愨€滄€荤粨鏂囦欢鍐呭鈥濈殑璇锋眰濉叆杈撳叆妗嗐€?";
+  if (el.dataset.fileAction === "extract") return "鎶婅繖涓枃浠剁敓鎴愨€滄彁鍙栧叧閿唴瀹光€濈殑璇锋眰濉叆杈撳叆妗嗐€?";
+  if (el.dataset.fileAction === "report") return "鎶婅繖涓枃浠剁敓鎴愨€滃啓鎶ュ憡鈥濈殑璇锋眰濉叆杈撳叆妗嗐€?";
+  if (el.dataset.deleteFile) return "浠?bot 鏂囦欢鍖哄垹闄よ繖涓枃浠惰褰曞拰鍙鐞嗘枃浠躲€?";
+  if (el.dataset.previewArtifact) return "鍦ㄩ瑙堥潰鏉挎墦寮€杩欎釜 bot 鐢熸垚浜х墿銆?";
+  if (el.dataset.downloadArtifact) return "鎵撳紑杩欎釜 bot 鐢熸垚浜х墿鐨勪笅杞藉湴鍧€銆?";
+  if (el.dataset.copyArtifactUrl) return "澶嶅埗杩欎釜浜х墿鐨勪笅杞?URL銆?";
+  if (el.dataset.copyArtifactPath) return "澶嶅埗杩欎釜浜х墿鍦ㄥ伐浣滃尯涓殑璺緞銆?";
+  if (BUTTON_TEXT_TOOLTIPS[text]) return BUTTON_TEXT_TOOLTIPS[text];
+  return text ? `${text}锛氭墽琛屽綋鍓嶆寜閽搴旀搷浣溿€俙 : "鎵ц褰撳墠鎸夐挳瀵瑰簲鎿嶄綔銆?";
+}
+
+function enhanceButtonTooltips(root = document) {
+  const scope = root?.querySelectorAll ? root : document;
+  scope.querySelectorAll("button").forEach((button) => {
+    const tip = buttonTooltip(button);
+    if (!tip) return;
+    button.setAttribute("title", tip);
+    button.dataset.tooltip = tip;
+    if (!button.getAttribute("aria-label")) button.setAttribute("aria-label", tip.split("\n")[0]);
+  });
+}
+
+function ensureTooltipEl() {
+  if (tooltipEl) return tooltipEl;
+  tooltipEl = document.createElement("div");
+  tooltipEl.className = "button-tooltip";
+  tooltipEl.setAttribute("role", "tooltip");
+  document.body.appendChild(tooltipEl);
+  return tooltipEl;
+}
+
+function positionTooltip(target) {
+  if (!tooltipEl || !target) return;
+  const rect = target.getBoundingClientRect();
+  tooltipEl.style.maxWidth = `${Math.min(420, Math.max(240, window.innerWidth - 32))}px`;
+  const tipRect = tooltipEl.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  left = Math.min(Math.max(12, left), window.innerWidth - tipRect.width - 12);
+  let top = rect.bottom + 9;
+  if (top + tipRect.height > window.innerHeight - 12) top = rect.top - tipRect.height - 9;
+  tooltipEl.style.left = `${Math.max(12, left)}px`;
+  tooltipEl.style.top = `${Math.max(12, top)}px`;
+}
+
+function showButtonTooltip(target) {
+  const tip = target?.dataset?.tooltip;
+  if (!tip) return;
+  tooltipTarget = target;
+  const el = ensureTooltipEl();
+  el.textContent = tip;
+  el.classList.add("open");
+  positionTooltip(target);
+}
+
+function hideButtonTooltip(target = null) {
+  if (target && tooltipTarget && target !== tooltipTarget) return;
+  tooltipTarget = null;
+  tooltipEl?.classList.remove("open");
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY) || localStorage.getItem("bot-agent-state-v1");
+    if (!raw) return seedState();
+    return normalizeState({ ...defaultState, ...JSON.parse(raw) });
+  } catch {
+    return seedState();
+  }
+}
+
+async function clearIndexedDbState() {
+  if (!("indexedDB" in window)) return;
+  try {
+    await new Promise((resolve) => {
+      const req = indexedDB.deleteDatabase(DB_NAME);
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve();
+    });
+  } catch {
+    // Browser storage cleanup is best-effort.
+  }
+}
+
+async function applyMaintenanceCleanupMarker() {
+  try {
+    const resp = await fetch(`${CLEANUP_MARKER_URL}?t=${Date.now()}`, { cache: "no-store" });
+    if (!resp.ok) return false;
+    const marker = await resp.json();
+    const cleanupId = String(marker?.cleanup_id || "");
+    if (!cleanupId) return false;
+    if (localStorage.getItem(CLEANUP_MARKER_LOCAL_KEY) === cleanupId) return false;
+
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem("bot-agent-state-v1");
+    localStorage.setItem(CLEANUP_MARKER_LOCAL_KEY, cleanupId);
+    await clearIndexedDbState();
+    state = seedState();
+    attachedFileIds = [];
+    currentDraft = "";
+    idbReady = false;
+    startupRecovered = false;
+    saveState();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function openDb() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("IndexedDB is not available"));
+      return;
+    }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE);
+    };
+    req.onerror = () => reject(req.error || new Error("open IndexedDB failed"));
+    req.onsuccess = () => resolve(req.result);
+  });
+}
+
+async function idbGet(key) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, "readonly");
+    const req = tx.objectStore(DB_STORE).get(key);
+    req.onerror = () => reject(req.error || new Error("IndexedDB get failed"));
+    req.onsuccess = () => resolve(req.result);
+    tx.oncomplete = () => db.close();
+  });
+}
+
+async function idbSet(key, value) {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(DB_STORE, "readwrite");
+    tx.objectStore(DB_STORE).put(value, key);
+    tx.onerror = () => reject(tx.error || new Error("IndexedDB set failed"));
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+  });
+}
+
+async function hydrateFromIndexedDb() {
+  try {
+    const saved = await idbGet(STORAGE_KEY);
+    if (saved) {
+      state = normalizeState({ ...defaultState, ...saved });
+      idbReady = true;
+      render();
+    }
+  } catch {
+    idbReady = false;
+  }
+}
+
+function seedState() {
+  const account = {
+    userId: "local-user",
+    displayName: "鏈湴鐢ㄦ埛",
+    createdAt: nowIso(),
+    lastUsedAt: nowIso(),
+  };
+  const archive = makeLocalArchive(account.userId, "榛樿瀵硅瘽", "");
+  return normalizeState({
+    ...defaultState,
+    accounts: [account],
+    activeAccountId: account.userId,
+    archives: [archive],
+    activeArchiveId: archive.id,
+    conversations: { [archive.id]: emptyConversation(archive.id) },
+    files: { [archive.id]: [] },
+  });
+}
+
+function normalizeState(input) {
+  const s = structuredClone(input);
+  s.settings = { ...defaultState.settings, ...(s.settings || {}) };
+  s.ui = { ...defaultState.ui, ...(s.ui || {}) };
+  s.settings.maxWorkflowRuns = Math.max(1, Number(s.settings.maxWorkflowRuns || DEFAULT_MAX_WORKFLOW_RUNS));
+  s.settings.autoContinueMaxSec = Math.max(1, Math.min(86400, Number(s.settings.autoContinueMaxSec || 900)));
+  s.accounts = Array.isArray(s.accounts) ? s.accounts : [];
+  s.archives = Array.isArray(s.archives) ? s.archives : [];
+  s.conversations = s.conversations || {};
+  s.files = s.files || {};
+  s.artifacts = s.artifacts || {};
+  if (!s.accounts.length) return seedState();
+  if (!s.activeAccountId || !s.accounts.some((a) => a.userId === s.activeAccountId)) {
+    s.activeAccountId = s.accounts[0].userId;
+  }
+  const accountArchives = s.archives.filter((a) => a.userId === s.activeAccountId);
+  if (!s.activeArchiveId || !accountArchives.some((a) => a.id === s.activeArchiveId)) {
+    s.activeArchiveId = accountArchives[0]?.id || "";
+  }
+  for (const archive of s.archives) {
+    archive.archiveId = archive.archiveId || "";
+    archive.windowId = archive.windowId || archive.id;
+    if (archive.archiveId && archive.id === archive.archiveId) {
+      const nextId = uid("archive_window");
+      if (s.conversations[archive.id] && !s.conversations[nextId]) {
+        s.conversations[nextId] = s.conversations[archive.id];
+        s.conversations[nextId].archiveId = nextId;
+        delete s.conversations[archive.id];
+      }
+      if (s.files[archive.id] && !s.files[nextId]) {
+        s.files[nextId] = s.files[archive.id];
+        delete s.files[archive.id];
+      }
+      if (s.artifacts[archive.id] && !s.artifacts[nextId]) {
+        s.artifacts[nextId] = s.artifacts[archive.id];
+        delete s.artifacts[archive.id];
+      }
+      archive.id = nextId;
+      archive.windowId = nextId;
+    }
+    archive.groupId = archive.groupId || `env_user_${archive.userId || s.activeAccountId}`;
+    archive.projectId = archive.projectId || archive.projectKey || uid("project");
+    archive.currentDir = archive.currentDir || "";
+    if (!s.conversations[archive.id]) s.conversations[archive.id] = emptyConversation(archive.id);
+    if (!s.files[archive.id]) s.files[archive.id] = [];
+    if (!s.artifacts[archive.id]) s.artifacts[archive.id] = [];
+    s.conversations[archive.id].workflowRuns = Array.isArray(s.conversations[archive.id].workflowRuns)
+      ? s.conversations[archive.id].workflowRuns.slice(0, s.settings.maxWorkflowRuns)
+      : [];
+    s.conversations[archive.id].messages = Array.isArray(s.conversations[archive.id].messages)
+      ? s.conversations[archive.id].messages
+      : [];
+    normalizeConversationMessages(s.conversations[archive.id]);
+    s.conversations[archive.id].queue = Array.isArray(s.conversations[archive.id].queue)
+      ? s.conversations[archive.id].queue
+      : [];
+    s.conversations[archive.id].draft = s.conversations[archive.id].draft || "";
+    s.conversations[archive.id].draftAttachments = Array.isArray(s.conversations[archive.id].draftAttachments)
+      ? s.conversations[archive.id].draftAttachments
+      : [];
+    s.conversations[archive.id].inputHistory = Array.isArray(s.conversations[archive.id].inputHistory)
+      ? s.conversations[archive.id].inputHistory.slice(-100)
+      : [];
+    s.conversations[archive.id].autoRunQueue = s.conversations[archive.id].autoRunQueue ?? s.settings.autoRunQueue;
+    s.conversations[archive.id].autoContinueStartedAt = s.conversations[archive.id].autoContinueStartedAt || "";
+    s.conversations[archive.id].pendingInsertedMessages = Array.isArray(s.conversations[archive.id].pendingInsertedMessages)
+      ? s.conversations[archive.id].pendingInsertedMessages.slice(-5)
+      : [];
+  }
+  return s;
+}
+
+function normalizeConversationMessages(conv) {
+  if (!conv || !Array.isArray(conv.messages)) return;
+  const next = [];
+  for (const msg of conv.messages) {
+    if (!msg || typeof msg !== "object") continue;
+    const text = String(msg.text || "");
+    const hasAttachments = Array.isArray(msg.attachments) && msg.attachments.length > 0;
+    const hasPreview = Array.isArray(msg.round2PreviewItems) && msg.round2PreviewItems.length > 0;
+    const hasAction = Boolean(msg.currentActionText);
+    if (msg.role === "assistant" && !text.trim() && !hasAttachments && !hasPreview && !hasAction) {
+      if (msg.status !== "streaming") continue;
+    }
+    next.push(msg);
+  }
+  conv.messages = next;
+}
+
+function syncBackgroundTasks(tasks = []) {
+  state.ui.backgroundTasks = Array.isArray(tasks)
+    ? tasks.filter((task) => task && String(task.status || "") === "running")
+    : [];
+}
+
+function saveState() {
+  trimWorkflowRuns();
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if ("indexedDB" in window) {
+    idbSet(STORAGE_KEY, state)
+      .then(() => { idbReady = true; })
+      .catch(() => { idbReady = false; });
+  }
+  broadcastState();
+}
+
+function emptyConversation(archiveId) {
+  return {
+    id: uid("conv"),
+    archiveId,
+    status: "idle",
+    messages: [],
+    workflowRuns: [],
+    queue: [],
+    draft: "",
+    draftAttachments: [],
+    inputHistory: [],
+    autoRunQueue: true,
+    autoContinueStartedAt: "",
+    pendingInsertedMessages: [],
+  };
+}
+
+function trimWorkflowRuns() {
+  const limit = Math.max(1, Number(state.settings?.maxWorkflowRuns || DEFAULT_MAX_WORKFLOW_RUNS));
+  for (const conv of Object.values(state.conversations || {})) {
+    if (Array.isArray(conv.workflowRuns) && conv.workflowRuns.length > limit) {
+      conv.workflowRuns = conv.workflowRuns.slice(0, limit);
+    }
+  }
+}
+
+function makeLocalArchive(userId, title, currentDir) {
+  return {
+    id: uid("local_archive"),
+    archiveId: "",
+    userId,
+    title: title || "鏂板瓨妗?",
+    groupId: `env_user_${userId}`,
+    currentDir: currentDir || "",
+    projectId: uid("project"),
+    createdAt: nowIso(),
+    lastUsedAt: nowIso(),
+    localOnly: true,
+  };
+}
+
+function activeAccount() {
+  return state.accounts.find((a) => a.userId === state.activeAccountId) || state.accounts[0] || null;
+}
+
+function activeArchive() {
+  return state.archives.find((a) => a.id === state.activeArchiveId) || null;
+}
+
+function activeConversation() {
+  const archive = activeArchive();
+  if (!archive) return null;
+  if (!state.conversations[archive.id]) state.conversations[archive.id] = emptyConversation(archive.id);
+  return state.conversations[archive.id];
+}
+
+function lockKeyFor(archive, account) {
+  if (!archive || !account) return "";
+  const archiveId = archive.archiveId || archive.id;
+  return `${archiveId}:${archive.groupId || ""}:${account.userId}`;
+}
+
+function hasOtherRunningWindow(archive, account) {
+  const key = lockKeyFor(archive, account);
+  if (!key) return false;
+  return state.archives.some((item) => {
+    if (item.id === archive.id) return false;
+    if (item.userId !== account.userId) return false;
+    if (lockKeyFor(item, account) !== key) return false;
+    return state.conversations[item.id]?.status === "running";
+  });
+}
+
+function backend(path) {
+  const base = (state.settings.backendUrl || "http://127.0.0.1:8000").replace(/\/$/, "");
+  if (location.protocol.startsWith("http") && location.port === "8765") return path;
+  return `${base}${path}`;
+}
+
+async function fetchJson(path, options = {}) {
+  const resp = await fetch(backend(path), options);
+  if (!resp.ok) throw new Error(`${resp.status}: ${await safeText(resp)}`);
+  return resp.json();
+}
+
+function makeTextFile(name, content) {
+  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+  return new File([blob], name, { type: "text/plain;charset=utf-8" });
+}
+
+async function safeText(resp) {
+  try {
+    return await resp.text();
+  } catch {
+    return "";
+  }
+}
+
+async function parseSseStream(response, onEvent) {
+  if (!response.body) throw new Error("褰撳墠娴忚鍣ㄤ笉鏀寔娴佸紡鍝嶅簲");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let match;
+    while ((match = buffer.match(/\r?\n\r?\n/))) {
+      const raw = buffer.slice(0, match.index);
+      buffer = buffer.slice((match.index || 0) + match[0].length);
+      const evt = parseSseEvent(raw);
+      if (evt) onEvent(evt);
+    }
+  }
+  if (buffer.trim()) {
+    const evt = parseSseEvent(buffer);
+    if (evt) onEvent(evt);
+  }
+}
+
+function parseSseEvent(raw) {
+  const lines = raw.split(/\r?\n/);
+  let event = "message";
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  if (!dataLines.length) return null;
+  const rawData = dataLines.join("\n");
+  let data = rawData;
+  try {
+    data = JSON.parse(rawData);
+  } catch {
+    data = { text: rawData };
+  }
+  return { event, data };
+}
+
+function addMessage(message) {
+  const conv = activeConversation();
+  if (!conv) return "";
+  const id = message.id || uid("msg");
+  conv.messages.push({
+    id,
+    role: "system",
+    text: "",
+    createdAt: nowIso(),
+    status: "done",
+    attachments: [],
+    ...message,
+    id,
+  });
+  saveState();
+  render();
+  scrollTranscript();
+  return id;
+}
+
+function updateMessage(id, patch, archiveId = state.activeArchiveId) {
+  const conv = state.conversations[archiveId] || activeConversation();
+  const msg = conv?.messages.find((m) => m.id === id);
+  if (!msg) return;
+  Object.assign(msg, patch);
+  saveState();
+  if (archiveId === state.activeArchiveId) {
+    renderTranscript();
+    scrollTranscript();
+  }
+}
+
+function addWorkflowNode(run, node) {
+  run.nodes.push({
+    id: uid("node"),
+    kind: "workflow",
+    title: "浜嬩欢",
+    status: "done",
+    detail: "",
+    depth: 0,
+    createdAt: nowIso(),
+    ...node,
+  });
+}
+
+function workflowNodeMergeKey(node) {
+  if (!node) return "";
+  if (node.mergeKey) return node.mergeKey;
+  if (node.streamKey) return `stream:${node.streamKey}`;
+  if (node.commandId) return `command:${node.commandId}`;
+  if (node.helperId) return `helper:${node.helperId}`;
+  if (node.historyKey) return `history:${node.historyKey}`;
+  return "";
+}
+
+function workflowEventId(data = {}, event = "") {
+  if (!data || typeof data !== "object") return "";
+  return data.event_id || data.id || data.node_id || data.sequence || data.seq || data.index || data.ts || data.timestamp || data.created_at || data.createdAt || "";
+}
+
+function workflowUniqueMergeKey(prefix = "event") {
+  return `${prefix}:${uid("wf")}`;
+}
+
+function workflowEventMergeKey(data = {}, event = "workflow", { reusable = false } = {}) {
+  if (data?.mergeKey) return data.mergeKey;
+  const eventId = workflowEventId(data, event);
+  const kind = data?.kind || event || "workflow";
+  if (eventId) return `${kind}:${eventId}`;
+  if (reusable) {
+    const helperId = data?.helperId || data?.helper_id || data?.proc_id || data?.process_id || data?.task_id || "";
+    const commandId = data?.command_id || data?.commandId || "";
+    return `${kind}:${commandId || helperId || data?.tool || data?.message || event}`;
+  }
+  return workflowUniqueMergeKey(kind);
+}
+
+function isHelperWorkflowKind(kind) {
+  const text = String(kind || "");
+  return text === "helper" || text.startsWith("helper:") || text.startsWith("helper_");
+}
+
+function parsedNodeDetail(node) {
+  if (!node || !node.detail || typeof node.detail !== "string") return null;
+  const text = node.detail.trim();
+  if (!text.startsWith("{") || !text.endsWith("}")) return null;
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizedWorkflowNode(node) {
+  const detail = parsedNodeDetail(node) || {};
+  const helperId = node?.helperId || node?.helper_id || node?.proc_id || node?.process_id || node?.task_id
+    || detail.helperId || detail.helper_id || detail.proc_id || detail.process_id || detail.task_id || "";
+  const taskId = node?.taskId || node?.task_id || detail.task_id || detail.helper_task_id || "";
+  const helperKind = node?.helperKind || node?.helper_kind || detail.helper_kind || "";
+  let kind = node?.kind || detail.kind || "";
+  if (helperId && String(kind || "") === "workflow" && detail.kind) kind = detail.kind;
+  return {
+    ...node,
+    kind,
+    helperId,
+    taskId,
+    helperKind,
+    title: node?.title || detail.title || detail.message || kind || "浜嬩欢",
+  };
+}
+
+function helperNodeId(node) {
+  const normalized = normalizedWorkflowNode(node);
+  return normalized.helperId || "";
+}
+
+function helperGroupId(node) {
+  const normalized = normalizedWorkflowNode(node);
+  return normalized.taskId || normalized.helperId || "";
+}
+
+function helperTaskId(node) {
+  const normalized = normalizedWorkflowNode(node);
+  return normalized.taskId || "";
+}
+
+function isHelperProgressNode(node) {
+  return String(normalizedWorkflowNode(node).kind || "") === "helper_progress";
+}
+
+function helperProgressOwnerId(node) {
+  const normalized = normalizedWorkflowNode(node);
+  return normalized.helperId || normalized.taskId || helperGroupId(normalized) || "";
+}
+
+function completePriorHelperProgress(run, ownerId, currentKey = "") {
+  if (!run?.nodes || !ownerId) return;
+  for (const node of run.nodes) {
+    if (!isHelperProgressNode(node)) continue;
+    if (helperProgressOwnerId(node) !== ownerId) continue;
+    if (currentKey && workflowNodeMergeKey(node) === currentKey) continue;
+    if (!node.status || node.status === "running") {
+      node.status = "done";
+    }
+  }
+}
+
+function completeHelperProgress(run, ownerId) {
+  if (!run?.nodes || !ownerId) return;
+  for (const node of run.nodes) {
+    if (!isHelperProgressNode(node)) continue;
+    if (helperProgressOwnerId(node) !== ownerId) continue;
+    if (!node.status || node.status === "running") {
+      node.status = "done";
+      node.updatedAt = node.updatedAt || nowIso();
+    }
+  }
+}
+
+function helperKindLabel(kind) {
+  const raw = String(kind || "helper");
+  return raw.startsWith("helper:") ? raw.slice("helper:".length) || "helper" : raw || "helper";
+}
+
+function helperRootTitle(node, helperId = "") {
+  const normalized = normalizedWorkflowNode(node);
+  const kind = helperKindLabel(normalized.helperKind || normalized.kind || "helper");
+  const task = normalized.taskId || helperTaskId(normalized) || helperId;
+  return `${kind} helper${task ? ` 路 ${task}` : ""}`;
+}
+
+function helperRootDetail(node, helperId = "") {
+  const normalized = normalizedWorkflowNode(node);
+  const detail = parsedNodeDetail(normalized) || {};
+  const lines = [];
+  const kind = helperKindLabel(normalized.helperKind || normalized.kind || "helper");
+  const task = normalized.taskId || detail.task_id || detail.helper_task_id || "";
+  lines.push(`绫诲瀷: ${kind}`);
+  if (task) lines.push(`浠诲姟: ${task}`);
+  if (helperId) lines.push(`杩涚▼: ${helperId}`);
+  if (normalized.status || detail.status) lines.push(`鐘舵€? ${normalized.status || detail.status}`);
+  if (detail.last_iter != null) lines.push(`杩唬: ${detail.last_iter}`);
+  if (Array.isArray(detail.recent_tools) && detail.recent_tools.length) {
+    lines.push(`鏈€杩戝伐鍏? ${detail.recent_tools.slice(-5).join(", ")}`);
+  }
+  if (detail.progress_summary) lines.push(`鎽樿: ${detail.progress_summary}`);
+  if (detail.last_thought_preview) lines.push(`鏈€杩戣繘灞? ${detail.last_thought_preview}`);
+  return lines.join("\n");
+}
+
+function helperProgressMergeKey(data, event = "workflow") {
+  const helperId = data?.helperId || data?.helper_id || data?.proc_id || data?.process_id || data?.task_id || "";
+  if (!helperId) return `${data?.kind || event}:${data?.message || event}`;
+  const iter = data?.iter ?? data?.last_iter ?? "";
+  const tool = Array.isArray(data?.recent_tools) && data.recent_tools.length ? data.recent_tools[data.recent_tools.length - 1] : "";
+  const phase = data?.kind || event || "helper_progress";
+  if (phase === "helper_progress") return `helper_progress:${helperId}:iter:${iter || "?"}:tool:${tool || "stream"}`;
+  return `${phase}:${helperId}`;
+}
+
+function helperProgressTitle(data, event = "workflow") {
+  const kind = data?.kind || event || "helper_progress";
+  if (kind === "helper_progress") {
+    const iter = data?.iter ?? data?.last_iter ?? "";
+    const tool = Array.isArray(data?.recent_tools) && data.recent_tools.length ? data.recent_tools[data.recent_tools.length - 1] : "";
+    return `${iter ? `iter ${iter}` : "helper 杩涘害"}${tool ? ` 路 ${tool}` : ""}`;
+  }
+  if (kind === "helper_start") return "helper 鍚姩";
+  if (kind === "helper_blocked") return "helper 琚畧鍗嫤鎴?";
+  if (kind === "helper_registry_done") return "helper 杩涚▼宸查€€鍑?";
+  return data?.title || data?.message || kind;
+}
+
+function markHelperLifecycleExited(run, ownerId) {
+  if (!run?.nodes || !ownerId) return;
+  for (const node of run.nodes) {
+    if (!isHelperWorkflowKind(node.kind)) continue;
+    if (helperProgressOwnerId(node) !== ownerId) continue;
+    if (!node.status || node.status === "running") {
+      node.status = "exited";
+      node.updatedAt = node.updatedAt || nowIso();
+    }
+  }
+}
+
+function workflowDetailText(data, event = "workflow") {
+  if (typeof data === "string") return data;
+  if (!data || typeof data !== "object") return String(data ?? "");
+  const kind = data.kind || event || "";
+  if (String(kind).startsWith("helper")) {
+    const lines = [];
+    if (data.reason) lines.push(`鍘熷洜: ${data.reason}`);
+    if (data.error) lines.push(`绫诲瀷: ${data.error}`);
+    if (Array.isArray(data.blocked_tasks) && data.blocked_tasks.length) {
+      lines.push(`琚嫤鎴换鍔? ${data.blocked_tasks.map((item) => item.task_id || item.helper_kind || "helper").join(", ")}`);
+    }
+    if (data.what_doing) lines.push(`姝ｅ湪: ${data.what_doing}`);
+    if (data.last_thought) lines.push(`杩涘睍: ${data.last_thought}`);
+    if (data.last_note) lines.push(`鐘舵€? ${data.last_note}`);
+    if (data.progress_summary) lines.push(`鎽樿: ${data.progress_summary}`);
+    if (Array.isArray(data.recent_tools) && data.recent_tools.length) {
+      lines.push(`鏈€杩戝伐鍏? ${data.recent_tools.slice(-6).join(" -> ")}`);
+    }
+    if (data.elapsed_seconds != null) lines.push(`鑰楁椂: ${Number(data.elapsed_seconds).toFixed(1)}s`);
+    if (data.heartbeat_status) lines.push(`蹇冭烦: ${data.heartbeat_status}`);
+    return lines.join("\n") || helperRootDetail(data, data.proc_id || data.process_id || data.task_id || "");
+  }
+  return JSON.stringify(data, null, 2);
+}
+
+function isBackgroundTaskEvent(data = {}, event = "") {
+  const kind = String(data?.kind || event || "").toLowerCase();
+  return kind.startsWith("background_") || Boolean(data?.result_path && data?.status_path && data?.task_id);
+}
+
+function backgroundTaskTitle(data = {}, event = "") {
+  const kind = String(data.kind || event || "").toLowerCase();
+  const task = data.task_id || "background";
+  if (kind === "background_start") return `开始: ${task}`;
+  if (kind === "background_done") return `结束: ${task}`;
+  if (kind === "background_reminder") return `提醒: ${task}`;
+  if (kind === "background_direct_reminder") return `提醒: ${task}`;
+  return `后台: ${task}`;
+}
+
+function backgroundTaskPreview(data = {}, event = "") {
+  const kind = String(data.kind || event || "").toLowerCase();
+  const task = data.task_id || "background";
+  const status = data.status || "";
+  if (kind === "background_start") return `开始: ${task}`;
+  if (kind === "background_done") return `结束: ${task}${status ? ` (${status})` : ""}`;
+  if (kind === "background_reminder" || kind === "background_direct_reminder") {
+    return `提醒: ${task}${status ? ` (${status})` : ""}`;
+  }
+  return `后台: ${task}${status ? ` (${status})` : ""}`;
+}
+
+function backgroundTaskSourcePath(data = {}) {
+  return String(data.cwd || data.current_dir || data.currentDir || data.working_dir || data.workdir || data.root_dir || "").trim();
+}
+
+function backgroundTaskReminderText(data = {}) {
+  return String(
+    data.reminder_text
+    || data.reminder
+    || data.notify_text
+    || data.notify_message
+    || data.short_reminder
+    || data.message
+    || ""
+  ).trim();
+}
+
+function backgroundTaskPaths(data = {}) {
+  return [data.status_path, data.result_path, data.stdout_path, data.stderr_path]
+    .filter(Boolean)
+    .map((path) => `\`${path}\``)
+    .join(" / ");
+}
+
+function renderBackgroundTaskCard(task) {
+  const taskId = task.task_id || task.command_id || "background";
+  const status = task.status || "running";
+  return `
+    <div class="background-task-card" data-background-task-id="${escapeHtml(taskId)}">
+      <div class="background-task-head">
+        <strong>${escapeHtml(taskId)}</strong>
+        <span class="status-pill running">${escapeHtml(status)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderBackgroundTasksWindow() {
+  const tasks = Array.isArray(state.ui.backgroundTasks) ? state.ui.backgroundTasks : [];
+  if (!tasks.length) return "";
+  return `
+    <aside class="background-tasks-window" id="backgroundTasksWindow">
+      <div class="background-tasks-window-head">
+        <strong>\u8fd0\u884c\u4e2d\u540e\u53f0\u4efb\u52a1</strong>
+        <span class="small">${escapeHtml(String(tasks.length))} \u4e2a</span>
+      </div>
+      <div class="background-task-list">
+        ${tasks.map(renderBackgroundTaskCard).join("")}
+      </div>
+    </aside>
+  `;
+}
+
+function renderBackgroundTasksPanel() {
+  const tasks = Array.isArray(state.ui.backgroundTasks) ? state.ui.backgroundTasks : [];
+  if (!tasks.length) {
+    return `
+      <div class="section background-tasks-panel">
+        <div class="section-title">
+          <span>\u8fd0\u884c\u4e2d\u540e\u53f0\u4efb\u52a1</span>
+          <span class="small">\u4ec5\u663e\u793a running</span>
+        </div>
+        <div class="empty">\u5f53\u524d\u6ca1\u6709\u8fd0\u884c\u4e2d\u7684\u540e\u53f0\u4efb\u52a1</div>
+      </div>
+    `;
+  }
+  return `
+    <div class="section background-tasks-panel">
+      <div class="section-title">
+          <span>\u8fd0\u884c\u4e2d\u540e\u53f0\u4efb\u52a1</span>
+        <span class="small">${escapeHtml(String(tasks.length))} \u4e2a</span>
+      </div>
+      <div class="background-task-list">
+        ${tasks.map(renderBackgroundTaskCard).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function recordBackgroundRound2Preview(run, data = {}, event = "") {
+  if (!isBackgroundTaskEvent(data, event)) return false;
+  const msg = currentStreamingAssistantMessage();
+  if (!msg) return false;
+  const task = data.task_id || "background";
+  const key = `background:${task}:${data.kind || event}:${data.status || ""}:${data.result_path || ""}`;
+  return appendAssistantRound2Content(msg.id, {
+    key,
+    label: "鍚庡彴浠诲姟",
+    text: backgroundTaskPreview(data, event),
+  });
+}
+
+function mainToolTitle(data = {}, event = "workflow") {
+  if (isBackgroundTaskEvent(data, event)) return backgroundTaskTitle(data, event);
+  const tool = data.tool || data.name || "宸ュ叿";
+  const iter = data.iteration ? `iter ${data.iteration}` : "";
+  const suffix = iter ? ` (${iter})` : "";
+  if (data.kind === "main_tool_start") return `涓昏繘绋嬭皟鐢?${tool}${suffix}`;
+  if (data.kind === "main_tool_done") {
+    const elapsed = data.elapsed_seconds != null ? `锛?{data.elapsed_seconds}s` : "";
+    return `涓昏繘绋嬪畬鎴?${tool}${suffix}${elapsed}`;
+  }
+  return data.title || data.message || event;
+}
+
+function workflowNodeStatus(status, kind = "", event = "", data = {}) {
+  const raw = String(status || data?.status || "").toLowerCase();
+  const tag = String(kind || data?.kind || event || "").toLowerCase();
+  const eventName = String(event || "").toLowerCase();
+  if (tag === "background_start") return "running";
+  if (tag === "background_done") return data?.ok === false || ["failed", "error"].includes(raw) ? "error" : "done";
+  if (tag === "background_reminder" || tag === "background_direct_reminder") return raw === "running" ? "running" : "done";
+  if (tag === "main_tool_start") return "running";
+  if (tag === "main_tool_done") return data?.ok === false ? "error" : "done";
+  if (tag === "helper_registry_done") return "exited";
+  if (data?.ok === false) return "error";
+  if (["helper_blocked", "blocked"].includes(tag) || raw === "blocked") return "error";
+  if (["error", "failed", "fail", "exception"].includes(raw) || ["error", "failed", "fail", "exception"].includes(tag)) return "error";
+  if (["interrupted", "aborted", "cancelled", "canceled"].includes(raw) || ["interrupted", "aborted", "cancelled", "canceled"].includes(tag)) return "interrupted";
+  if (["done", "complete", "completed", "success", "ok"].includes(raw)) return "done";
+  if (["exited", "exit"].includes(raw)) return "exited";
+  if (["done", "complete", "completed", "tool_done"].includes(tag)) return "done";
+  if (["done", "complete"].includes(eventName)) return "done";
+
+  // These monitor payloads are point-in-time log events. Active commands and
+  // helpers are represented by monitor snapshots, so these rows should not
+  // stay visually "running" after they have been recorded.
+  if (["start", "pid", "tool_start", "tool_done"].includes(tag)) return "done";
+  if (["start", "pid", "tool_start", "tool_done"].includes(eventName)) return "done";
+  return raw || "running";
+}
+
+function normalizeWorkflowNodeForRun(node, run) {
+  const normalized = normalizedWorkflowNode(node);
+  let status = workflowNodeStatus(normalized.status, normalized.kind, "", normalized);
+  if (String(normalized.kind || "") === "background_start" && status === "running") {
+    return { ...normalized, status };
+  }
+  if (run?.status && run.status !== "running" && status === "running") {
+    status = run.status === "error" ? "error" : run.status === "interrupted" ? "interrupted" : "done";
+  }
+  return { ...normalized, status };
+}
+
+function finalizeWorkflowRun(run, status = "done") {
+  if (!run?.nodes) return;
+  const finalStatus = status === "done" ? "done" : (status || "done");
+  for (const node of run.nodes) {
+    if (String(node.kind || "") === "background_start" && node.status === "running") {
+      continue;
+    }
+    const current = workflowNodeStatus(node.status, node.kind, "", node);
+    if (current === "error") {
+      node.status = "error";
+      continue;
+    }
+    if (current === "interrupted") {
+      node.status = "interrupted";
+      continue;
+    }
+    if (!node.status || node.status === "running") {
+      node.status = finalStatus;
+      node.updatedAt = node.updatedAt || nowIso();
+    }
+  }
+  for (const node of run.nodes) {
+    const ownerId = helperProgressOwnerId(node);
+    if (ownerId) completeHelperProgress(run, ownerId);
+  }
+  run.commandCount = 0;
+  run.helperCount = 0;
+}
+
+function upsertWorkflowNode(run, node, options = {}) {
+  if (!run) return null;
+  const key = workflowNodeMergeKey(node);
+  const existing = key ? run.nodes.find((item) => workflowNodeMergeKey(item) === key) : null;
+  if (!existing) {
+    addWorkflowNode(run, node);
+    return run.nodes[run.nodes.length - 1] || null;
+  }
+  const nextDetail = node.detail ?? existing.detail ?? "";
+  Object.assign(existing, {
+    ...node,
+    id: existing.id,
+    createdAt: existing.createdAt,
+    detail: options.appendDetail ? `${existing.detail || ""}${nextDetail}` : nextDetail,
+    updatedAt: nowIso(),
+  });
+  return existing;
+}
+
+function appendWorkflowStream(run, streamKey, text, title = "LLM 杩斿洖娴?") {
+  if (!run || !text) return null;
+  return upsertWorkflowNode(run, {
+    streamKey,
+    mergeKey: `stream:${streamKey}`,
+    kind: "stream",
+    title,
+    status: "running",
+    detail: text,
+  }, { appendDetail: true });
+}
+
+function streamTextFromData(data) {
+  if (data == null) return "";
+  if (typeof data === "string") return data;
+  if (typeof data !== "object") return String(data);
+  for (const key of ["text", "content", "delta", "reasoning_content", "reasoning", "think"]) {
+    const value = data[key];
+    if (typeof value === "string") return value;
+  }
+  return "";
+}
+
+function assistantMessageById(id, archiveId = state.activeArchiveId) {
+  const conv = state.conversations[archiveId] || activeConversation();
+  return conv?.messages.find((m) => m.id === id && m.role === "assistant") || null;
+}
+
+function currentStreamingAssistantMessage(conv = activeConversation()) {
+  if (!conv?.messages?.length) return null;
+  for (let i = conv.messages.length - 1; i >= 0; i -= 1) {
+    const msg = conv.messages[i];
+    if (msg.role === "assistant" && msg.status === "streaming") return msg;
+  }
+  return null;
+}
+
+function compactStatusText(text, limit = 220) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) return "";
+  return value.length > limit ? `${value.slice(0, limit - 1)}鈥 : value;
+}
+
+function workflowLabelText(kind = "") {
+  const raw = String(kind || "").trim();
+  const lower = raw.toLowerCase();
+  if (!raw) return "杩涘害";
+  if (lower.includes("plan") || lower.includes("planning")) return "璁″垝";
+  if (lower.includes("intent")) return "鎰忓浘";
+  if (lower.includes("memory")) return "璁板繂";
+  if (lower.includes("tool")) return "宸ュ叿";
+  if (lower.includes("helper")) return "helper";
+  if (lower.includes("command")) return "鍛戒护";
+  if (lower.includes("reply") || lower.includes("composing")) return "鍥炲";
+  return raw;
+}
+
+function intermediateReplyLabel(event = "") {
+  const key = String(event || "").toLowerCase();
+  if (key === "helper_blocked") return "鍒嗗伐璋冩暣";
+  if (key === "helper_start") return "鍒嗗伐寮€濮?";
+  if (key === "helper_done") return "鍒嗗伐缁撴灉";
+  if (key === "helper_exit") return "杩涚▼閫€鍑?";
+  if (key === "milestone") return "閲岀▼纰?";
+  if (key === "long_silence") return "鐘舵€佹洿鏂?";
+  if (key === "stuck") return "闃诲姏澶勭悊";
+  if (key === "breakthrough") return "绐佺牬杩涘睍";
+  return "涓€斿弽棣?";
+}
+
+function appendAssistantRound2Content(assistantId, item) {
+  const msg = assistantMessageById(assistantId);
+  if (!msg || msg.status !== "streaming" || msg.text) return false;
+  const text = String(item?.text || item?.message || item?.title || "").trim();
+  if (!text) return false;
+  const key = item?.key || `round2:${Date.now()}`;
+  const nextItem = {
+    key,
+    label: compactStatusText(item?.label || "杩涘害", 24),
+    text,
+    ts: nowIso(),
+  };
+  const items = Array.isArray(msg.round2PreviewItems) ? msg.round2PreviewItems.slice() : [];
+  const last = items[items.length - 1];
+  if (last && last.text === nextItem.text && last.label === nextItem.label) return false;
+  items.push(nextItem);
+  msg.round2PreviewItems = items;
+  return true;
+}
+
+function latestWorkflowActionText(run) {
+  const rows = workflowCompactRows(run).filter((node) => String(node.kind || "") !== "stream");
+  if (!rows.length) return "";
+  const latest = rows[rows.length - 1];
+  const latestTime = Date.parse(latest?.updatedAt || latest?.createdAt || "") || 0;
+  const running = [...rows].reverse().find((node) => {
+    if (workflowNodeStatus(node.status, node.kind, "", node) !== "running") return false;
+    const nodeTime = Date.parse(node.updatedAt || node.createdAt || "") || 0;
+    return !latestTime || latestTime - nodeTime < 15000;
+  });
+  const node = running || latest;
+  const label = helperGroupId(node) ? helperKindLabel(node.helperKind || node.kind || "helper") : workflowLabelText(node.kind || "workflow");
+  const text = compactStatusText(compactNodeText(node), 180);
+  return text ? `${label}: ${text}` : "";
+}
+
+function updateAssistantCurrentAction(assistantId, run) {
+  const msg = assistantMessageById(assistantId);
+  if (!msg || msg.status !== "streaming") return false;
+  const text = latestWorkflowActionText(run);
+  if (!text || msg.currentActionText === text) return false;
+  msg.currentActionText = text;
+  return true;
+}
+
+function updateStreamingAssistantCurrentActionFromRun(run) {
+  const msg = currentStreamingAssistantMessage();
+  if (!msg) return false;
+  const text = latestWorkflowActionText(run);
+  if (!text || msg.currentActionText === text) return false;
+  msg.currentActionText = text;
+  return true;
+}
+
+function updateStreamingAssistantRound2PreviewFromRun(run) {
+  return updateStreamingAssistantCurrentActionFromRun(run);
+}
+
+function clearAssistantRound2Preview(assistantId) {
+  const msg = assistantMessageById(assistantId);
+  if (!msg) return false;
+  let changed = false;
+  if (msg.round2PreviewItems) {
+    delete msg.round2PreviewItems;
+    changed = true;
+  }
+  if (!msg.round3Started) {
+    msg.round3Started = true;
+    changed = true;
+  }
+  return changed;
+}
+
+function isThinkStreamEvent(event, data) {
+  const ev = String(event || "").toLowerCase();
+  if (ev === "think" || ev === "reasoning" || ev === "reasoning_token") return true;
+  if (data && typeof data === "object") {
+    const type = String(data.type || data.kind || data.channel || "").toLowerCase();
+    if (type === "think" || type === "reasoning") return true;
+    if (typeof data.reasoning_content === "string" && !data.text && !data.content) return true;
+  }
+  return false;
+}
+
+function isTextStreamEvent(event, data) {
+  const ev = String(event || "").toLowerCase();
+  if (["token", "text", "content", "delta", "message"].includes(ev)) return true;
+  return isThinkStreamEvent(event, data);
+}
+
+function moveQueueItem(queueId, direction) {
+  const conv = activeConversation();
+  if (!conv) return;
+  const idx = conv.queue.findIndex((q) => q.id === queueId);
+  if (idx < 0) return;
+  const nextIdx = idx + direction;
+  if (nextIdx < 0 || nextIdx >= conv.queue.length) return;
+  const [item] = conv.queue.splice(idx, 1);
+  conv.queue.splice(nextIdx, 0, item);
+  saveState();
+  render();
+}
+
+function editQueueItem(queueId) {
+  const conv = activeConversation();
+  const item = conv?.queue.find((q) => q.id === queueId);
+  if (!item) return;
+  const next = prompt("缂栬緫闃熷垪娑堟伅", item.text);
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  item.text = trimmed;
+  saveState();
+  render();
+}
+
+function clearQueue() {
+  const conv = activeConversation();
+  if (!conv?.queue.length) return;
+  if (!confirm("娓呯┖褰撳墠瀛樻。鐨勬湰鍦伴槦鍒楋紵")) return;
+  conv.queue = [];
+  saveState();
+  render();
+}
+
+function projectToArchive(item, userId) {
+  const id = uid("archive_window");
+  return {
+    id,
+    windowId: id,
+    archiveId: item.archive_id,
+    userId,
+    title: item.project_name || "bot",
+    groupId: item.group_id,
+    currentDir: item.root_dir || "",
+    projectId: item.project_key,
+    createdAt: item.created_at || nowIso(),
+    lastUsedAt: item.last_seen_at || nowIso(),
+    localOnly: false,
+  };
+}
+
+function mergeArchiveFromBackend(item, userId) {
+  if (!item?.archive_id) return null;
+  let archive = state.archives.find(
+    (a) => a.userId === userId && a.archiveId === item.archive_id && a.projectId === item.project_key
+  );
+  if (!archive) {
+    archive = projectToArchive(item, userId);
+    state.archives.push(archive);
+  } else {
+    archive.archiveId = item.archive_id;
+    archive.groupId = item.group_id || archive.groupId;
+    archive.projectId = item.project_key || archive.projectId;
+    archive.currentDir = item.root_dir || archive.currentDir || "";
+    archive.title = archive.title || item.project_name || "bot";
+    archive.localOnly = false;
+    archive.lastUsedAt = item.last_seen_at || nowIso();
+  }
+  if (!state.conversations[archive.id]) state.conversations[archive.id] = emptyConversation(archive.id);
+  if (!state.files[archive.id]) state.files[archive.id] = [];
+  if (!state.artifacts[archive.id]) state.artifacts[archive.id] = [];
+  return archive;
+}
+
+function removeArchiveLocalState(archiveId) {
+  delete state.conversations[archiveId];
+  delete state.files[archiveId];
+  delete state.artifacts[archiveId];
+}
+
+function resetArchivesForAccount(userId) {
+  const kept = [];
+  let removed = 0;
+  for (const archive of state.archives || []) {
+    if (archive.userId === userId) {
+      removeArchiveLocalState(archive.id);
+      removed += 1;
+    } else {
+      kept.push(archive);
+    }
+  }
+  const archive = makeLocalArchive(userId, "榛樿瀵硅瘽", "");
+  kept.push(archive);
+  state.archives = kept;
+  state.conversations[archive.id] = emptyConversation(archive.id);
+  state.files[archive.id] = [];
+  state.artifacts[archive.id] = [];
+  if (state.activeAccountId === userId) state.activeArchiveId = archive.id;
+  return removed;
+}
+
+function pruneArchivesAfterBackendSync(userId, projects) {
+  const backendProjects = Array.isArray(projects) ? projects : [];
+  const valid = new Set(
+    backendProjects
+      .filter((item) => item?.archive_id)
+      .map((item) => `${item.archive_id}:${item.project_key || ""}`)
+  );
+  const next = [];
+  let removed = 0;
+  for (const archive of state.archives || []) {
+    const belongsToUser = archive.userId === userId;
+    const backendBound = Boolean(archive.archiveId) && archive.localOnly === false;
+    const key = `${archive.archiveId || ""}:${archive.projectId || ""}`;
+    if (belongsToUser && backendBound && (backendProjects.length === 0 || !valid.has(key))) {
+      removeArchiveLocalState(archive.id);
+      removed += 1;
+      continue;
+    }
+    next.push(archive);
+  }
+  state.archives = next;
+  if (!state.archives.some((archive) => archive.id === state.activeArchiveId)) {
+    const replacement = state.archives.find((archive) => archive.userId === userId);
+    if (replacement) {
+      state.activeArchiveId = replacement.id;
+    } else {
+      const archive = makeLocalArchive(userId, "榛樿瀵硅瘽", "");
+      state.archives.push(archive);
+      state.conversations[archive.id] = emptyConversation(archive.id);
+      state.files[archive.id] = [];
+      state.artifacts[archive.id] = [];
+      state.activeArchiveId = archive.id;
+    }
+  }
+  return removed;
+}
+
+
+async function ensureBackendArchive(archive, account) {
+  if (!archive || !account) throw new Error("鏈€夋嫨璐﹀彿鎴栧瓨妗?)";
+  if (archive.archiveId && !archive.localOnly) return archive;
+
+  const body = {
+    user_id: account.userId,
+    title: archive.title || "bot chat",
+    current_dir: archive.currentDir || "",
+    project_id: archive.projectId || "",
+    archive_id: archive.archiveId || "",
+    group_id: archive.groupId || "",
+  };
+  const data = await fetchJson("/v1/agent/projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  adoptProject(archive, data);
+  return archive;
+}
+
+function adoptProject(archive, data) {
+  archive.archiveId = data.archive_id;
+  archive.groupId = data.group_id;
+  archive.projectId = data.project_key;
+  archive.currentDir = data.root_dir || archive.currentDir || "";
+  archive.title = archive.title || data.project_name || "bot";
+  archive.localOnly = false;
+  archive.lastUsedAt = nowIso();
+
+  if (!state.conversations[archive.id]) state.conversations[archive.id] = emptyConversation(archive.id);
+  if (!state.files[archive.id]) state.files[archive.id] = [];
+  if (!state.artifacts[archive.id]) state.artifacts[archive.id] = [];
+  state.activeArchiveId = archive.id;
+  saveState();
+}
+
+function buildChatRequest(message, archive, account, clientMsgId, fileIds) {
+  return {
+    archive_id: archive.archiveId || archive.id,
+    group_id: archive.groupId,
+    user_id: account.userId,
+    user_name: account.displayName,
+    message,
+    client_msg_id: clientMsgId,
+    current_dir: archive.currentDir || "",
+    project_id: archive.projectId || "",
+    persona_id: "environment",
+    attached_file_ids: fileIds,
+  };
+}
+
+function longInputFilename() {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "").replace("T", "_");
+  return `long_input_${stamp}.txt`;
+}
+
+async function prepareMessageForSend(text, fileIds, { queuedItem = null, mode = "normal" } = {}) {
+  if (!text || text.length <= LONG_MESSAGE_FILE_THRESHOLD) {
+    return { text, fileIds, converted: false };
+  }
+  if (queuedItem?.longInputConverted) {
+    return { text, fileIds, converted: false };
+  }
+  const ok = confirmAction(
+    `褰撳墠杈撳叆绾?${text.length.toLocaleString()} 涓瓧绗︼紝鐩存帴鍙戦€佷細鎸ゅ崰涓昏繘绋嬩笂涓嬫枃骞跺彲鑳藉け璐ャ€俓n\n` +
+    `鏄惁灏嗗叾杞崲涓?bot 鏂囦欢鍖?txt 闄勪欢锛屽苟鍙彂閫佷竴鏉＄煭鎸囦护璁?bot 璇诲彇璇ユ枃浠讹紵`
+  );
+  if (!ok) {
+    notify("宸插彇娑堝彂閫?, "璇锋妸瓒呴暱鍐呭淇濆瓨涓烘枃浠跺悗涓婁紶锛屾垨纭鑷姩杞负鏂囦欢銆?, "warn");
+    return null;
+  }
+  const file = makeTextFile(longInputFilename(), text);
+  const savedFile = await uploadSingleBotFile(file, {
+    autoAttach: true,
+    notifySuccess: true,
+    sourceLabel: "瓒呴暱杈撳叆",
+  });
+  const nextIds = [...new Set([...(fileIds || []), savedFile.id])];
+  const shortText = [
+    `鐢ㄦ埛闇€姹傚凡杞崲涓?bot 鏂囦欢鍖洪檮浠讹細${savedFile.name}`,
+    "",
+    "璇峰厛璇诲彇骞跺畬鏁寸悊瑙ｈ闄勪欢涓殑鐢ㄦ埛鍘熷闇€姹傦紝鍐嶆寜鍏朵腑瑕佹眰鎵ц銆傝嫢鍐呭杈冮暱锛岃浣跨敤鍒嗘璇诲彇銆佹憳瑕佸拰 helper 澶勭悊锛岄伩鍏嶆妸鍏ㄦ枃涓€娆℃€у鍏ヤ富杩涚▼涓婁笅鏂囥€?",
+  ].join("\n");
+  return { text: shortText, fileIds: nextIds, converted: true, file: savedFile };
+}
+
+async function sendMessage(mode = "normal", queuedItem = null) {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const conv = activeConversation();
+  if (!archive || !account || !conv) return;
+  if (mode === "insert" && conv.status !== "running" && !queuedItem) mode = "normal";
+  const sendLockId = archive.id;
+  if (mode === "normal" && sendingArchiveIds.has(sendLockId)) {
+    notify("姝ｅ湪鍙戦€?, "涓婁竴鏉℃秷鎭粛鍦ㄥ噯澶囨垨鎻愪氦锛屽凡蹇界暐閲嶅鐐瑰嚮銆?, "info");
+    return;
+  }
+  let text = (queuedItem?.text ?? currentDraft).trim();
+  if (!text) return;
+  if (mode === "normal") sendingArchiveIds.add(sendLockId);
+  let assistantId = "";
+  let run = null;
+
+  try {
+    let fileIds = (queuedItem?.attachments || attachedFileIds).slice();
+    if (mode === "insert" && !queuedItem && text.length > LONG_MESSAGE_FILE_THRESHOLD) {
+      const preparedInsert = await prepareMessageForSend(text, fileIds, { queuedItem, mode });
+      if (!preparedInsert) return;
+      conv.queue.push({
+        id: uid("queue"),
+        text: preparedInsert.text,
+        attachments: preparedInsert.fileIds,
+        createdAt: nowIso(),
+        longInputConverted: preparedInsert.converted,
+        reason: "long_insert_as_followup",
+      });
+      pushInputHistory(preparedInsert.text);
+      currentDraft = "";
+      attachedFileIds = [];
+      syncDraftToConversation();
+      saveState();
+      render();
+      notify("瓒呴暱鎻掑叆宸茶浆涓轰笅涓€杞槦鍒?, "杩愯涓彃鍏ユ帴鍙ｄ笉鎼哄甫闄勪欢锛涘凡涓婁紶涓烘枃浠跺苟鎺掑叆涓嬩竴杞€?, "info");
+      return;
+    }
+    const prepared = await prepareMessageForSend(text, fileIds, { queuedItem, mode });
+    if (!prepared) return;
+    text = prepared.text;
+    fileIds = prepared.fileIds;
+    if (mode === "queue") {
+      conv.queue.push({ id: uid("queue"), text, attachments: fileIds, createdAt: nowIso(), longInputConverted: prepared.converted });
+      pushInputHistory(text);
+      currentDraft = "";
+      attachedFileIds = [];
+      syncDraftToConversation();
+      saveState();
+      render();
+      if (conv.autoRunQueue !== false && state.settings.autoRunQueue !== false && conv.status !== "running") {
+        setTimeout(() => drainQueueIfIdle(archive.id), 0);
+      }
+      return;
+    }
+    if (mode === "insert") {
+      await insertIntoRun(text);
+      return;
+    }
+    if (conv.status === "running" && !queuedItem) {
+      conv.queue.push({ id: uid("queue"), text, attachments: fileIds, createdAt: nowIso(), longInputConverted: prepared.converted });
+      pushInputHistory(text);
+      currentDraft = "";
+      attachedFileIds = [];
+      syncDraftToConversation();
+      saveState();
+      render();
+      notify("宸插姞鍏ラ槦鍒?", text.slice(0, 80), "info")";
+      return;
+    }
+    if (!queuedItem && hasOtherRunningWindow(archive, account)) {
+      conv.queue.push({ id: uid("queue"), text, attachments: fileIds, createdAt: nowIso(), reason: "other_window_running", longInputConverted: prepared.converted });
+      pushInputHistory(text);
+      currentDraft = "";
+      attachedFileIds = [];
+      syncDraftToConversation();
+      saveState();
+      render();
+      notify("鍚岄攣绐楀彛杩愯涓?, "娑堟伅宸插湪鏈獥鍙ｆ帓闃?, "info");
+      return;
+    }
+
+    try {
+      await ensureBackendArchive(archive, account);
+    } catch (err) {
+      addMessage({ role: "system_status", text: `鍒涘缓鍚庣瀛樻。澶辫触锛?{err.message || err}`, status: "failed" });
+      return;
+    }
+
+    addMessage({ role: "user", text, attachments: fileIds, sendMode: queuedItem ? "queue" : "normal" });
+    if (!queuedItem?.autoContinue) conv.autoContinueStartedAt = "";
+    pushInputHistory(text);
+    currentDraft = "";
+    if (!queuedItem) attachedFileIds = [];
+    syncDraftToConversation();
+
+    assistantId = addMessage({
+      role: "assistant",
+      text: "",
+      status: "streaming",
+      round2PreviewItems: [{
+        key: "request:submitted",
+        label: "鐘舵€?",
+        text: "璇锋眰宸叉彁浜わ紝绛夊緟鍚庣寮€濮嬪鐞嗐€?",
+        ts: nowIso(),
+      }],
+      currentActionText: "杩炴帴鍚庣骞跺噯澶囧伐浣滄祦",
+    });
+    run = {
+      id: uid("run"),
+      traceId: "",
+      status: "running",
+      startedAt: nowIso(),
+      nodes: [],
+    };
+    conv.workflowRuns.unshift(run);
+    trimWorkflowRuns();
+    conv.status = "running";
+    activeController = new AbortController();
+    saveState();
+    render();
+
+    const request = buildChatRequest(text, archive, account, uid("client"), fileIds);
+    const response = await fetch(backend("/v1/chat/stream"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+      signal: activeController.signal,
+    });
+    if (response.status === 409) {
+      conv.queue.unshift({ id: uid("queue"), text, attachments: fileIds, createdAt: nowIso() });
+      notify("鍚庣蹇?, "娑堟伅宸叉斁鍥為槦鍒?, "warn");
+      throw new Error("鍚庣宸叉湁鍚屼竴鐢ㄦ埛浠诲姟鍦ㄨ繍琛岋紝鏈潯娑堟伅宸叉斁鍥為槦鍒?)";
+    }
+    if (!response.ok) throw new Error(`璇锋眰澶辫触 ${response.status}: ${await safeText(response)}`);
+    await parseSseStream(response, (evt) => handleSseEvent(evt, assistantId, run));
+    finishRun(run, assistantId, "done", true, archive.id);
+  } catch (err) {
+    if (!assistantId || !run) {
+      addMessage({ role: "system_status", text: `鍙戦€佸け璐ワ細${err.message || err}`, status: "failed" });
+      notify("鍙戦€佸け璐?", err.message || String(err), "error")";
+      return;
+    }
+    if (err?.name === "AbortError") {
+      finishRun(run, assistantId, "interrupted", true, archive.id);
+      notify("浠诲姟宸蹭腑鏂?", run.traceId || """, "warn")";
+    } else {
+      addWorkflowNode(run, {
+        kind: "error",
+        title: "璇锋眰澶辫触",
+        status: "error",
+        detail: err.message || String(err),
+      });
+      updateMessage(assistantId, {
+        status: "failed",
+        text: currentAssistantText(assistantId, archive.id) || `鍑洪敊锛?{err.message || err}`,
+      }, archive.id);
+      finishRun(run, assistantId, "error", false, archive.id);
+      notify("浠诲姟澶辫触", err.message || String(err), "error");
+    }
+  } finally {
+    sendingArchiveIds.delete(sendLockId);
+    activeController = null;
+    saveState();
+    render();
+  }
+}
+
+function currentAssistantText(id, archiveId = state.activeArchiveId) {
+  return (state.conversations[archiveId] || activeConversation())?.messages.find((m) => m.id === id)?.text || "";
+}
+
+async function recoverFromBackend() {
+  const account = activeAccount();
+  if (!account || startupRecovered) return;
+  startupRecovered = true;
+  try {
+    const projects = await fetchJson(`/v1/agent/projects?user_id=${encodeURIComponent(account.userId)}`);
+    const removed = pruneArchivesAfterBackendSync(account.userId, projects);
+    for (const item of projects) mergeArchiveFromBackend(item, account.userId);
+    if (removed) {
+      notify("宸叉竻鐞嗘湰鍦板瓨妗?, `鍚庣宸叉棤瀵瑰簲椤圭洰锛屽凡绉婚櫎 ${removed} 涓湰鍦扮紦瀛樺瓨妗ｃ€俙, "info");
+    }
+    saveState();
+    render();
+  } catch (err) {
+    addPassiveWorkflow("recover", "鍚庣椤圭洰鍒楄〃鎭㈠澶辫触", "error", err.message || String(err));
+  }
+  await refreshActiveState();
+}
+
+function setupStateBroadcast() {
+  if (!("BroadcastChannel" in window)) return;
+  stateChannel = new BroadcastChannel("bot-agent-state");
+  stateChannel.addEventListener("message", (event) => {
+    const msg = event.data || {};
+    if (msg.type !== "state-updated" || !msg.state) return;
+    if (msg.origin === window.name) return;
+    const incoming = normalizeState({ ...defaultState, ...msg.state });
+    state = incoming;
+    attachedFileIds = attachedFileIds.filter((id) => fileRefs([id]).length);
+    render();
+  });
+}
+
+function broadcastState() {
+  if (!stateChannel) return;
+  try {
+    stateChannel.postMessage({
+      type: "state-updated",
+      origin: window.name,
+      state,
+    });
+  } catch {
+    // Best-effort local multi-window sync.
+  }
+}
+
+async function refreshActiveState() {
+  const account = activeAccount();
+  if (!account) return;
+  try {
+    const active = await fetchJson("/v1/chat/active");
+    const mine = (active.items || []).filter((item) => item.user_id === account.userId);
+    for (const item of mine) {
+      const archive = state.archives.find((a) => (a.archiveId || a.id) === item.archive_id && a.groupId === item.group_id);
+      if (!archive) continue;
+      const conv = state.conversations[archive.id] || emptyConversation(archive.id);
+      state.conversations[archive.id] = conv;
+      if (conv.status !== "running") {
+        conv.status = "running";
+        conv.workflowRuns.unshift({
+          id: uid("run"),
+          traceId: item.trace_id || "",
+          status: "running",
+          startedAt: nowIso(),
+          nodes: [{
+            id: uid("node"),
+            kind: "recover",
+            title: "鎭㈠鍚庣娲昏穬浠诲姟",
+            status: "running",
+            detail: JSON.stringify(item, null, 2),
+            createdAt: nowIso(),
+          }],
+        });
+      }
+    }
+    saveState();
+    render();
+    startMonitor();
+    await loadMonitorHistory();
+  } catch (err) {
+    addPassiveWorkflow("recover", "娲昏穬浠诲姟鎭㈠澶辫触", "error", err.message || String(err));
+  }
+}
+
+async function refreshRunSnapshot() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const conv = activeConversation();
+  const run = conv?.workflowRuns?.[0];
+  if (!archive || !account || !run?.traceId) {
+    alert("褰撳墠娌℃湁鍙仮澶嶇殑 trace銆?)";
+    return;
+  }
+  try {
+    const query = new URLSearchParams({
+      archive_id: archive.archiveId || archive.id,
+      group_id: archive.groupId || "",
+      user_id: account.userId,
+      limit: "500",
+    });
+    const data = await fetchJson(`/v1/chat/runs/${encodeURIComponent(run.traceId)}?${query}`);
+    for (const item of data.items || []) {
+      const payload = item.payload || {};
+      const unique = `run:${item.event || "event"}:${payload.kind || ""}:${payload.command_id || payload.task_id || payload.message || item.ts || ""}`;
+      if (run.nodes.some((node) => node.historyKey === unique)) continue;
+      upsertWorkflowNode(run, {
+        mergeKey: unique,
+        kind: payload.kind || item.event || "history",
+        title: payload.title || payload.message || payload.kind || item.event || "鍘嗗彶浜嬩欢",
+        status: payload.status || "done",
+        commandId: payload.command_id || "",
+        helperId: payload.proc_id || payload.process_id || payload.task_id || "",
+        taskId: payload.task_id || "",
+        helperKind: payload.helper_kind || "",
+        historyKey: unique,
+        detail: JSON.stringify(payload, null, 2),
+      });
+      if (isBackgroundTaskEvent(payload, item.event)) {
+        recordBackgroundRound2Preview(run, payload, item.event);
+      }
+    }
+    if (data.active) mergeMonitorSnapshot(data.active);
+    saveState();
+    renderWorkflowOnly();
+  } catch (err) {
+    addPassiveWorkflow("history", "Run 蹇収鍔犺浇澶辫触", "error", err.message || String(err));
+  }
+}
+
+async function loadMonitorHistory() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const conv = activeConversation();
+  const run = conv?.workflowRuns?.[0];
+  if (!archive?.archiveId || !account || !run) return;
+  try {
+    const query = new URLSearchParams({
+      archive_id: archive.archiveId || archive.id,
+      group_id: archive.groupId || "",
+      user_id: account.userId,
+      trace_id: run.traceId || "",
+      limit: "200",
+    });
+    const data = await fetchJson(`/v1/chat/monitor/history?${query}`);
+    for (const item of data.items || []) {
+      const payload = item.payload || {};
+      const unique = `${item.event || "event"}:${payload.kind || ""}:${payload.command_id || payload.task_id || payload.message || item.ts || ""}`;
+      if (run.nodes.some((node) => node.historyKey === unique)) continue;
+      upsertWorkflowNode(run, {
+        mergeKey: unique,
+        kind: payload.kind || item.event || "history",
+        title: payload.title || payload.message || payload.kind || item.event || "鍘嗗彶浜嬩欢",
+        status: payload.status || "done",
+        commandId: payload.command_id || "",
+        helperId: payload.proc_id || payload.process_id || payload.task_id || "",
+        taskId: payload.task_id || "",
+        helperKind: payload.helper_kind || "",
+        historyKey: unique,
+        detail: JSON.stringify(payload, null, 2),
+      });
+      if (isBackgroundTaskEvent(payload, item.event)) {
+        recordBackgroundRound2Preview(run, payload, item.event);
+      }
+    }
+    if (data.active?.active_background_tasks) syncBackgroundTasks(data.active.active_background_tasks);
+    saveState();
+    renderWorkflowOnly();
+  } catch (err) {
+    addPassiveWorkflow("history", "鐩戞帶鍘嗗彶鍔犺浇澶辫触", "error", err.message || String(err));
+  }
+}
+
+function handleSseEvent(evt, assistantId, run) {
+  const { event, data } = evt;
+  if (event === "meta") {
+    run.traceId = data.trace_id || run.traceId;
+    if (run.traceId) startMonitor();
+    const env = data.environment;
+    if (env) {
+      const archive = activeArchive();
+      if (archive) adoptProject(archive, env);
+    }
+    addWorkflowNode(run, { kind: "run"", title: "寮€濮嬭繍琛?", status: "running"", detail: JSON.stringify(data, null, 2) })";
+  } else if (isTextStreamEvent(event, data)) {
+    const text = streamTextFromData(data);
+    if (!text) return;
+    if (isThinkStreamEvent(event, data)) {
+      appendWorkflowStream(run, "round3_think", text, "鎬濊€冩祦");
+    } else {
+      const msg = activeConversation()?.messages.find((m) => m.id === assistantId);
+      if (msg) {
+        clearAssistantRound2Preview(assistantId);
+        msg.text += text;
+      }
+      appendWorkflowStream(run, "round3_reply", text, "Round3 LLM 杩斿洖");
+    }
+  } else if (event === "intermediate_reply") {
+    const text = String(data.message || "").trim();
+    if (text) {
+      appendAssistantRound2Content(assistantId, {
+        key: `intermediate:${Date.now()}`,
+        label: intermediateReplyLabel(data.event),
+        text,
+      });
+    }
+    upsertWorkflowNode(run, {
+      mergeKey: workflowEventMergeKey(data, `intermediate_reply:${Date.now()}`),
+      kind: "intermediate_reply",
+      title: text || "涓€斿弽棣?",
+      status: "done",
+      detail: JSON.stringify(data, null, 2),
+    });
+  } else if (event === "progress") {
+    upsertWorkflowNode(run, {
+      mergeKey: workflowEventMergeKey(data, data.kind || data.round || "progress"),
+      kind: data.kind || data.round || "progress",
+      title: data.message || data.kind || data.round || "杩涘害",
+      status: workflowNodeStatus(data.status, data.kind || data.round || "progress", event, data),
+      detail: JSON.stringify(data, null, 2),
+    });
+    updateAssistantCurrentAction(assistantId, run);
+  } else if (event === "done" || event === "complete") {
+    if (event === "done" && Array.isArray(data.files) && data.files.length) {
+      rememberArtifacts(data.files);
+    }
+    upsertWorkflowNode(run, {
+      mergeKey: `event:${event}`,
+      kind: event,
+      title: event === "done" ? "鍥炲鐢熸垚瀹屾垚" : "浠诲姟瀹屾垚",
+      status: "done",
+      detail: JSON.stringify(data, null, 2),
+    });
+    const streamNode = run.nodes.find((node) => node.mergeKey === "stream:round3_reply");
+    if (streamNode) streamNode.status = "done";
+  } else if (event === "error") {
+    addWorkflowNode(run, {
+      kind: "error",
+      title: data.message || "鍚庣閿欒",
+      status: "error",
+      detail: JSON.stringify(data, null, 2),
+    });
+  } else {
+    const helperId = data.helperId || data.helper_id || data.proc_id || data.process_id || data.task_id || "";
+    upsertWorkflowNode(run, {
+      mergeKey: workflowEventMergeKey(data, data.kind || event, { reusable: Boolean(data.command_id || helperId) }),
+      kind: data.kind || event,
+      title: data.title || data.message || event,
+      status: workflowNodeStatus(data.status || "done", data.kind || event, event, data),
+      commandId: data.command_id || "",
+      helperId,
+      taskId: data.task_id || "",
+      helperKind: data.helper_kind || "",
+      detail: typeof data === "string" ? data : JSON.stringify(data, null, 2),
+    });
+    updateAssistantCurrentAction(assistantId, run);
+  }
+  updateAssistantCurrentAction(assistantId, run);
+  updateStreamingAssistantRound2PreviewFromRun(run);
+  saveState();
+  renderTranscript();
+  scheduleWorkflowRender();
+  renderArtifactPanelOnly();
+  renderNotificationsOnly();
+  scrollTranscript({ onlyIfNearBottom: true });
+}
+
+function finishRun(run, assistantId, status, drain = true, archiveId = state.activeArchiveId) {
+  const conv = state.conversations[archiveId] || activeConversation();
+  if (!conv) return;
+  const archive = state.archives.find((item) => item.id === archiveId) || activeArchive();
+  const forceEnvironmentContinue = Boolean(
+    archive?.currentDir
+    && Array.isArray(conv.pendingInsertedMessages)
+    && conv.pendingInsertedMessages.length
+  );
+  finalizeWorkflowRun(run, status);
+  run.status = status;
+  run.endedAt = nowIso();
+  conv.status = status === "error" ? "error" : "idle";
+  const assistant = conv.messages.find((m) => m.id === assistantId && m.role === "assistant");
+  const nextStatus = status === "error" ? "failed" : (status === "interrupted" ? "interrupted" : "done");
+  if (assistant && status === "interrupted" && !String(assistant.text || "").trim()) {
+    conv.messages = conv.messages.filter((m) => m.id !== assistantId);
+    if (archiveId === state.activeArchiveId) {
+      saveState();
+      renderTranscript();
+    }
+  } else {
+    updateMessage(assistantId, { status: nextStatus }, archiveId);
+  }
+  if (status === "done") notify("浠诲姟瀹屾垚", run.traceId || "", "done");
+  if (drain && status === "done") {
+    setTimeout(() => checkAutoContinueIfNeeded(archiveId, assistantId, { force: forceEnvironmentContinue }), 250);
+  }
+  if (drain && status === "interrupted" && forceEnvironmentContinue) {
+    setTimeout(() => checkAutoContinueIfNeeded(archiveId, assistantId, { force: true }), 250);
+  }
+  if (drain && conv.autoRunQueue !== false && state.settings.autoRunQueue !== false) setTimeout(() => drainQueueIfIdle(archiveId), 500);
+}
+
+function lastUserMessageBefore(conv, assistantId) {
+  if (!conv) return null;
+  if (Array.isArray(conv.pendingInsertedMessages) && conv.pendingInsertedMessages.length) {
+    const inserted = conv.pendingInsertedMessages[conv.pendingInsertedMessages.length - 1];
+    return {
+      role: "inserted_user",
+      text: `鐢ㄦ埛鍦ㄤ换鍔¤繍琛屼腑琛ュ厖/淇锛?{inserted.text || ""}`,
+      createdAt: inserted.createdAt || nowIso(),
+    };
+  }
+  const idx = conv.messages.findIndex((m) => m.id === assistantId);
+  const end = idx >= 0 ? idx : conv.messages.length;
+  for (let i = end - 1; i >= 0; i -= 1) {
+    if (conv.messages[i]?.role === "user") return conv.messages[i];
+  }
+  return null;
+}
+
+function clearPendingInsertedMessages(conv) {
+  if (conv && Array.isArray(conv.pendingInsertedMessages) && conv.pendingInsertedMessages.length) {
+    conv.pendingInsertedMessages = [];
+  }
+}
+
+function recentConversationText(conv, limit = 6000) {
+  if (!conv) return "";
+  const text = conv.messages
+    .slice(-10)
+    .map((m) => `${roleLabel(m.role)}: ${m.text || ""}`)
+    .join("\n");
+  return text.length > limit ? text.slice(-limit) : text;
+}
+
+async function checkAutoContinueIfNeeded(archiveId, assistantId, options = {}) {
+  const conv = state.conversations[archiveId];
+  const assistant = conv?.messages.find((m) => m.id === assistantId);
+  const user = lastUserMessageBefore(conv, assistantId);
+  const force = Boolean(options.force);
+  if (!conv || !assistant || !user) return;
+  if (!force && !state.settings.autoContinue) return;
+  if (conv.status === "running" || conv.queue.length) return;
+  if (!assistant.text?.trim() || !user.text?.trim()) return;
+
+  const startedAt = conv.autoContinueStartedAt || nowIso();
+  conv.autoContinueStartedAt = startedAt;
+  const elapsedSec = Math.max(0, (Date.now() - new Date(startedAt).getTime()) / 1000);
+  const maxSec = Math.max(1, Number(state.settings.autoContinueMaxSec || 900));
+  if (elapsedSec >= maxSec) {
+    notify("鑷姩缁х画鍋滄"", "宸茶揪鍒版椂闂翠笂闄?", "info")";
+    clearPendingInsertedMessages(conv);
+    saveState();
+    return;
+  }
+
+  try {
+    const result = await fetchJson("/v1/chat/auto-continue/check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_message: user.text,
+        assistant_reply: assistant.text,
+        recent_context: recentConversationText(conv),
+        auto_continue_elapsed_sec: elapsedSec,
+        max_auto_continue_sec: maxSec,
+      }),
+    });
+    if (!result.should_continue) {
+      conv.autoContinueStartedAt = "";
+      clearPendingInsertedMessages(conv);
+      saveState();
+      return;
+    }
+    const text = (result.continue_message || "缁х画").trim() || "缁х画";
+    conv.queue.push({
+      id: uid("queue"),
+      text,
+      attachments: [],
+      createdAt: nowIso(),
+      autoContinue: true,
+    });
+    notify("鑷姩缁х画", result.reason || text, "info");
+    clearPendingInsertedMessages(conv);
+    saveState();
+    setTimeout(() => drainQueueIfIdle(archiveId), 100);
+  } catch (err) {
+    notify("鑷姩缁х画鍒ゅ畾澶辫触", err.message || String(err), "warn");
+  }
+}
+
+function drainQueueIfIdle(archiveId = state.activeArchiveId) {
+  const conv = state.conversations[archiveId];
+  if (!conv || conv.status === "running" || !conv.queue.length) return;
+  if (sendingArchiveIds.has(archiveId)) return;
+  if (archiveId !== state.activeArchiveId) return;
+  const item = conv.queue.shift();
+  notify("闃熷垪寮€濮嬫墽琛?", item.text.slice(0, 80), "info")";
+  saveState();
+  currentDraft = "";
+  attachedFileIds = [];
+  sendMessage("normal", item);
+}
+
+async function insertIntoRun(text) {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const conv = activeConversation();
+  if (!archive || !account || !conv) return;
+  if (conv.status !== "running") {
+    currentDraft = text;
+    syncDraftToConversation();
+    await sendMessage("normal");
+    return;
+  }
+  const body = {
+    archive_id: archive.archiveId || archive.id,
+    group_id: archive.groupId,
+    user_id: account.userId,
+    message: text,
+    client_msg_id: uid("insert"),
+    current_dir: archive.currentDir || "",
+    project_id: archive.projectId || "",
+  };
+  try {
+    const result = await fetchJson("/v1/chat/interrupt_message", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    let abortResult = { ok: false };
+    if (result.ok) {
+      abortResult = await fetchJson("/v1/chat/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          archive_id: archive.archiveId || archive.id,
+          group_id: archive.groupId,
+          user_id: account.userId,
+          current_dir: archive.currentDir || "",
+          project_id: archive.projectId || "",
+        }),
+      });
+    }
+    const ok = Boolean(result.ok && abortResult.ok);
+    addMessage({ role: "inserted_user", text, sendMode: state.settings.insertMode, status: ok ? "done" : "failed" });
+    if (ok) {
+      conv.pendingInsertedMessages = Array.isArray(conv.pendingInsertedMessages) ? conv.pendingInsertedMessages : [];
+      conv.pendingInsertedMessages.push({
+        text,
+        createdAt: nowIso(),
+        mode: state.settings.insertMode,
+      });
+      conv.pendingInsertedMessages = conv.pendingInsertedMessages.slice(-5);
+    }
+    if (result.ok && state.settings.insertMode === "inject_then_followup") {
+      conv.queue.push({
+        id: uid("queue"),
+        text,
+        attachments: attachedFileIds.slice(),
+        createdAt: nowIso(),
+        fromInsert: true,
+      });
+    }
+    notify(
+      ok ? "鎻掑叆宸茶Е鍙? : "鎻掑叆鏈敓鏁?,
+      ok ? "宸茶繘鍏ヤ腑閫斾粙鍏ユ祦绋嬶紝绛夊緟褰撳墠浠诲姟鏀舵潫銆? : (abortResult.reason || "褰撳墠浠诲姟鏈繘鍏ュ彲涓€斾粙鍏ョ姸鎬併€?),
+      ok ? "done" : "warn",
+    );
+  } catch (err) {
+    addMessage({ role: "system_status", text: `鎻掑叆澶辫触锛?{err.message || err}`, status: "failed" });
+    clearPendingInsertedMessages(conv);
+  } finally {
+    currentDraft = "";
+    attachedFileIds = [];
+    syncDraftToConversation();
+  }
+}
+
+async function abortRun() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const conv = activeConversation();
+  if (!archive || !account) return;
+  try {
+    await fetchJson("/v1/chat/abort", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        archive_id: archive.archiveId || archive.id,
+        group_id: archive.groupId,
+        user_id: account.userId,
+      }),
+    });
+  } catch {
+    // Local abort still matters if the backend is unreachable.
+  }
+  if (activeController) activeController.abort();
+  if (conv) conv.status = "interrupted";
+  saveState();
+  render();
+}
+
+function startMonitor() {
+  if (!state.settings.monitorEnabled) return;
+  const archive = activeArchive();
+  const account = activeAccount();
+  const run = activeConversation()?.workflowRuns?.[0];
+  if (!archive?.archiveId || !account || !run?.traceId) return;
+  stopMonitor();
+  monitorController = new AbortController();
+  const query = new URLSearchParams({
+    archive_id: archive.archiveId || archive.id,
+    group_id: archive.groupId || "",
+    user_id: account.userId,
+    trace_id: run?.traceId || "",
+    heartbeat_sec: "5",
+  });
+  fetch(backend(`/v1/chat/monitor?${query}`), { signal: monitorController.signal })
+    .then((resp) => {
+      if (!resp.ok) throw new Error(`monitor ${resp.status}`);
+      return parseSseStream(resp, handleMonitorEvent);
+    })
+    .catch((err) => {
+      if (err?.name !== "AbortError") {
+        addPassiveWorkflow("monitor", "鐩戞帶娴佹柇寮€", "error", err.message || String(err));
+      }
+    });
+}
+
+function stopMonitor() {
+  if (monitorController) monitorController.abort();
+  monitorController = null;
+}
+
+function handleMonitorEvent(evt) {
+  const conv = activeConversation();
+  const run = conv?.workflowRuns?.[0];
+  if (!run) return;
+  const data = evt.data || {};
+  const payloadTrace = data.trace_id || "";
+  if (run.traceId && payloadTrace && payloadTrace !== run.traceId) return;
+  if (run.traceId && !payloadTrace && evt.event !== "heartbeat" && evt.event !== "snapshot") return;
+  if (evt.event === "heartbeat" || evt.event === "snapshot") {
+    mergeMonitorSnapshot(data);
+    saveState();
+    scheduleWorkflowRender();
+    renderTranscript();
+    return;
+  }
+  const backgroundEvent = isBackgroundTaskEvent(data, evt.event);
+  const helperId = backgroundEvent ? "" : (data.helperId || data.helper_id || data.process_id || data.proc_id || data.task_id || "");
+  const commandId = data.command_id || data.commandId || "";
+  const mergeKey = backgroundEvent
+    ? `background:${data.task_id || data.command_id || evt.event}`
+    : helperId
+    ? helperProgressMergeKey(data, evt.event)
+    : (commandId ? `command:${commandId}` : workflowEventMergeKey(data, data.kind || evt.event));
+  const kind = data.kind || evt.event;
+  if (backgroundEvent) {
+    recordBackgroundRound2Preview(run, data, evt.event);
+    if (String(data.status || "").toLowerCase() === "running") {
+      syncBackgroundTasks([
+        ...((state.ui.backgroundTasks || []).filter((task) => (task.task_id || task.command_id) !== (data.task_id || data.command_id))),
+        data,
+      ]);
+    } else {
+      syncBackgroundTasks((state.ui.backgroundTasks || []).filter((task) => (task.task_id || task.command_id) !== (data.task_id || data.command_id)));
+    }
+  }
+  if (helperId && String(kind || "") === "helper_progress") {
+    completePriorHelperProgress(run, helperId, mergeKey);
+  }
+  if (helperId && workflowNodeStatus(data.status, kind, evt.event, data) === "done") {
+    completeHelperProgress(run, helperId);
+  }
+  upsertWorkflowNode(run, {
+    mergeKey,
+    kind,
+    title: helperId ? helperProgressTitle(data, evt.event) : mainToolTitle(data, evt.event),
+    status: workflowNodeStatus(data.status, kind, evt.event, data),
+    commandId,
+    helperId,
+    taskId: data.task_id || "",
+    helperKind: backgroundEvent ? "background" : (data.helper_kind || ""),
+    detail: workflowDetailText(data, evt.event),
+  });
+  updateStreamingAssistantCurrentActionFromRun(run);
+  updateStreamingAssistantRound2PreviewFromRun(run);
+  saveState();
+  scheduleWorkflowRender();
+  renderTranscript();
+}
+
+function mergeMonitorSnapshot(snapshot) {
+  const conv = activeConversation();
+  const run = conv?.workflowRuns?.[0];
+  if (!run) return;
+  const commands = snapshot.active_commands || [];
+  const helpers = snapshot.active_helpers || [];
+  const backgroundTasks = snapshot.active_background_tasks || [];
+  const activeCommandIds = new Set();
+  const activeHelperIds = new Set();
+  syncBackgroundTasks(backgroundTasks);
+  run.commandCount = snapshot.active_command_count || commands.length || 0;
+  run.helperCount = snapshot.active_helper_count || helpers.length || 0;
+  for (const command of commands) {
+    const commandId = command.command_id || command.id;
+    if (!commandId) continue;
+    activeCommandIds.add(commandId);
+    upsertWorkflowNode(run, {
+      kind: "command",
+      title: command.title || command.command || "杩愯鍛戒护",
+      status: "running",
+      commandId,
+      detail: JSON.stringify(command, null, 2),
+    });
+  }
+  for (const helper of helpers) {
+    const helperId = helper.proc_id || helper.process_id || helper.task_id || helper.helper_task_id;
+    if (!helperId) continue;
+    activeHelperIds.add(helperId);
+    upsertWorkflowNode(run, {
+      kind: `helper:${helper.helper_kind || "helper"}`,
+      title: helperRootTitle(helper, helperId),
+      status: "running",
+      helperId,
+      taskId: helper.task_id || helper.helper_task_id || "",
+      helperKind: helper.helper_kind || "",
+      detail: JSON.stringify(helper, null, 2),
+    });
+  }
+  for (const task of backgroundTasks) {
+    const taskId = task.task_id || task.command_id || "";
+    if (!taskId) continue;
+    upsertWorkflowNode(run, {
+      mergeKey: `background:${taskId}`,
+      kind: "background_start",
+      title: backgroundTaskTitle(task, "background_start"),
+      status: "running",
+      taskId,
+      helperKind: "background",
+      detail: JSON.stringify(task, null, 2),
+    });
+    recordBackgroundRound2Preview(run, task, "background_start");
+  }
+  if (Array.isArray(snapshot.active_commands)) {
+    for (const node of run.nodes || []) {
+      if (String(node.kind || "") === "background_start") continue;
+      if (node.commandId && !activeCommandIds.has(node.commandId) && node.status === "running") {
+        node.status = "done";
+        node.updatedAt = nowIso();
+      }
+    }
+  }
+  if (Array.isArray(snapshot.active_helpers)) {
+    for (const node of run.nodes || []) {
+      if (node.helperId && !activeHelperIds.has(node.helperId) && node.status === "running" && isHelperWorkflowKind(node.kind)) {
+        node.status = "exited";
+        node.updatedAt = nowIso();
+        markHelperLifecycleExited(run, node.helperId);
+      }
+    }
+  }
+  if (Array.isArray(snapshot.active_background_tasks)) {
+    for (const node of run.nodes || []) {
+      if (String(node.kind || "") !== "background_start") continue;
+      const taskId = node.taskId || "";
+      const stillRunning = backgroundTasks.some((task) => (task.task_id || task.command_id || "") === taskId);
+      if (!stillRunning && node.status === "running") {
+        node.status = "done";
+        node.updatedAt = nowIso();
+      }
+    }
+  }
+  updateStreamingAssistantCurrentActionFromRun(run);
+  updateStreamingAssistantRound2PreviewFromRun(run);
+}
+
+async function abortCommand(commandId) {
+  if (!commandId) return;
+  try {
+    const result = await fetchJson(`/v1/chat/commands/${encodeURIComponent(commandId)}/abort`, {
+      method: "POST",
+    });
+    addPassiveWorkflow("command"", "鍛戒护涓柇璇锋眰宸插彂閫?", result.ok ? "done" : "error"", JSON.stringify(result, null, 2))";
+  } catch (err) {
+    addPassiveWorkflow("command", "鍛戒护涓柇澶辫触", "error", err.message || String(err));
+  }
+}
+
+function addPassiveWorkflow(kind, title, status, detail) {
+  const conv = activeConversation();
+  if (!conv) return;
+  const run = conv.workflowRuns[0] || {
+    id: uid("run"),
+    traceId: "",
+    status: "idle",
+    startedAt: nowIso(),
+    nodes: [],
+  };
+  if (!conv.workflowRuns.length) conv.workflowRuns.unshift(run);
+  addWorkflowNode(run, { kind, title, status, detail });
+  saveState();
+  scheduleWorkflowRender();
+}
+
+async function refreshFiles() {
+  const archive = activeArchive();
+  if (!archive?.archiveId) return;
+  try {
+    const data = await fetchJson(`/v1/chat/files/${encodeURIComponent(archive.archiveId)}/${encodeURIComponent(archive.groupId)}`);
+    state.files[archive.id] = data.items || [];
+    saveState();
+    render();
+  } catch (err) {
+    addMessage({ role: "system_status", text: `鍒锋柊鏂囦欢澶辫触锛?{err.message || err}`, status: "failed" });
+  }
+}
+
+async function refreshArtifacts() {
+  const archive = activeArchive();
+  if (!archive?.archiveId) return;
+  try {
+    const data = await fetchJson(`/v1/chat/artifacts/${encodeURIComponent(archive.archiveId)}/${encodeURIComponent(archive.groupId)}`);
+    state.artifacts[archive.id] = data.items || [];
+    saveState();
+    render();
+  } catch (err) {
+    addMessage({ role: "system_status", text: `鍒锋柊浜х墿澶辫触锛?{err.message || err}`, status: "failed" });
+  }
+}
+
+function rememberArtifacts(files) {
+  const archive = activeArchive();
+  if (!archive || !Array.isArray(files) || !files.length) return;
+  const existing = new Map((state.artifacts[archive.id] || []).map((item) => [item.download_url || item.url || item.rel_path || item.name, item]));
+  for (const file of files) {
+    const rel = file.rel_path || file.name || "";
+    const url = file.download_url || file.url || "";
+    const key = url || rel;
+    if (!key) continue;
+    existing.set(key, {
+      id: file.id || `artifact:${rel || key}`,
+      name: file.name || rel || key,
+      rel_path: rel,
+      workspace_path: rel,
+      size: file.size || 0,
+      status: "ready",
+      kind: "artifact",
+      download_url: url,
+      local_path: file.local_path || "",
+      created_at: Date.now() / 1000,
+    });
+  }
+  state.artifacts[archive.id] = [...existing.values()].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  state.ui.artifactPanelOpen = true;
+}
+
+async function uploadFiles(files) {
+  const archive = activeArchive();
+  const account = activeAccount();
+  if (!archive || !account || !files?.length) return;
+  try {
+    await ensureBackendArchive(archive, account);
+  } catch (err) {
+    addMessage({ role: "system_status", text: `鍒涘缓鍚庣瀛樻。澶辫触锛?{err.message || err}`, status: "failed" });
+    return;
+  }
+  for (const file of files) {
+    try {
+      await uploadSingleBotFile(file, { autoAttach: true, notifySuccess: true });
+    } catch {
+      // uploadSingleBotFile already records a visible failed item or cancellation notice.
+    }
+  }
+  saveState();
+  render();
+}
+
+async function uploadSingleBotFile(file, { autoAttach = true, notifySuccess = true, sourceLabel = "鏂囦欢" } = {}) {
+  const archive = activeArchive();
+  const account = activeAccount();
+  if (!archive || !account || !file) throw new Error("缂哄皯褰撳墠璐﹀彿鎴栧瓨妗?)";
+  if (!archive.archiveId) await ensureBackendArchive(archive, account);
+  if (file.size > LARGE_FILE_WARN_BYTES) {
+    const ok = confirmAction(`${file.name} 澶у皬涓?${fmtSize(file.size)}锛屼笂浼犲拰绱㈠紩鍙兘杈冩參銆傜户缁笂浼狅紵`);
+    if (!ok) throw new Error("鐢ㄦ埛鍙栨秷涓婁紶");
+  }
+  const url =
+    `/v1/chat/files/${encodeURIComponent(archive.archiveId)}/${encodeURIComponent(archive.groupId)}/upload` +
+    `?filename=${encodeURIComponent(file.name)}` +
+    `&user_id=${encodeURIComponent(account.userId)}` +
+    `&user_name=${encodeURIComponent(account.displayName)}`;
+  try {
+    const uploadId = uid("upload");
+    uploadProgress[uploadId] = { name: file.name, status: "uploading", percent: 0 };
+    renderFilePanelOnly();
+    const data = await uploadFileWithProgress(backend(url), file, uploadId);
+    const nextFile = data.file || {};
+    const savedFile = {
+      ...nextFile,
+      id: nextFile.id || uid("file"),
+      name: nextFile.name || nextFile.file_name || file.name,
+      size: nextFile.size ?? file.size,
+      mime: nextFile.mime || file.type || "application/octet-stream",
+      status: nextFile.status || "ready",
+      local_preview_type: previewTypeForFile(nextFile.name ? nextFile : file),
+    };
+    state.files[archive.id] = [savedFile, ...(state.files[archive.id] || [])];
+    if (autoAttach && !attachedFileIds.includes(savedFile.id)) attachedFileIds.push(savedFile.id);
+    state.ui.filePanelOpen = true;
+    syncDraftToConversation();
+    delete uploadProgress[uploadId];
+    renderFilePanelOnly();
+    if (notifySuccess) notify(`${sourceLabel}宸蹭笂浼犲苟闄勫姞鍒版湰娆℃秷鎭痐, file.name, "done");
+    return savedFile;
+  } catch (err) {
+    const failedId = uid("failed_file");
+    state.files[archive.id] = [{
+      id: failedId,
+      name: file.name,
+      size: file.size,
+      mime: file.type || "application/octet-stream",
+      status: "failed",
+      uploadedAt: nowIso(),
+      error: err.message || String(err),
+    }, ...(state.files[archive.id] || [])];
+    addMessage({ role: "system_status", text: `涓婁紶澶辫触锛?{file.name}\n${err.message || err}`, status: "failed" });
+    notify("鏂囦欢涓婁紶澶辫触", file.name, "error");
+    for (const [id, item] of Object.entries(uploadProgress)) {
+      if (item.name === file.name) delete uploadProgress[id];
+    }
+    renderFilePanelOnly();
+    throw err;
+  }
+}
+
+function uploadFileWithProgress(url, file, uploadId) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      uploadProgress[uploadId] = {
+        name: file.name,
+        status: "uploading",
+        percent: Math.round((event.loaded / event.total) * 100),
+      };
+      renderFilePanelOnly();
+    };
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        reject(new Error(xhr.responseText || `upload failed: ${xhr.status}`));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    xhr.onerror = () => reject(new Error("upload network error"));
+    xhr.send(file);
+  });
+}
+
+function previewTypeForFile(file) {
+  const name = (file.name || file.file_name || "").toLowerCase();
+  const mime = (file.mime || file.type || "").toLowerCase();
+  if (mime.startsWith("image/") || /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(name)) return "image";
+  if (mime === "application/pdf" || name.endsWith(".pdf")) return "pdf";
+  if (mime.startsWith("audio/") || /\.(mp3|wav|ogg|m4a|flac)$/i.test(name)) return "audio";
+  if (mime.startsWith("video/") || /\.(mp4|webm|mov)$/i.test(name)) return "video";
+  if (/\.(txt|md|json|csv|tsv|log|py|js|ts|tsx|jsx|html|css|xml|yaml|yml|toml|ini)$/i.test(name)) return "text";
+  return "download";
+}
+
+async function previewFile(fileId) {
+  const archive = activeArchive();
+  const file = (state.files[archive?.id] || []).find((f) => f.id === fileId);
+  if (!file) return;
+  state.ui.previewOpen = true;
+  state.ui.previewFileId = fileId;
+  state.ui.previewText = "";
+  state.ui.previewStatus = "loading";
+  saveState();
+  render();
+  const type = previewTypeForFile(file);
+  if (type !== "text") {
+    state.ui.previewStatus = "ready";
+    saveState();
+    render();
+    return;
+  }
+  try {
+    const resp = await fetch(backend(file.download_url));
+    if (!resp.ok) throw new Error(`${resp.status}: ${await safeText(resp)}`);
+    const text = await resp.text();
+    state.ui.previewText = text.slice(0, 300000);
+    state.ui.previewStatus = text.length > 300000 ? "truncated" : "ready";
+  } catch (err) {
+    state.ui.previewText = err.message || String(err);
+    state.ui.previewStatus = "error";
+  }
+  saveState();
+  render();
+}
+
+function closePreview() {
+  state.ui.previewOpen = false;
+  state.ui.previewFileId = "";
+  state.ui.previewText = "";
+  state.ui.previewStatus = "idle";
+  saveState();
+  render();
+}
+
+async function deleteFile(fileId) {
+  const archive = activeArchive();
+  const file = (state.files[archive?.id] || []).find((f) => f.id === fileId);
+  if (!archive || !file) return;
+  if (!confirmAction(`鍒犻櫎 bot 鏂囦欢鍖烘枃浠讹細${file.name}锛焋)) return;
+  try {
+    if (archive.archiveId) {
+      await fetchJson(`/v1/chat/files/${encodeURIComponent(archive.archiveId)}/${encodeURIComponent(archive.groupId)}/${encodeURIComponent(fileId)}`, {
+        method: "DELETE",
+      });
+    }
+    state.files[archive.id] = (state.files[archive.id] || []).filter((f) => f.id !== fileId);
+    attachedFileIds = attachedFileIds.filter((id) => id !== fileId);
+    saveState();
+    render();
+  } catch (err) {
+    addMessage({ role: "system_status", text: `鍒犻櫎鏂囦欢澶辫触锛?{err.message || err}`, status: "failed" });
+  }
+}
+
+function attachFile(fileId) {
+  if (!attachedFileIds.includes(fileId)) attachedFileIds.push(fileId);
+  syncDraftToConversation();
+  saveState();
+  render();
+}
+
+function detachFile(fileId) {
+  attachedFileIds = attachedFileIds.filter((id) => id !== fileId);
+  syncDraftToConversation();
+  saveState();
+  render();
+}
+
+function artifactRefs() {
+  const archive = activeArchive();
+  return archive ? (state.artifacts[archive.id] || []) : [];
+}
+
+async function refreshProjectTree(path = state.ui.projectTreePath || ".") {
+  const archive = activeArchive();
+  const account = activeAccount();
+  if (!archive?.currentDir || !archive.projectId || !account) {
+    state.ui.projectTreeStatus = "褰撳墠瀛樻。鏈粦瀹氶」鐩洰褰?";
+    state.ui.projectTree = [];
+    saveState();
+    render();
+    return;
+  }
+  state.ui.projectPanelOpen = true;
+  state.ui.projectTreeStatus = "loading";
+  state.ui.projectTreePath = path || ".";
+  saveState();
+  render();
+  try {
+    const query = new URLSearchParams({
+      user_id: account.userId,
+      path: state.ui.projectTreePath,
+      max_depth: "4",
+      limit: "800",
+    });
+    const data = await fetchJson(`/v1/agent/projects/${encodeURIComponent(archive.projectId)}/tree?${query}`);
+    state.ui.projectTree = data.items || [];
+    state.ui.projectTreeStatus = data.truncated ? "truncated" : "ready";
+  } catch (err) {
+    state.ui.projectTreeStatus = err.message || String(err);
+    state.ui.projectTree = [];
+  }
+  saveState();
+  render();
+}
+
+async function previewProjectFile(path) {
+  const archive = activeArchive();
+  const account = activeAccount();
+  if (!archive?.projectId || !account || !path) return;
+  state.ui.projectPreviewPath = path;
+  state.ui.projectPreviewText = "";
+  state.ui.projectPreviewStatus = "loading";
+  saveState();
+  render();
+  try {
+    const query = new URLSearchParams({ user_id: account.userId, path, max_chars: "180000" });
+    const data = await fetchJson(`/v1/agent/projects/${encodeURIComponent(archive.projectId)}/file?${query}`);
+    state.ui.projectPreviewText = data.content || "";
+    state.ui.projectPreviewStatus = data.ok ? `${data.type || "file"}${data.truncated ? " truncated" : ""}` : (data.error || "failed");
+  } catch (err) {
+    state.ui.projectPreviewText = err.message || String(err);
+    state.ui.projectPreviewStatus = "error";
+  }
+  saveState();
+  render();
+}
+
+async function searchProject() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const queryText = (state.ui.projectSearch || "").trim();
+  if (!archive?.projectId || !account || !queryText) return;
+  state.ui.projectPreviewStatus = "searching";
+  saveState();
+  render();
+  try {
+    const query = new URLSearchParams({
+      user_id: account.userId,
+      query: queryText,
+      path: state.ui.projectTreePath || ".",
+      limit: "200",
+    });
+    const data = await fetchJson(`/v1/agent/projects/${encodeURIComponent(archive.projectId)}/search?${query}`);
+    state.ui.projectSearchResults = data.matches || [];
+    state.ui.projectPreviewStatus = data.truncated ? "search truncated" : "search ready";
+  } catch (err) {
+    state.ui.projectSearchResults = [];
+    state.ui.projectPreviewStatus = err.message || String(err);
+  }
+  saveState();
+  render();
+}
+
+async function runProjectCommand() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const command = (state.ui.projectCommand || "").trim();
+  if (!archive?.projectId || !account || !command) return;
+  state.ui.projectCommandOutput = "running...";
+  saveState();
+  render();
+  try {
+    const data = await fetchJson(`/v1/agent/projects/${encodeURIComponent(archive.projectId)}/run?user_id=${encodeURIComponent(account.userId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ command, cwd: state.ui.projectTreePath || ".", timeout_sec: 120 }),
+    });
+    state.ui.projectCommandOutput = [
+      `$ ${data.command}`,
+      `cwd=${data.cwd} returncode=${data.returncode} elapsed=${data.elapsed_sec}s timeout=${data.timed_out}`,
+      "",
+      data.stdout || "",
+      data.stderr ? `\n[stderr]\n${data.stderr}` : "",
+    ].join("\n");
+  } catch (err) {
+    state.ui.projectCommandOutput = err.message || String(err);
+  }
+  saveState();
+  render();
+}
+
+async function loadProjectDiff() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  const path = (state.ui.projectDiffPath || state.ui.projectPreviewPath || "").trim();
+  const comparePath = (state.ui.projectDiffComparePath || "").trim();
+  if (!archive?.projectId || !account || !path) return;
+  state.ui.projectDiffText = "loading diff...";
+  saveState();
+  render();
+  try {
+    const query = new URLSearchParams({
+      user_id: account.userId,
+      path,
+      compare_path: comparePath,
+      max_chars: "120000",
+    });
+    const data = await fetchJson(`/v1/agent/projects/${encodeURIComponent(archive.projectId)}/diff?${query}`);
+    state.ui.projectDiffText = data.binary
+      ? `binary changed=${data.changed}`
+      : (data.diff || (data.changed ? "changed, but diff is empty" : "no changes"));
+    state.ui.projectPreviewText = state.ui.projectDiffText;
+    state.ui.projectPreviewPath = `diff: ${path}${comparePath ? ` -> ${comparePath}` : ""}`;
+    state.ui.projectPreviewStatus = data.truncated ? "diff truncated" : "diff ready";
+  } catch (err) {
+    state.ui.projectDiffText = err.message || String(err);
+    state.ui.projectPreviewText = state.ui.projectDiffText;
+    state.ui.projectPreviewStatus = "diff error";
+  }
+  saveState();
+  render();
+}
+
+function explainCurrentDiff() {
+  const text = state.ui.projectDiffText || state.ui.projectPreviewText || "";
+  if (!text.trim()) return;
+  addDraftText(`璇疯В閲婅繖缁?diff 鐨勭洰鐨勩€侀闄╁拰闇€瑕侀獙璇佺殑鍦版柟锛歕n\n${text.slice(0, 6000)}`);
+}
+
+async function abortAndClearQueue() {
+  const conv = activeConversation();
+  if (conv) conv.queue = [];
+  await abortRun();
+  saveState();
+  render();
+}
+
+function fileRefs(ids) {
+  const archive = activeArchive();
+  const files = state.files[archive?.id] || [];
+  return ids.map((id) => files.find((f) => f.id === id)).filter(Boolean);
+}
+
+function findTemplate(templateId) {
+  return PROMPT_TEMPLATES.find((item) => item.id === templateId);
+}
+
+function applyTemplate(templateId, action = "draft") {
+  const template = findTemplate(templateId);
+  if (!template) return;
+  if (action === "queue") queueTemplateText(template.text);
+  else if (action === "send") {
+    currentDraft = template.text;
+    sendMessage("normal");
+  } else {
+    addDraftText(template.text);
+  }
+}
+
+function fileQuickAction(fileId, action) {
+  const file = fileRefs([fileId])[0];
+  if (!file) return;
+  attachFile(fileId);
+  const prompts = {
+    summary: `璇锋€荤粨杩欎釜鏂囦欢銆?{file.name}銆嶏紝鍒楀嚭鍏抽敭鐐广€佸紓甯哥偣鍜岄渶瑕佹敞鎰忕殑闂銆俙,
+    extract: `璇锋彁鍙栬繖涓枃浠躲€?{file.name}銆嶉噷鐨勫叧閿暟鎹紝蹇呰鏃舵暣鐞嗘垚琛ㄦ牸銆俙,
+    report: `璇峰熀浜庤繖涓枃浠躲€?{file.name}銆嶇敓鎴愮粨鏋勬竻鏅扮殑鎶ュ憡锛屽尯鍒嗕簨瀹炪€佹帹鏂拰寤鸿銆俙,
+    log: `璇峰垎鏋愯繖涓棩蹇?閿欒鏂囦欢銆?{file.name}銆嶏紝鎸変弗閲嶇▼搴﹀綊绫婚棶棰樺苟缁欏嚭淇寤鸿銆俙,
+  };
+  addDraftText(prompts[action] || prompts.summary);
+}
+
+function nodeQuickAction(nodeId, action = "fix") {
+  const conv = activeConversation();
+  const node = conv?.workflowRuns?.[0]?.nodes?.find((item) => item.id === nodeId);
+  if (!node) return;
+  const text = action === "explain"
+    ? `璇疯В閲婅繖涓伐浣滄祦鑺傜偣鐨勫惈涔夈€侀闄╁拰涓嬩竴姝ワ細\n${node.title}\n${node.detail || ""}`
+    : `鍒氭墠杩欎釜宸ヤ綔娴佽妭鐐规樉绀轰簡闂锛岃鍩轰簬鍏惰緭鍑哄畾浣嶅師鍥犲苟淇鎴栫粰鍑轰笅涓€姝ワ細\n${node.title}\n${node.detail || ""}`;
+  addDraftText(text.slice(0, 6000));
+}
+
+function copyText(text) {
+  navigator.clipboard?.writeText(text || "").then(
+    () => notify("宸插鍒?", """, "done")",
+    () => notify("澶嶅埗澶辫触", "娴忚鍣ㄦ嫆缁濆壀璐存澘璁块棶", "warn")
+  );
+}
+
+function confirmAction(message) {
+  if (state.settings.reduceConfirmations) return true;
+  return confirm(message);
+}
+
+function detailTail(detail) {
+  const text = String(detail || "");
+  const lines = text.split(/\r?\n/);
+  const limit = Math.max(20, Math.min(2000, Number(state.settings.logTailLines || 200)));
+  if (lines.length <= limit) return text;
+  return `[tail ${limit} / ${lines.length} lines]\n${lines.slice(-limit).join("\n")}`;
+}
+
+function setQueueAutoRun(enabled) {
+  const conv = activeConversation();
+  if (!conv) return;
+  conv.autoRunQueue = enabled;
+  saveState();
+  render();
+}
+
+function createAccount() {
+  const displayName = prompt("璐﹀彿鍚嶇О", "鏈湴鐢ㄦ埛");
+  if (!displayName) return;
+  let userId = prompt("鐢ㄦ埛 ID锛堝繀椤讳互瀛楁瘝寮€澶达級", `local-${Date.now()}`);
+  if (!userId) return;
+  if (!/^[a-zA-Z]/.test(userId)) {
+    alert("鐢ㄦ埛 ID 蹇呴』浠ュ瓧姣嶅紑澶达紙a-z 鎴?A-Z锛夈€?)";
+    return;
+  }
+  state.accounts.push({ userId, displayName, createdAt: nowIso(), lastUsedAt: nowIso() });
+  state.activeAccountId = userId;
+  const archive = makeLocalArchive(userId, "榛樿瀵硅瘽", "");
+  state.archives.push(archive);
+  state.conversations[archive.id] = emptyConversation(archive.id);
+  state.files[archive.id] = [];
+  state.artifacts[archive.id] = [];
+  state.activeArchiveId = archive.id;
+  saveState();
+  render();
+}
+
+function renameAccount() {
+  const account = activeAccount();
+  if (!account) return;
+  const next = prompt("璐﹀彿鍚嶇О", account.displayName);
+  if (!next) return;
+  account.displayName = next;
+  account.lastUsedAt = nowIso();
+  saveState();
+  render();
+}
+
+function deleteLocalAccount() {
+  const account = activeAccount();
+  if (!account) return;
+  if (state.accounts.length <= 1) {
+    alert("鑷冲皯淇濈暀涓€涓处鍙枫€?)";
+    return;
+  }
+  if (!confirmAction(`鍒犻櫎鏈湴璐﹀彿锛?{account.displayName}锛熷悗绔瓨妗ｄ笉浼氳鍒犻櫎銆俙)) return;
+  const archiveIds = state.archives.filter((a) => a.userId === account.userId).map((a) => a.id);
+  state.accounts = state.accounts.filter((a) => a.userId !== account.userId);
+  state.archives = state.archives.filter((a) => a.userId !== account.userId);
+  for (const id of archiveIds) {
+    delete state.conversations[id];
+    delete state.files[id];
+    delete state.artifacts[id];
+  }
+  state.activeAccountId = state.accounts[0].userId;
+  const next = state.archives.find((a) => a.userId === state.activeAccountId);
+  state.activeArchiveId = next?.id || "";
+  startupRecovered = false;
+  saveState();
+  render();
+  recoverFromBackend();
+}
+
+function createArchive() {
+  const account = activeAccount();
+  if (!account) return;
+  const title = prompt("瀛樻。鍚嶇О"", "鏂板瓨妗?)";
+  if (!title) return;
+  const currentDir = prompt("椤圭洰鐩綍璺緞锛屽彲涓虹┖", "") || "";
+  const archive = makeLocalArchive(account.userId, title, currentDir);
+  state.archives.push(archive);
+  state.conversations[archive.id] = emptyConversation(archive.id);
+  state.files[archive.id] = [];
+  state.artifacts[archive.id] = [];
+  state.activeArchiveId = archive.id;
+  saveState();
+  render();
+}
+
+function duplicateConversationTab() {
+  const archive = activeArchive();
+  if (!archive) return;
+  const copy = makeLocalArchive(archive.userId, `${archive.title} 鍓湰`, archive.currentDir);
+  copy.archiveId = archive.archiveId;
+  copy.groupId = archive.groupId;
+  copy.projectId = `${archive.projectId || "project"}_${Date.now()}`;
+  copy.localOnly = archive.localOnly;
+  state.archives.push(copy);
+  state.conversations[copy.id] = emptyConversation(copy.id);
+  state.files[copy.id] = [...(state.files[archive.id] || [])];
+  state.artifacts[copy.id] = [...(state.artifacts[archive.id] || [])];
+  state.activeArchiveId = copy.id;
+  saveState();
+  render();
+}
+
+async function syncArchive() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  if (!archive || !account) return;
+  try {
+    await ensureBackendArchive(archive, account);
+    await refreshFiles();
+    await refreshArtifacts();
+  } catch (err) {
+    addMessage({ role: "system_status", text: `鍚屾澶辫触锛?{err.message || err}`, status: "failed" });
+  }
+}
+
+async function renameArchive() {
+  const archive = activeArchive();
+  if (!archive) return;
+  const next = prompt("瀛樻。鍚嶇О", archive.title);
+  if (!next) return;
+  archive.title = next;
+  archive.lastUsedAt = nowIso();
+  saveState();
+  render();
+  if (!archive.localOnly) await updateBackendProject();
+}
+
+async function editArchiveDir() {
+  const archive = activeArchive();
+  if (!archive) return;
+  const next = prompt("椤圭洰鐩綍璺緞锛屽彲涓虹┖", archive.currentDir || "");
+  if (next === null) return;
+  archive.currentDir = next;
+  archive.localOnly = true;
+  archive.archiveId = "";
+  saveState();
+  render();
+}
+
+async function updateBackendProject() {
+  const archive = activeArchive();
+  const account = activeAccount();
+  if (!archive?.projectId || !account || archive.localOnly) return;
+  try {
+    const data = await fetchJson(`/v1/agent/projects/${encodeURIComponent(archive.projectId)}?user_id=${encodeURIComponent(account.userId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: archive.title, current_dir: archive.currentDir }),
+    });
+    adoptProject(archive, data);
+  } catch {
+    // Local metadata can still be used; chat will resync on send.
+  }
+}
+
+function deleteLocalArchive() {
+  const archive = activeArchive();
+  if (!archive) return;
+  if (!confirmAction(`浠呭垹闄ゆ湰鍦板墠绔褰曪細${archive.title}锛熷悗绔瓨妗ｄ笉浼氳鍒犻櫎銆俙)) return;
+  state.archives = state.archives.filter((a) => a.id !== archive.id);
+  delete state.conversations[archive.id];
+  delete state.files[archive.id];
+  delete state.artifacts[archive.id];
+  const next = state.archives.find((a) => a.userId === state.activeAccountId);
+  state.activeArchiveId = next?.id || "";
+  if (!next) {
+    const account = activeAccount();
+    if (account) {
+      const newArchive = makeLocalArchive(account.userId, "榛樿瀵硅瘽", "");
+      state.archives.push(newArchive);
+      state.conversations[newArchive.id] = emptyConversation(newArchive.id);
+      state.files[newArchive.id] = [];
+      state.artifacts[newArchive.id] = [];
+      state.activeArchiveId = newArchive.id;
+    }
+  }
+  saveState();
+  render();
+}
+
+function archiveLocalOnly(action) {
+  const archive = activeArchive();
+  if (!archive) return;
+  if (action === "toggle_pin") archive.pinned = !archive.pinned;
+  if (action === "toggle_archive") archive.archived = !archive.archived;
+  archive.lastUsedAt = nowIso();
+  saveState();
+  render();
+}
+
+function clearTranscript() {
+  const conv = activeConversation();
+  if (!conv || !confirmAction("娓呯┖褰撳墠鍓嶇 transcript锛熷悗绔蹇嗕笉浼氬垹闄ゃ€?)) return";
+  conv.messages = [];
+  conv.workflowRuns = [];
+  conv.queue = [];
+  conv.status = "idle";
+  saveState();
+  render();
+}
+
+function exportMarkdown() {
+  const archive = activeArchive();
+  const conv = activeConversation();
+  if (!archive || !conv) return;
+  const lines = [`# ${archive.title}`, "", `- 瀵煎嚭鏃堕棿锛?{fmtTime(nowIso())}`, `- 椤圭洰鐩綍锛?{archive.currentDir || "绌?}`, ""];
+  for (const msg of conv.messages) {
+    lines.push(`## ${roleLabel(msg.role)} ${fmtTime(msg.createdAt)}`, "");
+    lines.push(msg.text || "");
+    if (msg.attachments?.length) {
+      lines.push("", `闄勪欢锛?{fileRefs(msg.attachments).map((f) => f.name).join(", ")}`);
+    }
+    lines.push("");
+  }
+  downloadBlob(`${archive.title || "bot"}-${Date.now()}.md`, lines.join("\n"), "text/markdown;charset=utf-8");
+}
+
+function exportWorkflow(format = "json") {
+  const archive = activeArchive();
+  const conv = activeConversation();
+  const run = conv?.workflowRuns?.[0];
+  if (!archive || !run) {
+    alert("褰撳墠娌℃湁鍙鍑虹殑宸ヤ綔娴併€?)";
+    return;
+  }
+  if (format === "md") {
+    const lines = [
+      `# ${archive.title} 宸ヤ綔娴乣,
+      "",
+      `- 瀵煎嚭鏃堕棿锛?{fmtTime(nowIso())}`,
+      `- trace锛?{run.traceId || "鏃?}`,
+      `- 鐘舵€侊細${run.status || "unknown"}`,
+      "",
+    ];
+    for (const node of run.nodes || []) {
+      lines.push(`## ${node.title || node.kind || "浜嬩欢"}`);
+      lines.push("");
+      lines.push(`- 绫诲瀷锛?{node.kind || ""}`);
+      lines.push(`- 鐘舵€侊細${node.status || ""}`);
+      lines.push(`- 鏃堕棿锛?{fmtTime(node.createdAt)}`);
+      if (node.detail) {
+        lines.push("", "```json", String(node.detail), "```");
+      }
+      lines.push("");
+    }
+    downloadBlob(`${archive.title || "bot"}-workflow-${Date.now()}.md`, lines.join("\n"), "text/markdown;charset=utf-8");
+    return;
+  }
+  downloadBlob(
+    `${archive.title || "bot"}-workflow-${Date.now()}.json`,
+    JSON.stringify({ archive, run }, null, 2),
+    "application/json;charset=utf-8"
+  );
+}
+
+function exportStateJson() {
+  downloadBlob(`bot-agent-state-${Date.now()}.json`, JSON.stringify(state, null, 2), "application/json;charset=utf-8");
+}
+
+function importStateJson(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const parsed = JSON.parse(String(reader.result || "{}"));
+      const next = normalizeState({ ...defaultState, ...parsed });
+      if (!confirmAction("瀵煎叆浼氭浛鎹㈠綋鍓嶅墠绔湰鍦扮姸鎬侊紝鍚庣鏁版嵁涓嶄細琚垹闄ゃ€傜户缁紵")) return;
+      state = next;
+      attachedFileIds = [];
+      currentDraft = "";
+      startupRecovered = false;
+      saveState();
+      render();
+      recoverFromBackend();
+    } catch (err) {
+      alert(`瀵煎叆澶辫触锛?{err.message || err}`);
+    }
+  };
+  reader.readAsText(file, "utf-8");
+}
+
+function promptImportStateJson() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.addEventListener("change", () => importStateJson(input.files?.[0]));
+  input.click();
+}
+
+function cleanupLocalData() {
+  const conv = activeConversation();
+  if (!conv) return;
+  const maxRuns = Math.max(1, Number(state.settings.maxWorkflowRuns || DEFAULT_MAX_WORKFLOW_RUNS));
+  const beforeRuns = conv.workflowRuns.length;
+  conv.workflowRuns = conv.workflowRuns.slice(0, maxRuns);
+  conv.messages = conv.messages.filter((msg) => msg.status !== "failed" || msg.role !== "assistant" || msg.text);
+  saveState();
+  render();
+  addMessage({
+    role: "system_status",
+    text: `宸叉竻鐞嗗綋鍓嶅瓨妗ｆ湰鍦版暟鎹細宸ヤ綔娴?${beforeRuns} -> ${conv.workflowRuns.length}銆傚悗绔褰曟湭淇敼銆俙,
+    status: "done",
+  });
+}
+
+function openCommandPalette() {
+  const cmd = prompt("鍛戒护锛歯ew / rename / dir / sync / files / clear / export / workflow / state / import / cleanup / settings / abort / 妯℃澘鍏抽敭璇?", "")";
+  if (!cmd) return;
+  const key = cmd.trim().toLowerCase();
+  if (key === "new") createArchive();
+  else if (key === "rename") renameArchive();
+  else if (key === "dir") editArchiveDir();
+  else if (key === "sync") syncArchive();
+  else if (key === "files") toggleFilePanel();
+  else if (key === "project") toggleProjectPanel();
+  else if (key === "clear") clearTranscript();
+  else if (key === "export") exportMarkdown();
+  else if (key === "workflow") exportWorkflow("json");
+  else if (key === "state") exportStateJson();
+  else if (key === "import") promptImportStateJson();
+  else if (key === "cleanup") cleanupLocalData();
+  else if (key === "settings") toggleSettings();
+  else if (key === "abort") abortRun();
+  else if (key === "queue") clearQueue();
+  else if (key === "trace") copyText(activeConversation()?.workflowRuns?.[0]?.traceId || "");
+  else if (key === "search") {
+    $("#transcriptSearch")?.focus();
+  }
+  else {
+    const template = PROMPT_TEMPLATES.find((item) =>
+      `${item.group} ${item.title} ${item.id}`.toLowerCase().includes(key)
+    );
+    if (template) addDraftText(template.text);
+  }
+}
+
+function toggleFilePanel() {
+  state.ui.filePanelOpen = !state.ui.filePanelOpen;
+  saveState();
+  render();
+}
+
+function toggleProjectPanel() {
+  state.ui.projectPanelOpen = !state.ui.projectPanelOpen;
+  saveState();
+  render();
+  if (state.ui.projectPanelOpen && !state.ui.projectTree.length) refreshProjectTree();
+}
+
+function toggleSettings() {
+  state.ui.settingsOpen = !state.ui.settingsOpen;
+  saveState();
+  render();
+}
+
+function render() {
+  const workflowScroll = workflowScrollSnapshot();
+  const transcriptScroll = transcriptScrollSnapshot();
+  document.documentElement.style.setProperty("--app-font-size", `${state.settings.fontSize || 14}px`);
+  document.documentElement.style.setProperty("--code-font", state.settings.codeFont || "Consolas, Courier New, monospace");
+  $("#app").innerHTML = `
+    <div class="app-shell ${state.settings.sidebarOpen === false ? "sidebar-closed" : ""} ${state.settings.workflowOpen === false ? "workflow-closed" : ""}">
+      <aside class="sidebar">${renderSidebar()}</aside>
+      <main class="main">
+        ${renderTopbar()}
+        <div class="transcript" id="transcript">${renderTranscriptHtml()}</div>
+        ${renderComposer()}
+      </main>
+      <aside class="workflow" id="workflowPane">${renderWorkflow()}</aside>
+      ${renderFilePanel()}
+      ${renderArtifactPanel()}
+      ${renderProjectPanel()}
+      ${renderSettingsPanel()}
+      ${renderPreviewPanel()}
+      ${renderNodeDetailsPanel()}
+      ${renderBackgroundTasksWindow()}
+      <div id="notifications">${renderNotifications()}</div>
+    </div>
+  `;
+  bindEvents();
+  enhanceButtonTooltips();
+  restoreWorkflowScroll(workflowScroll);
+  restoreTranscriptScroll(transcriptScroll);
+}
+
+function transcriptScrollSnapshot() {
+  const el = $("#transcript");
+  if (!el) return transcriptLastScrollSnapshot;
+  const bottomGap = el.scrollHeight - el.scrollTop - el.clientHeight;
+  const viewport = el.getBoundingClientRect();
+  const firstVisible = Array.from(el.querySelectorAll("[data-message-id]")).find((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.bottom >= viewport.top + 1;
+  });
+  const snapshot = {
+    top: el.scrollTop,
+    stickToBottom: bottomGap < 96,
+    anchorId: firstVisible?.dataset?.messageId || "",
+    anchorOffset: firstVisible ? firstVisible.getBoundingClientRect().top - viewport.top : 0,
+  };
+  if (snapshot.top > 0 || snapshot.stickToBottom || !transcriptLastScrollSnapshot) {
+    transcriptLastScrollSnapshot = snapshot;
+  }
+  return snapshot;
+}
+
+function restoreTranscriptScroll(snapshot) {
+  if (!snapshot) return;
+  const apply = () => {
+    const el = $("#transcript");
+    if (!el) return;
+    if (snapshot.stickToBottom) {
+      el.scrollTop = el.scrollHeight;
+      transcriptLastScrollSnapshot = transcriptScrollSnapshot();
+      return;
+    }
+    if (snapshot.anchorId) {
+      const anchor = el.querySelector(`[data-message-id="${cssEscape(snapshot.anchorId)}"]`);
+      if (anchor) {
+        const viewport = el.getBoundingClientRect();
+        const rect = anchor.getBoundingClientRect();
+        const nextTop = el.scrollTop + rect.top - viewport.top - (snapshot.anchorOffset || 0);
+        const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+        el.scrollTop = Math.min(Math.max(0, nextTop), maxTop);
+        transcriptLastScrollSnapshot = transcriptScrollSnapshot();
+        return;
+      }
+    }
+    const maxTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    el.scrollTop = Math.min(Math.max(0, snapshot.top), maxTop);
+    transcriptLastScrollSnapshot = transcriptScrollSnapshot();
+  };
+  apply();
+  requestAnimationFrame(apply);
+  setTimeout(apply, 0);
+  setTimeout(apply, 50);
+}
+
+function workflowScrollSnapshot() {
+  const list = $("#workflowPane .workflow-list");
+  if (!list) return workflowLastScrollSnapshot;
+  const bottomGap = list.scrollHeight - list.scrollTop - list.clientHeight;
+  const listRect = list.getBoundingClientRect();
+  const visibleNodes = Array.from(list.querySelectorAll("[data-node-id]")).filter((node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.bottom >= listRect.top + 1 && rect.top <= listRect.bottom - 1;
+  });
+  const topEntering = visibleNodes
+    .filter((node) => node.getBoundingClientRect().top >= listRect.top - 1)
+    .sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      const delta = ar.top - br.top;
+      if (Math.abs(delta) > 1) return delta;
+      return Number(b.dataset.nodeDepth || 0) - Number(a.dataset.nodeDepth || 0);
+    });
+  const containingTop = visibleNodes
+    .filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.top < listRect.top && rect.bottom > listRect.top;
+    })
+    .sort((a, b) => Number(b.dataset.nodeDepth || 0) - Number(a.dataset.nodeDepth || 0));
+  const firstVisible = topEntering[0] || containingTop[0] || visibleNodes[0];
+  const snapshot = {
+    top: list.scrollTop,
+    height: list.scrollHeight,
+    stickToBottom: bottomGap < 96,
+    pointerActive: workflowPointerActive,
+    anchorId: firstVisible?.dataset?.nodeId || "",
+    anchorOffset: firstVisible ? firstVisible.getBoundingClientRect().top - listRect.top : 0,
+  };
+  if (snapshot.top > 0 || snapshot.stickToBottom || !workflowLastScrollSnapshot) {
+    workflowLastScrollSnapshot = snapshot;
+  }
+  return snapshot;
+}
+
+function restoreWorkflowScroll(snapshot) {
+  if (!snapshot) return;
+  const seq = ++workflowScrollRestoreSeq;
+  const apply = () => {
+    if (seq !== workflowScrollRestoreSeq) return;
+    const list = $("#workflowPane .workflow-list");
+    if (!list) return;
+    if (snapshot.pointerActive || workflowPointerActive) {
+      const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
+      list.scrollTop = Math.min(Math.max(0, snapshot.top), maxTop);
+      workflowLastScrollSnapshot = snapshot;
+      return;
+    }
+    if (snapshot.stickToBottom) {
+      list.scrollTop = list.scrollHeight;
+      workflowLastScrollSnapshot = workflowScrollSnapshot();
+      return;
+    }
+    if (snapshot.anchorId) {
+      const anchor = list.querySelector(`[data-node-id="${cssEscape(snapshot.anchorId)}"]`);
+      if (anchor) {
+        const listRect = list.getBoundingClientRect();
+        const anchorRect = anchor.getBoundingClientRect();
+        const nextTop = list.scrollTop + anchorRect.top - listRect.top - (snapshot.anchorOffset || 0);
+        const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
+        list.scrollTop = Math.min(Math.max(0, nextTop), maxTop);
+        workflowLastScrollSnapshot = workflowScrollSnapshot();
+        return;
+      }
+    }
+    const maxTop = Math.max(0, list.scrollHeight - list.clientHeight);
+    list.scrollTop = Math.min(Math.max(0, snapshot.top), maxTop);
+    workflowLastScrollSnapshot = workflowScrollSnapshot();
+  };
+  apply();
+  requestAnimationFrame(apply);
+  setTimeout(apply, 0);
+  setTimeout(apply, 50);
+}
+
+function renderNotificationsOnly() {
+  const el = $("#notifications");
+  if (!el) return;
+  el.innerHTML = renderNotifications();
+  bindNotificationEvents();
+  enhanceButtonTooltips(el);
+}
+
+function renderSidebar() {
+  const account = activeAccount();
+  const archiveSearch = (state.ui.archiveSearch || "").trim().toLowerCase();
+  const archives = state.archives
+    .filter((a) => a.userId === account?.userId)
+    .filter((a) => {
+      if (!archiveSearch) return !a.archived;
+      return `${a.title || ""}\n${a.currentDir || ""}`.toLowerCase().includes(archiveSearch);
+    })
+    .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)));
+  return `
+    <div class="section">
+      <div class="section-title">
+        <span>璐﹀彿</span>
+        <div class="row"><button id="newAccountBtn">鏂板缓</button><button id="renameAccountBtn">鏀瑰悕</button><button class="danger" id="deleteAccountBtn">鍒犻櫎</button></div>
+      </div>
+      <select class="account-select" id="accountSelect">
+        ${state.accounts.map((a) => `<option value="${escapeHtml(a.userId)}" ${a.userId === state.activeAccountId ? "selected" : ""}>${escapeHtml(a.displayName)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="section">
+      <div class="section-title">
+        <span>瀛樻。</span>
+        <div class="row"><button id="newArchiveBtn">鏂板缓</button><button id="duplicateTabBtn">鏂扮獥鍙?/button></div>
+      </div>
+      <input id="archiveSearchInput" class="wide-input" placeholder="鎼滅储瀛樻。/鐩綍锛涜緭鍏?archived 鏌ョ湅褰掓。" value="${escapeHtml(state.ui.archiveSearch || "")}" />
+      <div class="archive-list">${archives.map(renderArchiveItem).join("") || `<div class="empty">娌℃湁瀛樻。</div>`}</div>
+    </div>
+    <div class="section">
+      <div class="section-title"><span>瀵硅瘽鎼滅储</span></div>
+      <input id="transcriptSearch" class="wide-input" placeholder="鎼滅储褰撳墠 transcript" value="${escapeHtml(state.ui.transcriptSearch || "")}" />
+    </div>
+    <div class="section">
+      <div class="section-title"><span>鏈湴鐘舵€?/span></div>
+      <div class="small">闃熷垪锛?{activeConversation()?.queue.length || 0}</div>
+      <div class="small">鏂囦欢锛?{(state.files[activeArchive()?.id] || []).length}</div>
+      <div class="small">鍚庣锛?{escapeHtml(state.settings.backendUrl)}</div>
+      <div class="small">鎸佷箙鍖栵細${idbReady ? "IndexedDB" : "localStorage"}</div>
+    </div>
+  `;
+}
+
+function renderArchiveItem(archive) {
+  const conv = state.conversations[archive.id] || emptyConversation(archive.id);
+  return `
+    <div class="archive-item ${archive.id === state.activeArchiveId ? "active" : ""}" data-archive-id="${escapeHtml(archive.id)}">
+      <div class="archive-title">${escapeHtml(archive.title)}</div>
+      <div class="archive-path">${escapeHtml(archive.currentDir || "绌虹洰褰曪細鏅€?bot 妯″紡")}</div>
+      <div class="archive-path">鐘舵€侊細${escapeHtml(conv.status)} 路 闃熷垪 ${conv.queue.length} ${archive.pinned ? "路 pinned" : ""} ${archive.archived ? "路 archived" : ""}</div>
+    </div>
+  `;
+}
+
+function renderNotifications() {
+  const items = state.ui.notifications || [];
+  if (!items.length) return "";
+  return `<div class="toast-stack">${items.map((item) => `
+    <div class="toast ${escapeHtml(item.kind || "info")}" data-notice-id="${escapeHtml(item.id)}">
+      <div class="toast-title">${escapeHtml(item.title)}</div>
+      ${item.detail ? `<div class="toast-detail">${escapeHtml(item.detail)}</div>` : ""}
+      <button class="mini" data-dismiss-notice="${escapeHtml(item.id)}">鍏抽棴</button>
+    </div>
+  `).join("")}</div>`;
+}
+
+function renderTopbar() {
+  const archive = activeArchive();
+  const conv = activeConversation();
+  return `
+    <div class="topbar">
+      <div class="top-title">
+        <strong>${escapeHtml(archive?.title || "鏈€夋嫨瀛樻。")}</strong>
+        <span class="small">${escapeHtml(archive?.currentDir || "鏈粦瀹氶」鐩洰褰曪紝浣滀负鎴愮啛瀵硅瘽 bot 浣跨敤")}</span>
+      </div>
+      <div class="top-actions">
+        <button id="toggleSidebarBtn">渚ф爮</button>
+        <button id="toggleWorkflowBtn">宸ヤ綔娴?/button>
+        <span class="status-pill ${conv?.status === "running" ? "running" : conv?.status === "error" ? "error" : ""}">${escapeHtml(conv?.status || "idle")}</span>
+        <button id="recoverBtn">鎭㈠</button>
+        <button id="syncArchiveBtn">鍚屾</button>
+        <button id="renameArchiveBtn">鏀瑰悕</button>
+        <button id="editDirBtn">鐩綍</button>
+        <button id="pinArchiveBtn">鍥哄畾</button>
+        <button id="archiveArchiveBtn">褰掓。</button>
+        <button id="projectPanelBtn">椤圭洰</button>
+        <button id="filePanelBtn">鏂囦欢</button>
+        <button id="artifactPanelBtn">浜х墿</button>
+        <button id="settingsBtn">璁剧疆</button>
+        <button class="danger" id="abortBtn" ${conv?.status === "running" ? "" : "disabled"}>涓柇</button>
+        <button class="danger" id="abortClearBtn" ${conv?.status === "running" || conv?.queue?.length ? "" : "disabled"}>鍋滄骞舵竻闃熷垪</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderQuickTemplates() {
+  const grouped = new Map();
+  for (const item of PROMPT_TEMPLATES) {
+    if (!grouped.has(item.group)) grouped.set(item.group, []);
+    grouped.get(item.group).push(item);
+  }
+  return `
+    <div class="quick-templates">
+      ${[...grouped.entries()].map(([group, items]) => `
+        <div class="template-group">
+          <span class="small">${escapeHtml(group)}</span>
+          ${items.map((item) => `
+            <button class="template-chip" data-template-id="${escapeHtml(item.id)}" title="${escapeHtml(item.text)}">${escapeHtml(item.title)}</button>
+          `).join("")}
+        </div>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderTranscriptHtml() {
+  const conv = activeConversation();
+  const search = (state.ui.transcriptSearch || "").trim().toLowerCase();
+  const messages = search
+    ? conv.messages.filter((msg) => `${roleLabel(msg.role)}\n${msg.text || ""}`.toLowerCase().includes(search))
+    : conv.messages;
+  return messages.map((msg) => renderMessage(msg, search)).join("");
+}
+
+function renderTranscript() {
+  const el = $("#transcript");
+  if (el) {
+    const snapshot = transcriptScrollSnapshot();
+    el.innerHTML = renderTranscriptHtml();
+    bindTranscriptEvents();
+    enhanceButtonTooltips(el);
+    restoreTranscriptScroll(snapshot);
+  }
+}
+
+function roleLabel(role) {
+  if (role === "assistant") return "bot";
+  if (role === "inserted_user") return "鎻掑叆";
+  if (role === "system_status") return "鐘舵€?";
+  if (role === "user") return "浣?";
+  return role || "绯荤粺";
+}
+
+function highlightText(text, search) {
+  const value = String(text || "");
+  if (!search) return escapeHtml(value);
+  const lower = value.toLowerCase();
+  const idx = lower.indexOf(search);
+  if (idx < 0) return escapeHtml(value);
+  return `${escapeHtml(value.slice(0, idx))}<mark>${escapeHtml(value.slice(idx, idx + search.length))}</mark>${escapeHtml(value.slice(idx + search.length))}`;
+}
+
+function safeMarkdownUrl(url, { image = false } = {}) {
+  const value = String(url || "").trim();
+  if (!value) return "";
+  if (value.startsWith("//")) return "";
+  if (value.startsWith("#") || value.startsWith("/") || value.startsWith("./") || value.startsWith("../")) return value;
+  if (image && value.startsWith("data:image/")) return value;
+  try {
+    const parsed = new URL(value, window.location.href);
+    const allowed = image ? ["http:", "https:", "blob:"] : ["http:", "https:", "mailto:"];
+    return allowed.includes(parsed.protocol) ? value : "";
+  } catch {
+    return "";
+  }
+}
+
+function renderInlineMarkdown(text) {
+  const tokens = [];
+  const token = (html) => {
+    const key = `\uE000MD${tokens.length}\uE000`;
+    tokens.push([key, html]);
+    return key;
+  };
+  let value = String(text || "");
+  value = value.replace(/`([^`\n]+)`/g, (_, code) => token(`<code>${escapeHtml(code)}</code>`));
+  value = value.replace(/!\[([^\]\n]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, alt, url) => {
+    const safe = safeMarkdownUrl(url, { image: true });
+    if (!safe) return alt || "";
+    return token(`<img class="markdown-image" src="${escapeHtml(safe)}" alt="${escapeHtml(alt || "")}" loading="lazy" />`);
+  });
+  value = value.replace(/\[([^\]\n]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_, label, url) => {
+    const safe = safeMarkdownUrl(url);
+    if (!safe) return label;
+    return token(`<a href="${escapeHtml(safe)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`);
+  });
+  let html = escapeHtml(value);
+  html = html
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_\n]+)__/g, "<strong>$1</strong>")
+    .replace(/(^|[^\*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|[^_])_([^_\n]+)_/g, "$1<em>$2</em>")
+    .replace(/(^|[\s(])(https?:\/\/[^\s<]+)/g, (match, prefix, href) => {
+      const cleanHref = href.replace(/[),.;:!?]+$/, "");
+      const tail = href.slice(cleanHref.length);
+      const safe = safeMarkdownUrl(cleanHref);
+      if (!safe) return match;
+      return `${prefix}<a href="${escapeHtml(safe)}" target="_blank" rel="noreferrer">${escapeHtml(cleanHref)}</a>${escapeHtml(tail)}`;
+    });
+  for (const [key, replacement] of tokens) html = html.replaceAll(key, replacement);
+  return html;
+}
+
+function isMarkdownTableSeparator(line) {
+  const trimmed = String(line || "").trim();
+  return trimmed.includes("-") && /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(trimmed);
+}
+
+function splitMarkdownTableRow(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderMarkdownTable(lines) {
+  const headers = splitMarkdownTableRow(lines[0] || "");
+  const rows = lines.slice(2).map(splitMarkdownTableRow);
+  return `<div class="markdown-table-wrap"><table><thead><tr>${headers.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${headers.map((_, idx) => `<td>${renderInlineMarkdown(row[idx] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+}
+
+function isMarkdownBlockStart(lines, index) {
+  const line = lines[index] || "";
+  return /^(#{1,6})\s+/.test(line)
+    || /^>\s?/.test(line)
+    || /^\s*([-*+])\s+/.test(line)
+    || /^\s*\d+[.)]\s+/.test(line)
+    || /^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)
+    || (index + 1 < lines.length && line.includes("|") && isMarkdownTableSeparator(lines[index + 1]));
+}
+
+function renderMarkdownBlocks(text) {
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  const paragraph = [];
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    out.push(`<p>${paragraph.map(renderInlineMarkdown).join("<br>")}</p>`);
+    paragraph.length = 0;
+  };
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      flushParagraph();
+      i += 1;
+      continue;
+    }
+    const tableStart = line.includes("|") && i + 1 < lines.length && isMarkdownTableSeparator(lines[i + 1]);
+    if (tableStart) {
+      flushParagraph();
+      const tableLines = [line, lines[i + 1]];
+      i += 2;
+      while (i < lines.length && lines[i].trim() && lines[i].includes("|")) {
+        tableLines.push(lines[i]);
+        i += 1;
+      }
+      out.push(renderMarkdownTable(tableLines));
+      continue;
+    }
+    const heading = line.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      const level = heading[1].length;
+      out.push(`<h${level}>${renderInlineMarkdown(heading[2].trim())}</h${level}>`);
+      i += 1;
+      continue;
+    }
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      flushParagraph();
+      out.push("<hr>");
+      i += 1;
+      continue;
+    }
+    if (/^>\s?/.test(line)) {
+      flushParagraph();
+      const quoteLines = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        quoteLines.push(lines[i].replace(/^>\s?/, ""));
+        i += 1;
+      }
+      out.push(`<blockquote>${renderMarkdownBlocks(quoteLines.join("\n"))}</blockquote>`);
+      continue;
+    }
+    const unordered = line.match(/^\s*([-*+])\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      const orderedList = Boolean(ordered);
+      const items = [];
+      while (i < lines.length) {
+        const match = orderedList ? lines[i].match(/^\s*\d+[.)]\s+(.+)$/) : lines[i].match(/^\s*[-*+]\s+(.+)$/);
+        if (!match) break;
+        items.push(match[1]);
+        i += 1;
+      }
+      out.push(`<${orderedList ? "ol" : "ul"}>${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</${orderedList ? "ol" : "ul"}>`);
+      continue;
+    }
+    paragraph.push(line);
+    i += 1;
+    while (i < lines.length && lines[i].trim() && !isMarkdownBlockStart(lines, i)) {
+      paragraph.push(lines[i]);
+      i += 1;
+    }
+  }
+  flushParagraph();
+  return out.join("");
+}
+
+function renderMarkdownContent(text) {
+  const value = String(text || "");
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let normal = [];
+  const flushNormal = () => {
+    if (!normal.length) return;
+    out.push(renderMarkdownBlocks(normal.join("\n")));
+    normal = [];
+  };
+  for (let i = 0; i < lines.length; i += 1) {
+    const fence = lines[i].match(/^```([A-Za-z0-9_+.-]*)\s*$/);
+    if (!fence) {
+      normal.push(lines[i]);
+      continue;
+    }
+    flushNormal();
+    const lang = fence[1] || "";
+    const code = [];
+    i += 1;
+    while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+      code.push(lines[i]);
+      i += 1;
+    }
+    out.push(`
+      <div class="code-block">
+        <div class="code-block-head"><span>${escapeHtml(lang || "code")}</span><button class="mini" data-copy-code>澶嶅埗</button></div>
+        <pre><code${lang ? ` class="language-${escapeHtml(lang)}"` : ""}>${escapeHtml(code.join("\n"))}</code></pre>
+      </div>
+    `);
+  }
+  flushNormal();
+  return out.join("") || "";
+}
+
+function highlightHtmlText(html, search) {
+  const query = String(search || "").trim();
+  if (!query) return html;
+  const template = document.createElement("template");
+  template.innerHTML = html;
+  const lowerQuery = query.toLowerCase();
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = node.nodeValue || "";
+    const lower = text.toLowerCase();
+    let idx = lower.indexOf(lowerQuery);
+    if (idx < 0) continue;
+    const frag = document.createDocumentFragment();
+    let cursor = 0;
+    while (idx >= 0) {
+      if (idx > cursor) frag.append(document.createTextNode(text.slice(cursor, idx)));
+      const mark = document.createElement("mark");
+      mark.textContent = text.slice(idx, idx + query.length);
+      frag.append(mark);
+      cursor = idx + query.length;
+      idx = lower.indexOf(lowerQuery, cursor);
+    }
+    if (cursor < text.length) frag.append(document.createTextNode(text.slice(cursor)));
+    node.parentNode.replaceChild(frag, node);
+  }
+  return template.innerHTML;
+}
+
+function renderMessageContent(text, search = "") {
+  const html = renderMarkdownContent(text);
+  return highlightHtmlText(html, search);
+}
+
+function renderMessageProgressPreview(msg) {
+  const items = Array.isArray(msg.round2PreviewItems) ? msg.round2PreviewItems : [];
+  const text = items.length
+    ? items.map((item) => {
+        const label = String(item.label || "").trim();
+        const body = String(item.text || "").trim();
+        return body ? `${label ? `**${label}**锛歚 : ""}${body}` : "";
+      }).filter(Boolean).join("\n\n")
+    : "姝ｅ湪澶勭悊璇锋眰锛岀瓑寰呬富鍥炲寮€濮嬨€?";
+  return `
+    <div class="message-progress-preview markdown-body" aria-live="polite">
+      ${renderMessageContent(text, "")}
+    </div>
+  `;
+}
+
+function renderMessageCurrentAction(msg) {
+  if (msg.status !== "streaming" || !msg.currentActionText) return "";
+  return `<div class="message-current-action" aria-live="polite"><span>褰撳墠</span><strong>${escapeHtml(msg.currentActionText)}</strong></div>`;
+}
+
+function renderMessage(msg, search = "") {
+  const files = fileRefs(msg.attachments || []);
+  const hasText = Boolean(msg.text);
+  const text = msg.text || "";
+  return `
+    <div class="message ${escapeHtml(msg.role)}" data-message-id="${escapeHtml(msg.id || "")}">
+      <div class="message-head">
+        <span>${escapeHtml(roleLabel(msg.role))}${msg.sendMode ? ` 路 ${escapeHtml(msg.sendMode)}` : ""}</span>
+        <span>${fmtTime(msg.createdAt)} ${msg.status ? `路 ${escapeHtml(msg.status)}` : ""}</span>
+      </div>
+      <div class="message-text markdown-body">${hasText ? renderMessageContent(text, search) : (msg.status === "streaming" ? renderMessageProgressPreview(msg) : "")}</div>
+      ${renderMessageCurrentAction(msg)}
+      ${files.length ? `<div class="attachments">${files.map((f) => `<span class="chip">${escapeHtml(f.name)}</span>`).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderComposer() {
+  const conv = activeConversation();
+  const files = fileRefs(attachedFileIds);
+  return `
+    <div class="composer">
+      ${renderQuickTemplates()}
+      ${files.length ? `<div class="attachments">${files.map((f) => `<span class="chip">${escapeHtml(f.name)} <button data-detach-file="${escapeHtml(f.id)}">脳</button></span>`).join("")}</div>` : ""}
+      <textarea id="draftInput" placeholder="鍚?bot 鍙戦€佹秷鎭€侲nter 鍙戦€侊紝Shift+Enter 鎹㈣銆?>${escapeHtml(currentDraft)}</textarea>
+      <div class="composer-actions">
+        <div class="row">
+          <input type="file" id="fileInput" multiple hidden />
+          <button id="uploadBtn">涓婁紶鏂囦欢</button>
+          <button id="clearDraftBtn">娓呯┖杈撳叆</button>
+          <button id="queueBtn">鍔犲叆闃熷垪</button>
+          <button id="insertBtn" ${conv?.status === "running" ? "" : "disabled"}>鎻掑叆褰撳墠浠诲姟</button>
+          <select id="defaultSendModeSelect">
+            <option value="normal" ${state.settings.defaultSendMode === "normal" ? "selected" : ""}>鍙戦€?/option>
+            <option value="queue" ${state.settings.defaultSendMode === "queue" ? "selected" : ""}>闃熷垪</option>
+            <option value="insert" ${state.settings.defaultSendMode === "insert" ? "selected" : ""}>鎻掑叆</option>
+          </select>
+          <button id="paletteBtn">鍛戒护</button>
+          <button id="toggleQueueAutoBtn">${conv?.autoRunQueue === false ? "闃熷垪鎵嬪姩" : "闃熷垪鑷姩"}</button>
+        </div>
+        <button class="primary" id="sendBtn">鍙戦€?/button>
+      </div>
+      ${conv?.queue.length ? `<div class="queue-panel"><div class="section-title"><strong>闃熷垪</strong><button data-clear-queue="1">娓呯┖</button></div>${conv.queue.map((q, idx) => `<div class="queue-item"><span>${escapeHtml(q.text.slice(0, 120))}</span><div class="row"><button data-move-queue="${escapeHtml(q.id)}" data-dir="-1" ${idx === 0 ? "disabled" : ""}>涓婄Щ</button><button data-move-queue="${escapeHtml(q.id)}" data-dir="1" ${idx === conv.queue.length - 1 ? "disabled" : ""}>涓嬬Щ</button><button data-edit-queue="${escapeHtml(q.id)}">缂栬緫</button><button data-remove-queue="${escapeHtml(q.id)}">鍒犻櫎</button></div></div>`).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderWorkflow() {
+  const conv = activeConversation();
+  const run = conv?.workflowRuns?.[0];
+  const nodes = workflowDisplayNodes(filterNodes(run?.nodes || []), run);
+  const compact = state.ui.workflowViewMode === "compact";
+  return `
+      <div class="section">
+        <div class="section-title">
+          <span>宸ヤ綔娴?/span>
+          <span class="small">${escapeHtml(run?.traceId || "鏃?trace")}</span>
+        </div>
+        <div class="row" style="margin-bottom:8px">
+          <button id="exportWorkflowJsonBtn">瀵煎嚭 JSON</button>
+          <button id="exportWorkflowMdBtn">瀵煎嚭 Markdown</button>
+          <button id="refreshRunBtn" ${run?.traceId ? "" : "disabled"}>鍒锋柊 run</button>
+        </div>
+        <div class="segmented" style="margin-bottom:8px">
+          <button class="${compact ? "" : "active"}" data-workflow-view="detailed">璇︾粏</button>
+          <button class="${compact ? "active" : ""}" data-workflow-view="compact">绠€娲?/button>
+        </div>
+        <select id="workflowFilter">
+        ${["all", "run", "progress", "workflow", "command", "helper", "error"].map((v) => `<option value="${v}" ${state.ui.workflowFilter === v ? "selected" : ""}>${v}</option>`).join("")}
+      </select>
+      <input id="workflowSearch" style="margin-top:8px;width:100%" placeholder="鎼滅储宸ヤ綔娴? value="${escapeHtml(state.ui.workflowSearch || "")}" />
+      <div class="small" style="margin-top:8px">${compact ? "绠€娲佹ā寮忔寜鏃堕棿杩藉姞鏈€鏂板姩浣滐紝涓€琛屾樉绀哄綋鍓嶅湪鍋氫粈涔堛€? : "涓昏繘绋嬨€乭elper銆佸伐鍏疯皟鐢ㄥ拰鍛戒护浜嬩欢浼氬湪杩欓噷鎸佺画杩藉姞銆?}</div>
+      ${run ? `<div class="small" style="margin-top:6px">鍛戒护锛?{Number(run.commandCount || 0)} 路 helper锛?{Number(run.helperCount || 0)}</div>` : ""}
+    </div>
+    ${renderBackgroundTasksPanel()}
+    <div class="workflow-list ${compact ? "compact" : ""}">${compact ? renderWorkflowCompact(run) : (nodes.length ? nodes.map((node) => renderNode(node, 0)).join("") : `<div class="empty">鏆傛棤宸ヤ綔娴佷簨浠?/div>`)}</div>
+  `;
+}
+
+function filterNodes(nodes) {
+  const filter = state.ui.workflowFilter || "all";
+  const search = (state.ui.workflowSearch || "").trim().toLowerCase();
+  const run = activeConversation()?.workflowRuns?.[0];
+  return nodes.map((node) => normalizeWorkflowNodeForRun(node, run)).filter((node) => {
+    const helperId = helperNodeId(node);
+    if (
+      filter !== "all"
+      && !(node.kind || "").includes(filter)
+      && (node.status || "") !== filter
+      && !(filter === "helper" && helperId)
+    ) return false;
+    if (!search) return true;
+    return `${node.title || ""}\n${node.kind || ""}\n${node.status || ""}\n${node.detail || ""}`.toLowerCase().includes(search);
+  });
+}
+
+function workflowDisplayNodes(nodes, run = activeConversation()?.workflowRuns?.[0]) {
+  const activeRun = run;
+  const main = {
+    id: "workflow_main",
+    kind: "main",
+    title: "涓昏繘绋?",
+    status: activeRun?.status === "running" ? "running" : (activeRun?.status || "done"),
+    detail: "",
+    children: [],
+  };
+  const helpers = [];
+  const helperMap = new Map();
+  for (const rawNode of nodes) {
+    const node = normalizeWorkflowNodeForRun(rawNode, activeRun);
+    const helperId = helperNodeId(node);
+    const groupId = helperGroupId(node);
+    const kind = String(node.kind || "");
+    const isHelperRoot = groupId && isHelperWorkflowKind(kind) && kind !== "helper_progress";
+    const isHelperProgress = groupId && !isHelperRoot;
+    if (isHelperRoot || isHelperProgress) {
+      let helper = helperMap.get(groupId);
+      if (!helper) {
+        helper = {
+          id: `helper_group_${groupId}`,
+          kind: "helper",
+          title: helperRootTitle(node, helperId),
+          status: workflowNodeStatus(node.status, node.kind, "", node),
+          helperId,
+          groupId,
+          detail: helperRootDetail(node, helperId),
+          children: [],
+          createdAt: node.createdAt || nowIso(),
+        };
+        helperMap.set(groupId, helper);
+        helpers.push(helper);
+      }
+      if (isHelperRoot) {
+        helper.helperId = helperId || helper.helperId;
+        helper.title = helperRootTitle(node, helperId);
+        helper.status = workflowNodeStatus(node.status, node.kind, "", node) || helper.status;
+        helper.detail = helperRootDetail(node, helperId) || helper.detail;
+      } else {
+        helper.children.push(node);
+        const nodeStatus = workflowNodeStatus(node.status, node.kind, "", node);
+        if ((node.kind || "") === "helper_registry_done" && helper.status !== "running") helper.status = nodeStatus || "exited";
+        if ((node.kind || "") === "helper_progress" && ["running", "error", "interrupted"].includes(nodeStatus)) helper.status = nodeStatus;
+        if ((node.kind || "") === "helper_start" && ["running", "error", "interrupted"].includes(nodeStatus)) helper.status = nodeStatus;
+      }
+      continue;
+    }
+    main.children.push({
+      ...node,
+      id: node.id || rawNode.id,
+      title: node.title || rawNode.title || "浜嬩欢",
+    });
+  }
+  for (const helper of helpers) {
+    const statuses = (helper.children || []).map((child) => workflowNodeStatus(child.status, child.kind, "", child));
+    if (statuses.includes("error")) helper.status = "error";
+    else if (statuses.includes("interrupted")) helper.status = "interrupted";
+    else if (statuses.includes("running")) helper.status = "running";
+    else if (statuses.includes("exited")) helper.status = "exited";
+    else if (helper.status !== "running") helper.status = workflowNodeStatus(helper.status, helper.kind, "", helper);
+  }
+  return [main, ...helpers].filter((node) => node.children?.length || node.kind === "helper" || node.kind === "main");
+}
+
+function workflowCompactRows(run) {
+  return filterNodes(run?.nodes || [])
+    .map((node) => normalizeWorkflowNodeForRun(node, run))
+    .sort((a, b) => {
+      const at = Date.parse(a.updatedAt || a.createdAt || "") || 0;
+      const bt = Date.parse(b.updatedAt || b.createdAt || "") || 0;
+      return at - bt;
+    });
+}
+
+function compactNodeText(node) {
+  const detail = parsedNodeDetail(node) || {};
+  const rawDetail = typeof node.detail === "string" ? node.detail : "";
+  const textDetail = rawDetail && !parsedNodeDetail(node)
+    ? detailTail(rawDetail).split("\n").filter(Boolean).slice(-3).join(" / ")
+    : "";
+  const streamDetail = String(node.kind || "") === "stream" && rawDetail
+    ? detailTail(rawDetail).split("\n").filter(Boolean).slice(-2).join(" / ") || detailTail(rawDetail)
+    : "";
+  const candidates = [
+    streamDetail,
+    detail.what_doing,
+    detail.progress_summary,
+    detail.last_note,
+    detail.last_thought,
+    detail.message,
+    textDetail,
+    node.title,
+  ].filter(Boolean);
+  let text = String(candidates[0] || rawDetail || node.kind || "浜嬩欢");
+  text = text.replace(/\s+/g, " ").trim();
+  if (!text && rawDetail) text = rawDetail.replace(/\s+/g, " ").trim();
+  return text || "浜嬩欢";
+}
+
+function renderWorkflowCompact(run) {
+  const rows = workflowCompactRows(run);
+  if (!rows.length) return `<div class="empty">鏆傛棤宸ヤ綔娴佷簨浠?/div>`;
+  return `
+    <div class="workflow-compact-list">
+      ${rows.map((node) => {
+        const helper = helperGroupId(node);
+        const label = helper ? helperKindLabel(node.helperKind || node.kind || "helper") : (node.kind || "workflow");
+        const time = fmtTime(node.updatedAt || node.createdAt);
+        return `
+          <div class="workflow-compact-row ${escapeHtml(node.status || "")}" data-node-id="${escapeHtml(node.id)}">
+            <span class="workflow-compact-time">${escapeHtml(time ? time.split(" ").pop() : "")}</span>
+            <span class="workflow-compact-kind">${escapeHtml(label)}</span>
+            <span class="workflow-compact-text" title="${escapeHtml(compactNodeText(node))}">${escapeHtml(compactNodeText(node))}</span>
+            <span class="workflow-compact-status">${escapeHtml(node.status || "")}</span>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderNode(node, depth = 0) {
+  const openIds = new Set(state.ui.workflowOpenNodeIds || []);
+  const detailOpen = openIds.has(node.id);
+  const detail = detailTail(node.detail || "");
+  const children = Array.isArray(node.children) ? node.children : [];
+  const canToggle = Boolean(detail || children.length);
+  return `
+    <div class="node-item ${escapeHtml(node.status)}" data-node-id="${escapeHtml(node.id)}" data-node-depth="${Number(depth)}" style="--depth:${Number(depth)}">
+      <div class="node-title">
+        <span>${canToggle ? `<button class="mini" data-toggle-node="${escapeHtml(node.id)}">${detailOpen ? "鏀惰捣" : "灞曞紑"}</button>` : ""} ${escapeHtml(node.title)}</span>
+        <span class="small">${escapeHtml(node.kind)} 路 ${escapeHtml(node.status)}</span>
+      </div>
+      ${detail && (!children.length || detailOpen) ? `<div class="node-detail ${detailOpen ? "open" : ""}">${escapeHtml(detailOpen ? detail : detail.slice(0, 900))}</div>` : ""}
+      ${children.length && detailOpen ? `<div class="node-children">${children.map((child) => renderNode(child, depth + 1)).join("")}</div>` : ""}
+    </div>
+  `;
+}
+
+function renderWorkflowOnly(options = {}) {
+  const el = $("#workflowPane");
+  if (el) {
+    const workflowScroll = workflowScrollSnapshot();
+    el.innerHTML = renderWorkflow();
+    bindWorkflowEvents();
+    renderNodeDetailsOnly();
+    enhanceButtonTooltips(el);
+    restoreWorkflowScroll(options.preserve === false ? null : (options.snapshot || workflowScroll));
+  }
+}
+
+function scheduleWorkflowRender(options = {}) {
+  workflowRenderOptions = { ...(workflowRenderOptions || {}), ...options };
+  if (workflowRenderTimer) return;
+  workflowRenderTimer = setTimeout(() => {
+    workflowRenderTimer = null;
+    const nextOptions = workflowRenderOptions || {};
+    workflowRenderOptions = null;
+    renderWorkflowOnly(nextOptions);
+  }, 50);
+}
+
+function renderNodeDetailsOnly() {
+  const el = $(".node-details-panel");
+  if (!el) return;
+  el.outerHTML = renderNodeDetailsPanel();
+  $("#closeNodeDetailsBtn")?.addEventListener("click", () => {
+    state.ui.selectedNodeId = "";
+    saveState();
+    render();
+  });
+  enhanceButtonTooltips($(".node-details-panel") || document);
+}
+
+function renderFilePanel() {
+  const archive = activeArchive();
+  const search = (state.ui.fileSearch || "").trim().toLowerCase();
+  const files = (state.files[archive?.id] || []).filter((file) => {
+    if (!search) return true;
+    return `${file.name || ""}\n${file.status || ""}\n${file.workspace_path || ""}`.toLowerCase().includes(search);
+  });
+  const progressItems = Object.values(uploadProgress);
+  return `
+    <div class="file-panel ${state.ui.filePanelOpen ? "open" : ""}" id="filePanel">
+      <div class="section">
+        <div class="section-title">
+          <span>bot 鏂囦欢鍖?/span>
+          <div class="row"><button id="refreshFilesBtn">鍒锋柊</button><button id="closeFilePanelBtn">鍏抽棴</button></div>
+        </div>
+        <div class="drop-zone" id="dropZone">鎷栨斁鎴栫矘璐存枃浠朵笂浼犲埌 bot 鏂囦欢鍖恒€傝繖閲屼笉鍐欏叆椤圭洰鐩綍銆?/div>
+        <input id="fileSearchInput" class="wide-input" style="margin-top:8px" placeholder="鎼滅储鏂囦欢鍖? value="${escapeHtml(state.ui.fileSearch || "")}" />
+      </div>
+      ${progressItems.length ? `<div class="section">${progressItems.map((item) => {
+        const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
+        return `
+          <div class="upload-progress">
+            <div class="small">${escapeHtml(item.name)}锛?{escapeHtml(item.status)} ${percent}%</div>
+            <div class="upload-progress-track" aria-label="${escapeHtml(item.name)} 涓婁紶杩涘害" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
+              <div class="upload-progress-bar" style="width:${percent}%"></div>
+            </div>
+          </div>
+        `;
+      }).join("")}</div>` : ""}
+      <div class="file-list">${files.length ? files.map(renderFileItem).join("") : `<div class="empty">鏆傛棤鏂囦欢</div>`}</div>
+    </div>
+  `;
+}
+
+function renderFilePanelOnly() {
+  const el = $("#filePanel");
+  if (!el) return;
+  el.outerHTML = renderFilePanel();
+  bindFilePanelEvents();
+  enhanceButtonTooltips($("#filePanel") || document);
+}
+
+function bindFilePanelEvents() {
+  $("#refreshFilesBtn")?.addEventListener("click", refreshFiles);
+  $("#fileSearchInput")?.addEventListener("input", (e) => {
+    state.ui.fileSearch = e.target.value;
+    saveState();
+    renderFilePanelOnly();
+  });
+  document.querySelectorAll("[data-attach-file]").forEach((el) => el.addEventListener("click", () => attachFile(el.dataset.attachFile)));
+  document.querySelectorAll("[data-delete-file]").forEach((el) => el.addEventListener("click", () => deleteFile(el.dataset.deleteFile)));
+  document.querySelectorAll("[data-preview-file]").forEach((el) => el.addEventListener("click", () => previewFile(el.dataset.previewFile)));
+  document.querySelectorAll("[data-file-action]").forEach((el) => {
+    el.addEventListener("click", () => fileQuickAction(el.dataset.fileId, el.dataset.fileAction));
+  });
+  document.querySelectorAll("[data-download-file]").forEach((el) => {
+    el.addEventListener("click", () => {
+      if (el.dataset.downloadFile) window.open(backend(el.dataset.downloadFile), "_blank");
+    });
+  });
+}
+
+function renderArtifactPanelOnly() {
+  const el = $("#artifactPanel");
+  if (el) {
+    el.outerHTML = renderArtifactPanel();
+    bindArtifactEvents();
+    enhanceButtonTooltips($("#artifactPanel") || document);
+  }
+}
+
+function renderArtifactPanel() {
+  const artifacts = artifactRefs();
+  return `
+    <div class="artifact-panel ${state.ui.artifactPanelOpen ? "open" : ""}" id="artifactPanel">
+      <div class="section">
+        <div class="section-title">
+          <span>bot 浜х墿鍖?/span>
+          <div class="row"><button id="refreshArtifactsBtn">鍒锋柊</button><button id="closeArtifactPanelBtn">鍏抽棴</button></div>
+        </div>
+        <div class="small">杩欓噷鏄剧ず bot 鏈疆鎴栧巻鍙蹭换鍔＄敓鎴愬苟鍙笅杞界殑鏂囦欢銆備笂浼犵粰 bot 鐨勮緭鍏ユ枃浠跺湪鈥滄枃浠垛€濆尯銆?/div>
+      </div>
+      <div class="file-list">${artifacts.length ? artifacts.map(renderArtifactItem).join("") : `<div class="empty">鏆傛棤浜х墿銆備换鍔＄敓鎴愭枃浠跺悗浼氳嚜鍔ㄥ嚭鐜板湪杩欓噷銆?/div>`}</div>
+    </div>
+  `;
+}
+
+function renderArtifactItem(file) {
+  const url = file.download_url || file.url || "";
+  return `
+    <div class="file-item artifact-item">
+      <div class="file-name">${escapeHtml(file.name || file.rel_path || "artifact")}</div>
+      <div class="file-meta">${file.size ? fmtSize(file.size) + " 路 " : ""}${escapeHtml(file.rel_path || file.workspace_path || "")}</div>
+      <div class="row" style="margin-top:8px">
+        <button data-preview-artifact="${escapeHtml(file.id)}" ${!url ? "disabled" : ""}>棰勮</button>
+        <button data-download-artifact="${escapeHtml(url)}" ${!url ? "disabled" : ""}>涓嬭浇</button>
+        <button data-copy-artifact-url="${escapeHtml(url)}" ${!url ? "disabled" : ""}>澶嶅埗 URL</button>
+        <button data-copy-artifact-path="${escapeHtml(file.rel_path || file.workspace_path || "")}">澶嶅埗璺緞</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderFileItem(file) {
+  const failed = file.status === "failed";
+  return `
+    <div class="file-item ${failed ? "failed" : ""}">
+      <div class="file-name">${escapeHtml(file.name)}</div>
+      <div class="file-meta">${fmtSize(file.size)} 路 ${escapeHtml(file.status || "ready")} 路 ${escapeHtml(file.workspace_path || "")}</div>
+      ${file.error ? `<div class="file-error">${escapeHtml(file.error)}</div>` : ""}
+      <div class="row" style="margin-top:8px">
+        <button data-attach-file="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>闄勫姞</button>
+        <button data-preview-file="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>棰勮</button>
+        <button data-download-file="${escapeHtml(file.download_url || "")}" ${!file.download_url ? "disabled" : ""}>涓嬭浇</button>
+        <button data-copy-file-path="${escapeHtml(file.workspace_path || "")}">澶嶅埗璺緞</button>
+        <button data-copy-file-url="${escapeHtml(file.download_url || "")}" ${!file.download_url ? "disabled" : ""}>澶嶅埗 URL</button>
+        <button data-file-action="summary" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>鎬荤粨</button>
+        <button data-file-action="extract" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>鎻愬彇</button>
+        <button data-file-action="report" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>鎶ュ憡</button>
+        <button class="danger" data-delete-file="${escapeHtml(file.id)}">鍒犻櫎</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderProjectPanel() {
+  const archive = activeArchive();
+  const hasDir = Boolean(archive?.currentDir);
+  const tree = state.ui.projectTree || [];
+  const results = state.ui.projectSearchResults || [];
+  return `
+    <div class="project-panel ${state.ui.projectPanelOpen ? "open" : ""}">
+      <div class="section">
+        <div class="section-title">
+          <span>椤圭洰鐩綍</span>
+          <div class="row"><button id="refreshProjectTreeBtn" ${hasDir ? "" : "disabled"}>鍒锋柊</button><button id="closeProjectPanelBtn">鍏抽棴</button></div>
+        </div>
+        <div class="small">${escapeHtml(archive?.currentDir || "褰撳墠瀛樻。鏈粦瀹氶」鐩洰褰?)}</div>
+        <div class="row" style="margin-top:8px">
+          <input id="projectTreePathInput" class="wide-input" placeholder="鐩稿鐩綍" value="${escapeHtml(state.ui.projectTreePath || ".")}" />
+        </div>
+      </div>
+      <div class="section project-tools">
+        <input id="projectSearchInput" placeholder="鎼滅储椤圭洰鏂囦欢" value="${escapeHtml(state.ui.projectSearch || "")}" />
+        <button id="projectSearchBtn" ${hasDir ? "" : "disabled"}>鎼滅储</button>
+        <input id="projectCommandInput" placeholder="鍦ㄥ綋鍓嶇洰褰曡繍琛屽懡浠? value="${escapeHtml(state.ui.projectCommand || "")}" />
+        <button id="projectRunBtn" ${hasDir ? "" : "disabled"}>杩愯</button>
+        <input id="projectDiffPathInput" placeholder="diff 婧愭枃浠? value="${escapeHtml(state.ui.projectDiffPath || state.ui.projectPreviewPath || "")}" />
+        <input id="projectDiffCompareInput" placeholder="diff 瀵规瘮鏂囦欢锛屽彲绌? value="${escapeHtml(state.ui.projectDiffComparePath || "")}" />
+        <button id="projectDiffBtn" ${hasDir ? "" : "disabled"}>Diff</button>
+        <button id="projectDiffExplainBtn">瑙ｉ噴 diff</button>
+      </div>
+      <div class="project-body">
+        <div class="project-tree">
+          <div class="small">鐘舵€侊細${escapeHtml(state.ui.projectTreeStatus || "idle")}</div>
+          ${tree.length ? tree.map(renderProjectTreeItem).join("") : `<div class="empty">鏆傛棤鐩綍鏁版嵁</div>`}
+          ${results.length ? `<div class="section-title" style="margin-top:12px"><span>鎼滅储缁撴灉</span></div>${results.map(renderProjectSearchItem).join("")}` : ""}
+        </div>
+        <div class="project-preview">
+          <div class="section-title">
+            <span>${escapeHtml(state.ui.projectPreviewPath || "鏂囦欢棰勮")}</span>
+            <span class="small">${escapeHtml(state.ui.projectPreviewStatus || "idle")}</span>
+          </div>
+          <pre class="preview-text">${escapeHtml(state.ui.projectPreviewText || state.ui.projectCommandOutput || "")}</pre>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderProjectTreeItem(item) {
+  const isDir = item.type === "dir";
+  return `
+    <div class="project-item ${isDir ? "dir" : "file"}" data-project-${isDir ? "dir" : "file"}="${escapeHtml(item.path)}">
+      <span>${isDir ? "[dir]" : "[file]"} ${escapeHtml(item.path)}</span>
+      <span class="small">${isDir ? "dir" : fmtSize(item.size || 0)}</span>
+    </div>
+  `;
+}
+
+function renderProjectSearchItem(item) {
+  return `
+    <div class="project-item file" data-project-file="${escapeHtml(item.path)}">
+      <span>${escapeHtml(item.path)}:${escapeHtml(item.line)}</span>
+      <span class="small">${escapeHtml(item.text || "")}</span>
+    </div>
+  `;
+}
+
+function renderSettingsPanel() {
+  return `
+    <div class="settings-panel ${state.ui.settingsOpen ? "open" : ""}">
+      <div class="section">
+        <div class="section-title">
+          <span>璁剧疆</span>
+          <button id="closeSettingsBtn">鍏抽棴</button>
+        </div>
+        <label class="settings-row">
+          <span>鍚庣</span>
+          <input id="backendUrlInput" value="${escapeHtml(state.settings.backendUrl)}" />
+        </label>
+        <label class="settings-row">
+          <span>鐩戞帶娴?/span>
+          <select id="monitorEnabledSelect">
+            <option value="true" ${state.settings.monitorEnabled ? "selected" : ""}>寮€鍚?/option>
+            <option value="false" ${!state.settings.monitorEnabled ? "selected" : ""}>鍏抽棴</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>鎻掑叆绛栫暐</span>
+          <select id="insertModeSelect">
+            <option value="inject_only" ${state.settings.insertMode === "inject_only" ? "selected" : ""}>鍙彃鍏ュ綋鍓嶄换鍔?/option>
+            <option value="inject_then_followup" ${state.settings.insertMode === "inject_then_followup" ? "selected" : ""}>鎻掑叆鍚庢帓闃熶笅涓€杞?/option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>宸ヤ綔娴佷繚鐣?/span>
+          <input id="maxWorkflowRunsInput" type="number" min="1" max="500" value="${escapeHtml(state.settings.maxWorkflowRuns)}" />
+        </label>
+        <label class="settings-row">
+          <span>闃熷垪鑷姩鎵ц</span>
+          <select id="autoRunQueueSelect">
+            <option value="true" ${state.settings.autoRunQueue !== false ? "selected" : ""}>寮€鍚?/option>
+            <option value="false" ${state.settings.autoRunQueue === false ? "selected" : ""}>鍏抽棴</option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>鑷姩缁х画</span>
+          <select id="autoContinueSelect">
+            <option value="false" ${!state.settings.autoContinue ? "selected" : ""}>鍏抽棴</option>
+            <option value="true" ${state.settings.autoContinue ? "selected" : ""}>寮€鍚?/option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>鑷姩缁х画鏃堕棿涓婇檺(绉?</span>
+          <input id="autoContinueMaxSecInput" type="number" min="1" max="86400" value="${escapeHtml(state.settings.autoContinueMaxSec || 900)}" />
+        </label>
+        <label class="settings-row">
+          <span>鍑忓皯纭</span>
+          <select id="reduceConfirmationsSelect">
+            <option value="false" ${!state.settings.reduceConfirmations ? "selected" : ""}>鍏抽棴</option>
+            <option value="true" ${state.settings.reduceConfirmations ? "selected" : ""}>寮€鍚?/option>
+          </select>
+        </label>
+        <label class="settings-row">
+          <span>鏃ュ織 tail</span>
+          <input id="logTailLinesInput" type="number" min="20" max="2000" value="${escapeHtml(state.settings.logTailLines)}" />
+        </label>
+        <label class="settings-row">
+          <span>瀛楀彿</span>
+          <input id="fontSizeInput" type="number" min="12" max="20" value="${escapeHtml(state.settings.fontSize)}" />
+        </label>
+        <div class="row">
+          <button id="saveSettingsBtn" class="primary">淇濆瓨</button>
+          <button id="clearTranscriptBtn">娓呯┖ transcript</button>
+          <button id="exportBtn">瀵煎嚭 Markdown</button>
+          <button id="exportStateBtn">瀵煎嚭鐘舵€?/button>
+          <button id="importStateBtn">瀵煎叆鐘舵€?/button>
+          <button id="cleanupBtn">娓呯悊鏈湴</button>
+          <input id="stateImportInput" type="file" accept="application/json,.json" hidden />
+          <button class="danger" id="deleteArchiveBtn">鍒犳湰鍦板瓨妗?/button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderPreviewPanel() {
+  const archive = activeArchive();
+  const file = (state.files[archive?.id] || []).find((f) => f.id === state.ui.previewFileId);
+  const type = file ? previewTypeForFile(file) : "";
+  const url = file?.download_url ? backend(file.download_url) : "";
+  let body = `<div class="empty">鏈€夋嫨鏂囦欢</div>`;
+  if (file) {
+    if (type === "image") body = `<img class="preview-media" src="${escapeHtml(url)}" alt="${escapeHtml(file.name)}" />`;
+    else if (type === "pdf") body = `<iframe class="preview-frame" src="${escapeHtml(url)}"></iframe>`;
+    else if (type === "audio") body = `<audio class="preview-media" controls src="${escapeHtml(url)}"></audio>`;
+    else if (type === "video") body = `<video class="preview-media" controls src="${escapeHtml(url)}"></video>`;
+    else if (type === "text") body = `<pre class="preview-text">${escapeHtml(state.ui.previewText || state.ui.previewStatus)}</pre>`;
+    else body = `<div class="empty">璇ョ被鍨嬫殏涓嶅唴宓岄瑙堬紝鍙笅杞芥煡鐪嬨€?/div>`;
+  }
+  return `
+    <div class="preview-panel ${state.ui.previewOpen ? "open" : ""}">
+      <div class="section">
+        <div class="section-title">
+          <span>${escapeHtml(file?.name || "鏂囦欢棰勮")}</span>
+          <button id="closePreviewBtn">鍏抽棴</button>
+        </div>
+        <div class="small">鐘舵€侊細${escapeHtml(state.ui.previewStatus || "idle")}</div>
+      </div>
+      <div class="preview-body">${body}</div>
+    </div>
+  `;
+}
+
+function renderNodeDetailsPanel() {
+  const conv = activeConversation();
+  const run = conv?.workflowRuns?.[0];
+  const displayNodes = workflowDisplayNodes(filterNodes(run?.nodes || []), run);
+  const node = findWorkflowNodeById(displayNodes, state.ui.selectedNodeId);
+  return `
+    <div class="node-details-panel ${node ? "open" : ""}">
+      <div class="section">
+        <div class="section-title">
+          <span>${escapeHtml(node?.title || "鑺傜偣璇︽儏")}</span>
+          <button id="closeNodeDetailsBtn">鍏抽棴</button>
+        </div>
+        ${node ? `<div class="small">${escapeHtml(node.kind)} 路 ${escapeHtml(node.status)} 路 ${fmtTime(node.createdAt)}</div>` : ""}
+      </div>
+      <pre class="preview-text">${escapeHtml(node?.detail || "")}</pre>
+    </div>
+  `;
+}
+
+function findWorkflowNodeById(nodes, id) {
+  if (!id) return null;
+  for (const node of nodes || []) {
+    if (node.id === id) return node;
+    const child = findWorkflowNodeById(node.children || [], id);
+    if (child) return child;
+  }
+  return null;
+}
+
+function bindEvents() {
+  $("#newAccountBtn")?.addEventListener("click", createAccount);
+  $("#renameAccountBtn")?.addEventListener("click", renameAccount);
+  $("#deleteAccountBtn")?.addEventListener("click", deleteLocalAccount);
+  $("#newArchiveBtn")?.addEventListener("click", createArchive);
+  $("#duplicateTabBtn")?.addEventListener("click", duplicateConversationTab);
+  $("#accountSelect")?.addEventListener("change", (e) => {
+    syncDraftToConversation();
+    state.activeAccountId = e.target.value;
+    const next = state.archives.find((a) => a.userId === state.activeAccountId);
+    state.activeArchiveId = next?.id || "";
+    loadDraftFromConversation();
+    startupRecovered = false;
+    saveState();
+    render();
+    recoverFromBackend();
+  });
+  document.querySelectorAll("[data-archive-id]").forEach((el) => {
+    el.addEventListener("click", () => {
+      syncDraftToConversation();
+      state.activeArchiveId = el.dataset.archiveId;
+      loadDraftFromConversation();
+      saveState();
+      render();
+      refreshFiles();
+    });
+  });
+  $("#recoverBtn")?.addEventListener("click", () => {
+    startupRecovered = false;
+    recoverFromBackend();
+  });
+  $("#toggleSidebarBtn")?.addEventListener("click", () => {
+    state.settings.sidebarOpen = state.settings.sidebarOpen === false;
+    saveState();
+    render();
+  });
+  $("#toggleWorkflowBtn")?.addEventListener("click", () => {
+    state.settings.workflowOpen = state.settings.workflowOpen === false;
+    saveState();
+    render();
+  });
+  $("#syncArchiveBtn")?.addEventListener("click", syncArchive);
+  $("#renameArchiveBtn")?.addEventListener("click", renameArchive);
+  $("#editDirBtn")?.addEventListener("click", editArchiveDir);
+  $("#pinArchiveBtn")?.addEventListener("click", () => archiveLocalOnly("toggle_pin"));
+  $("#archiveArchiveBtn")?.addEventListener("click", () => archiveLocalOnly("toggle_archive"));
+  $("#filePanelBtn")?.addEventListener("click", toggleFilePanel);
+  $("#artifactPanelBtn")?.addEventListener("click", () => {
+    state.ui.artifactPanelOpen = !state.ui.artifactPanelOpen;
+    if (state.ui.artifactPanelOpen) refreshArtifacts();
+    saveState();
+    render();
+  });
+  $("#projectPanelBtn")?.addEventListener("click", toggleProjectPanel);
+  $("#settingsBtn")?.addEventListener("click", toggleSettings);
+  $("#abortBtn")?.addEventListener("click", abortRun);
+  $("#abortClearBtn")?.addEventListener("click", abortAndClearQueue);
+  $("#sendBtn")?.addEventListener("click", () => {
+    currentDraft = $("#draftInput")?.value || "";
+    sendMessage(state.settings.defaultSendMode || "normal");
+  });
+  $("#queueBtn")?.addEventListener("click", () => {
+    currentDraft = $("#draftInput")?.value || "";
+    sendMessage("queue");
+  });
+  $("#insertBtn")?.addEventListener("click", () => {
+    currentDraft = $("#draftInput")?.value || "";
+    sendMessage("insert");
+  });
+  $("#paletteBtn")?.addEventListener("click", openCommandPalette);
+  $("#uploadBtn")?.addEventListener("click", () => $("#fileInput")?.click());
+  $("#fileInput")?.addEventListener("change", (e) => uploadFiles(e.target.files));
+  $("#clearDraftBtn")?.addEventListener("click", () => {
+    currentDraft = "";
+    attachedFileIds = [];
+    syncDraftToConversation();
+    saveState();
+    render();
+  });
+  $("#toggleQueueAutoBtn")?.addEventListener("click", () => {
+    const conv = activeConversation();
+    setQueueAutoRun(conv?.autoRunQueue === false);
+  });
+  $("#draftInput")?.addEventListener("input", (e) => {
+    currentDraft = e.target.value;
+    syncDraftToConversation();
+    saveState();
+  });
+  $("#draftInput")?.addEventListener("keydown", (e) => {
+    const conv = activeConversation();
+    if (e.key === "ArrowUp" && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.target.value.includes("\n")) {
+      const history = conv?.inputHistory || [];
+      if (history.length) {
+        e.preventDefault();
+        draftHistoryIndex = draftHistoryIndex < 0 ? history.length - 1 : Math.max(0, draftHistoryIndex - 1);
+        setDraft(history[draftHistoryIndex] || "");
+      }
+      return;
+    }
+    if (e.key === "ArrowDown" && draftHistoryIndex >= 0) {
+      const history = conv?.inputHistory || [];
+      e.preventDefault();
+      draftHistoryIndex = Math.min(history.length, draftHistoryIndex + 1);
+      setDraft(history[draftHistoryIndex] || "");
+      if (draftHistoryIndex >= history.length) draftHistoryIndex = -1;
+      return;
+    }
+    if ((e.key === "Enter" && !e.shiftKey) || (e.key === "Enter" && (e.ctrlKey || e.metaKey))) {
+      e.preventDefault();
+      currentDraft = e.target.value;
+      sendMessage(state.settings.defaultSendMode || "normal");
+    }
+  });
+  $("#closeFilePanelBtn")?.addEventListener("click", () => {
+    state.ui.filePanelOpen = false;
+    saveState();
+    render();
+  });
+  $("#closeArtifactPanelBtn")?.addEventListener("click", () => {
+    state.ui.artifactPanelOpen = false;
+    saveState();
+    render();
+  });
+  $("#closeSettingsBtn")?.addEventListener("click", toggleSettings);
+  $("#defaultSendModeSelect")?.addEventListener("change", (e) => {
+    state.settings.defaultSendMode = e.target.value || "normal";
+    saveState();
+    render();
+  });
+  $("#saveSettingsBtn")?.addEventListener("click", () => {
+    state.settings.backendUrl = $("#backendUrlInput")?.value.trim() || "http://127.0.0.1:8000";
+    state.settings.monitorEnabled = $("#monitorEnabledSelect")?.value === "true";
+    state.settings.insertMode = $("#insertModeSelect")?.value || "inject_only";
+    state.settings.maxWorkflowRuns = Math.max(1, Math.min(500, Number($("#maxWorkflowRunsInput")?.value || DEFAULT_MAX_WORKFLOW_RUNS)));
+    state.settings.autoRunQueue = $("#autoRunQueueSelect")?.value !== "false";
+    state.settings.autoContinue = $("#autoContinueSelect")?.value === "true";
+    state.settings.autoContinueMaxSec = Math.max(1, Math.min(86400, Number($("#autoContinueMaxSecInput")?.value || 900)));
+    state.settings.reduceConfirmations = $("#reduceConfirmationsSelect")?.value === "true";
+    state.settings.logTailLines = Math.max(20, Math.min(2000, Number($("#logTailLinesInput")?.value || 200)));
+    state.settings.fontSize = Math.max(12, Math.min(20, Number($("#fontSizeInput")?.value || 14)));
+    saveState();
+    render();
+  });
+  $("#closePreviewBtn")?.addEventListener("click", closePreview);
+  $("#closeNodeDetailsBtn")?.addEventListener("click", () => {
+    state.ui.selectedNodeId = "";
+    saveState();
+    render();
+  });
+  $("#clearTranscriptBtn")?.addEventListener("click", clearTranscript);
+  $("#exportBtn")?.addEventListener("click", exportMarkdown);
+  $("#exportStateBtn")?.addEventListener("click", exportStateJson);
+  $("#importStateBtn")?.addEventListener("click", promptImportStateJson);
+  $("#stateImportInput")?.addEventListener("change", (e) => importStateJson(e.target.files?.[0]));
+  $("#cleanupBtn")?.addEventListener("click", cleanupLocalData);
+  $("#deleteArchiveBtn")?.addEventListener("click", deleteLocalArchive);
+  $("#refreshArtifactsBtn")?.addEventListener("click", refreshArtifacts);
+  $("#closeProjectPanelBtn")?.addEventListener("click", () => {
+    state.ui.projectPanelOpen = false;
+    saveState();
+    render();
+  });
+  $("#refreshProjectTreeBtn")?.addEventListener("click", () => {
+    state.ui.projectTreePath = $("#projectTreePathInput")?.value.trim() || ".";
+    refreshProjectTree(state.ui.projectTreePath);
+  });
+  $("#projectTreePathInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      state.ui.projectTreePath = e.target.value.trim() || ".";
+      refreshProjectTree(state.ui.projectTreePath);
+    }
+  });
+  $("#projectSearchInput")?.addEventListener("input", (e) => {
+    state.ui.projectSearch = e.target.value;
+    saveState();
+  });
+  $("#projectSearchInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") searchProject();
+  });
+  $("#projectSearchBtn")?.addEventListener("click", searchProject);
+  $("#projectCommandInput")?.addEventListener("input", (e) => {
+    state.ui.projectCommand = e.target.value;
+    saveState();
+  });
+  $("#projectCommandInput")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") runProjectCommand();
+  });
+  $("#projectRunBtn")?.addEventListener("click", runProjectCommand);
+  $("#projectDiffPathInput")?.addEventListener("input", (e) => {
+    state.ui.projectDiffPath = e.target.value;
+    saveState();
+  });
+  $("#projectDiffCompareInput")?.addEventListener("input", (e) => {
+    state.ui.projectDiffComparePath = e.target.value;
+    saveState();
+  });
+  $("#projectDiffBtn")?.addEventListener("click", loadProjectDiff);
+  $("#projectDiffExplainBtn")?.addEventListener("click", explainCurrentDiff);
+  document.querySelectorAll("[data-project-file]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.ui.projectDiffPath = el.dataset.projectFile || "";
+      previewProjectFile(el.dataset.projectFile);
+    });
+  });
+  document.querySelectorAll("[data-project-dir]").forEach((el) => {
+    el.addEventListener("click", () => refreshProjectTree(el.dataset.projectDir || "."));
+  });
+  $("#transcriptSearch")?.addEventListener("input", (e) => {
+    state.ui.transcriptSearch = e.target.value;
+    saveState();
+    renderTranscript();
+  });
+  $("#archiveSearchInput")?.addEventListener("input", (e) => {
+    state.ui.archiveSearch = e.target.value;
+    saveState();
+    render();
+  });
+  document.querySelectorAll("[data-template-id]").forEach((el) => {
+    el.addEventListener("click", () => applyTemplate(el.dataset.templateId, "draft"));
+    el.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      applyTemplate(el.dataset.templateId, "queue");
+    });
+  });
+  document.querySelectorAll("[data-detach-file]").forEach((el) => el.addEventListener("click", () => detachFile(el.dataset.detachFile)));
+  document.querySelectorAll("[data-copy-code]").forEach((el) => {
+    el.addEventListener("click", () => copyText(el.closest(".code-block")?.querySelector("code")?.textContent || ""));
+  });
+  bindArtifactEvents();
+  document.querySelectorAll("[data-copy-file-path]").forEach((el) => {
+    el.addEventListener("click", () => copyText(el.dataset.copyFilePath || ""));
+  });
+  document.querySelectorAll("[data-copy-file-url]").forEach((el) => {
+    el.addEventListener("click", () => copyText(el.dataset.copyFileUrl ? backend(el.dataset.copyFileUrl) : ""));
+  });
+  document.querySelectorAll("[data-remove-queue]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const conv = activeConversation();
+      if (!conv) return;
+      conv.queue = conv.queue.filter((q) => q.id !== el.dataset.removeQueue);
+      saveState();
+      render();
+    });
+  });
+  document.querySelectorAll("[data-edit-queue]").forEach((el) => {
+    el.addEventListener("click", () => editQueueItem(el.dataset.editQueue));
+  });
+  document.querySelectorAll("[data-move-queue]").forEach((el) => {
+    el.addEventListener("click", () => moveQueueItem(el.dataset.moveQueue, Number(el.dataset.dir || 0)));
+  });
+  document.querySelector("[data-clear-queue]")?.addEventListener("click", clearQueue);
+  bindTranscriptEvents();
+  bindWorkflowEvents();
+  bindDropZone();
+  bindNotificationEvents();
+}
+
+function bindArtifactEvents() {
+  document.querySelectorAll("[data-download-artifact]").forEach((el) => {
+    el.addEventListener("click", () => {
+      if (el.dataset.downloadArtifact) window.open(backend(el.dataset.downloadArtifact), "_blank");
+    });
+  });
+  document.querySelectorAll("[data-preview-artifact]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const file = artifactRefs().find((item) => item.id === el.dataset.previewArtifact);
+      if (!file?.download_url && !file?.url) return;
+      state.ui.previewOpen = true;
+      state.ui.previewFileId = file.id;
+      state.files[activeArchive()?.id] = [
+        { ...file, id: file.id, download_url: file.download_url || file.url },
+        ...(state.files[activeArchive()?.id] || []).filter((item) => item.id !== file.id),
+      ];
+      saveState();
+      previewFile(file.id);
+    });
+  });
+  document.querySelectorAll("[data-copy-artifact-url]").forEach((el) => {
+    el.addEventListener("click", () => copyText(el.dataset.copyArtifactUrl ? backend(el.dataset.copyArtifactUrl) : ""));
+  });
+  document.querySelectorAll("[data-copy-artifact-path]").forEach((el) => {
+    el.addEventListener("click", () => copyText(el.dataset.copyArtifactPath || ""));
+  });
+}
+
+function bindNotificationEvents() {
+  document.querySelectorAll("[data-dismiss-notice]").forEach((el) => {
+    el.addEventListener("click", () => dismissNotification(el.dataset.dismissNotice));
+  });
+}
+
+function bindTranscriptEvents() {
+  $("#transcript")?.addEventListener("scroll", () => {
+    transcriptLastScrollSnapshot = transcriptScrollSnapshot();
+  }, { passive: true });
+}
+
+function bindWorkflowEvents() {
+  $("#workflowPane .workflow-list")?.addEventListener("scroll", () => {
+    workflowLastScrollSnapshot = workflowScrollSnapshot();
+  }, { passive: true });
+  $("#workflowPane .workflow-list")?.addEventListener("pointerdown", () => {
+    workflowPointerActive = true;
+    workflowLastScrollSnapshot = workflowScrollSnapshot();
+  }, { passive: true });
+  $("#workflowPane .workflow-list")?.addEventListener("pointerup", () => {
+    workflowPointerActive = false;
+    workflowLastScrollSnapshot = workflowScrollSnapshot();
+  }, { passive: true });
+  $("#workflowPane .workflow-list")?.addEventListener("pointercancel", () => {
+    workflowPointerActive = false;
+    workflowLastScrollSnapshot = workflowScrollSnapshot();
+  }, { passive: true });
+  $("#exportWorkflowJsonBtn")?.addEventListener("click", () => exportWorkflow("json"));
+  $("#exportWorkflowMdBtn")?.addEventListener("click", () => exportWorkflow("md"));
+  $("#refreshRunBtn")?.addEventListener("click", refreshRunSnapshot);
+  document.querySelectorAll("[data-workflow-view]").forEach((el) => {
+    el.addEventListener("click", () => {
+      state.ui.workflowViewMode = el.dataset.workflowView === "compact" ? "compact" : "detailed";
+      workflowLastScrollSnapshot = null;
+      saveState();
+      renderWorkflowOnly({ preserve: false });
+    });
+  });
+  $("#workflowFilter")?.addEventListener("change", (e) => {
+    state.ui.workflowFilter = e.target.value;
+    saveState();
+    renderWorkflowOnly();
+  });
+  $("#workflowSearch")?.addEventListener("input", (e) => {
+    state.ui.workflowSearch = e.target.value;
+    saveState();
+    renderWorkflowOnly();
+  });
+  document.querySelectorAll("[data-node-id]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      if (event.target.closest("[data-toggle-node]")) return;
+      state.ui.selectedNodeId = state.ui.selectedNodeId === el.dataset.nodeId ? "" : el.dataset.nodeId;
+      saveState();
+      renderWorkflowOnly();
+    });
+  });
+  document.querySelectorAll("[data-toggle-node]").forEach((el) => {
+    el.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const nodeId = el.dataset.toggleNode || "";
+      const list = state.ui.workflowOpenNodeIds || [];
+      state.ui.workflowOpenNodeIds = list.includes(nodeId)
+        ? list.filter((item) => item !== nodeId)
+        : [...list, nodeId];
+      saveState();
+      renderWorkflowOnly();
+    });
+  });
+}
+
+function bindDropZone() {
+  const dropZone = $("#dropZone");
+  if (dropZone) {
+    dropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropZone.classList.add("dragover");
+    });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("dragover");
+      uploadFiles(e.dataTransfer.files);
+    });
+  }
+  const draft = $("#draftInput");
+  if (draft) {
+    draft.addEventListener("dragover", (e) => {
+      if (e.dataTransfer?.files?.length) e.preventDefault();
+    });
+    draft.addEventListener("drop", async (e) => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      const before = new Set((state.files[activeArchive()?.id] || []).map((f) => f.id));
+      await uploadFiles(e.dataTransfer.files);
+      const added = (state.files[activeArchive()?.id] || []).filter((f) => !before.has(f.id) && f.status !== "failed");
+      for (const file of added) {
+        if (!attachedFileIds.includes(file.id)) attachedFileIds.push(file.id);
+      }
+      syncDraftToConversation();
+      saveState();
+      render();
+    });
+  }
+}
+
+window.addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (!files.length) return;
+  e.preventDefault();
+  state.ui.filePanelOpen = true;
+  uploadFiles(files);
+});
+
+function scrollTranscript(options = {}) {
+  requestAnimationFrame(() => {
+    const el = $("#transcript");
+    if (!el) return;
+    if (options.onlyIfNearBottom) {
+      const bottomGap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (bottomGap > 160) return;
+    }
+    el.scrollTop = el.scrollHeight;
+  });
+}
+
+window.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openCommandPalette();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") {
+    e.preventDefault();
+    $("#draftInput")?.focus();
+  } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    $("#transcriptSearch")?.focus();
+  } else if ((e.ctrlKey || e.metaKey) && e.key === ".") {
+    e.preventDefault();
+    state.settings.workflowOpen = state.settings.workflowOpen === false;
+    saveState();
+    render();
+  } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b") {
+    e.preventDefault();
+    state.settings.sidebarOpen = state.settings.sidebarOpen === false;
+    saveState();
+    render();
+  } else if (e.key === "Escape") {
+    state.ui.filePanelOpen = false;
+    state.ui.projectPanelOpen = false;
+    state.ui.settingsOpen = false;
+    state.ui.previewOpen = false;
+    state.ui.selectedNodeId = "";
+    saveState();
+    render();
+  }
+});
+
+window.addEventListener("pointerup", () => {
+  if (!workflowPointerActive) return;
+  workflowPointerActive = false;
+  workflowLastScrollSnapshot = workflowScrollSnapshot();
+}, { passive: true });
+
+window.addEventListener("pointercancel", () => {
+  if (!workflowPointerActive) return;
+  workflowPointerActive = false;
+  workflowLastScrollSnapshot = workflowScrollSnapshot();
+}, { passive: true });
+
+document.addEventListener("pointerover", (event) => {
+  const target = event.target.closest?.("button[data-tooltip]");
+  if (target) showButtonTooltip(target);
+});
+
+document.addEventListener("pointerout", (event) => {
+  const target = event.target.closest?.("button[data-tooltip]");
+  if (target) hideButtonTooltip(target);
+});
+
+document.addEventListener("focusin", (event) => {
+  const target = event.target.closest?.("button[data-tooltip]");
+  if (target) showButtonTooltip(target);
+});
+
+document.addEventListener("focusout", (event) => {
+  const target = event.target.closest?.("button[data-tooltip]");
+  if (target) hideButtonTooltip(target);
+});
+
+window.addEventListener("scroll", () => {
+  if (tooltipTarget) positionTooltip(tooltipTarget);
+}, true);
+
+window.addEventListener("resize", () => {
+  if (tooltipTarget) positionTooltip(tooltipTarget);
+});
+
+window.addEventListener("beforeunload", stopMonitor);
+
+async function boot() {
+  if (!window.name) window.name = uid("window");
+  await applyMaintenanceCleanupMarker();
+  loadDraftFromConversation();
+  setupStateBroadcast();
+  render();
+  await hydrateFromIndexedDb();
+  await recoverFromBackend();
+}
+
+boot();
+

@@ -1,4 +1,4 @@
-const STORAGE_KEY = "bot-agent-state-v2";
+﻿const STORAGE_KEY = "bot-agent-state-v2";
 const DB_NAME = "bot-agent-frontend";
 const DB_STORE = "kv";
 const DB_VERSION = 1;
@@ -11,51 +11,51 @@ const DEFAULT_MAX_WORKFLOW_RUNS = 80;
 const PROMPT_TEMPLATES = [
   {
     id: "project_scan",
-    group: "工程",
-    title: "梳理工程",
-    text: "请先快速梳理当前项目结构、关键入口、运行方式和潜在风险，给出简明结论和下一步建议。",
+    group: "宸ョ▼",
+    title: "姊崇悊宸ョ▼",
+    text: "璇峰厛蹇€熸⒊鐞嗗綋鍓嶉」鐩粨鏋勩€佸叧閿叆鍙ｃ€佽繍琛屾柟寮忓拰娼滃湪椋庨櫓锛岀粰鍑虹畝鏄庣粨璁哄拰涓嬩竴姝ュ缓璁€?,
   },
   {
     id: "project_tests",
-    group: "工程",
-    title: "运行测试",
-    text: "请检查当前项目可用的测试/构建命令，选择合适的最小验证集运行，并根据结果修复显著问题。",
+    group: "宸ョ▼",
+    title: "杩愯娴嬭瘯",
+    text: "璇锋鏌ュ綋鍓嶉」鐩彲鐢ㄧ殑娴嬭瘯/鏋勫缓鍛戒护锛岄€夋嫨鍚堥€傜殑鏈€灏忛獙璇侀泦杩愯锛屽苟鏍规嵁缁撴灉淇鏄捐憲闂銆?,
   },
   {
     id: "project_diff",
-    group: "工程",
-    title: "检查改动",
-    text: "请检查当前项目最近改动，重点找行为回归、遗漏测试、死代码和可以低风险优化的点。",
+    group: "宸ョ▼",
+    title: "妫€鏌ユ敼鍔?,
+    text: "璇锋鏌ュ綋鍓嶉」鐩渶杩戞敼鍔紝閲嶇偣鎵捐涓哄洖褰掋€侀仐婕忔祴璇曘€佹浠ｇ爜鍜屽彲浠ヤ綆椋庨櫓浼樺寲鐨勭偣銆?,
   },
   {
     id: "continue_task",
-    group: "工程",
-    title: "继续任务",
-    text: "请基于当前对话和项目状态继续推进未完成任务，先确认当前进度，再完成下一步并验证。",
+    group: "宸ョ▼",
+    title: "缁х画浠诲姟",
+    text: "璇峰熀浜庡綋鍓嶅璇濆拰椤圭洰鐘舵€佺户缁帹杩涙湭瀹屾垚浠诲姟锛屽厛纭褰撳墠杩涘害锛屽啀瀹屾垚涓嬩竴姝ュ苟楠岃瘉銆?,
   },
   {
     id: "file_summary",
-    group: "文件",
-    title: "分析附件",
-    text: "请分析本轮附加的 bot 文件区文件，提取关键信息、异常点和可执行建议。",
+    group: "鏂囦欢",
+    title: "鍒嗘瀽闄勪欢",
+    text: "璇峰垎鏋愭湰杞檮鍔犵殑 bot 鏂囦欢鍖烘枃浠讹紝鎻愬彇鍏抽敭淇℃伅銆佸紓甯哥偣鍜屽彲鎵ц寤鸿銆?,
   },
   {
     id: "report",
-    group: "文件",
-    title: "生成报告",
-    text: "请基于当前材料生成一份结构清晰的报告，区分事实、推断、风险和建议。",
+    group: "鏂囦欢",
+    title: "鐢熸垚鎶ュ憡",
+    text: "璇峰熀浜庡綋鍓嶆潗鏂欑敓鎴愪竴浠界粨鏋勬竻鏅扮殑鎶ュ憡锛屽尯鍒嗕簨瀹炪€佹帹鏂€侀闄╁拰寤鸿銆?,
   },
   {
     id: "chat_summary",
-    group: "对话",
-    title: "总结上下文",
-    text: "请总结当前对话中已经确定的结论、待办事项、阻塞点和下一步优先级。",
+    group: "瀵硅瘽",
+    title: "鎬荤粨涓婁笅鏂?,
+    text: "璇锋€荤粨褰撳墠瀵硅瘽涓凡缁忕‘瀹氱殑缁撹銆佸緟鍔炰簨椤广€侀樆濉炵偣鍜屼笅涓€姝ヤ紭鍏堢骇銆?,
   },
   {
     id: "ask_precise",
-    group: "对话",
-    title: "精确回答",
-    text: "请直接回答上一个问题，优先给结论，再列必要依据；不展开无关背景。",
+    group: "瀵硅瘽",
+    title: "绮剧‘鍥炵瓟",
+    text: "璇风洿鎺ュ洖绛斾笂涓€涓棶棰橈紝浼樺厛缁欑粨璁猴紝鍐嶅垪蹇呰渚濇嵁锛涗笉灞曞紑鏃犲叧鑳屾櫙銆?,
   },
 ];
 
@@ -137,8 +137,6 @@ let workflowPointerActive = false;
 let transcriptLastScrollSnapshot = null;
 let tooltipEl = null;
 let tooltipTarget = null;
-let activeDialog = null;
-let activeDialogResolve = null;
 const sendingArchiveIds = new Set();
 
 const $ = (selector) => document.querySelector(selector);
@@ -265,87 +263,87 @@ function escapeHtml(value) {
 }
 
 const BUTTON_TOOLTIPS = {
-  newAccountBtn: "新建一个本地账号。账号用于隔离存档、文件区、对话状态和项目目录配置。",
-  renameAccountBtn: "修改当前本地账号显示名。只影响前端显示，不改变后端用户标识。",
-  deleteAccountBtn: "删除当前账号在本前端保存的本地状态。会移除该账号下的本地存档和对话记录。",
-  newArchiveBtn: "为当前账号新建一个存档。每个存档可以绑定一个项目目录，也可以留空作为普通 bot 对话。",
-  duplicateTabBtn: "复制当前存档为新的本地对话窗口，用于并行维护同一项目的不同任务线。",
-  toggleSidebarBtn: "显示或隐藏左侧栏。左侧栏包含账号、存档列表、对话搜索和本地状态。",
-  toggleWorkflowBtn: "显示或隐藏右侧工作流面板。工作流面板展示主进程、helper、工具调用和命令进度。",
-  recoverBtn: "从后端恢复当前账号/存档的项目映射、活跃任务和最近监控事件。",
-  syncArchiveBtn: "把当前存档与后端 archive/group/project 映射同步，确保前端和后端指向同一会话。",
-  renameArchiveBtn: "修改当前存档标题。只改变前端显示名称，不影响项目目录。",
-  editDirBtn: "设置或清空当前存档绑定的项目目录。目录为空时作为普通 bot 对话使用。",
-  pinArchiveBtn: "固定或取消固定当前存档。固定存档会在左侧存档列表中靠前显示。",
-  archiveArchiveBtn: "归档或取消归档当前存档。归档后默认隐藏，可在存档搜索中输入 archived 查看。",
-  projectPanelBtn: "打开项目目录面板。可查看目录树、搜索项目文件、预览文件、运行命令和查看 diff。",
-  filePanelBtn: "打开 bot 文件区。这里管理上传给 bot 的输入文件，可附加到消息、预览、下载或删除。",
-  artifactPanelBtn: "打开 bot 产物区。这里显示 bot 生成并可下载的报告、图片、音频、压缩包等产物。",
-  settingsBtn: "打开前端设置。可配置后端地址、监控流、队列、自动继续、字号和本地数据导入导出。",
-  abortBtn: "请求中断当前正在运行的任务。会保留现有对话、队列和已产生的工作流记录。",
-  abortClearBtn: "请求中断当前任务并清空当前窗口本地队列。适合要立即停止后续自动任务时使用。",
-  uploadBtn: "选择文件上传到 bot 文件区。上传后可在本次消息发送前附加或撤回。",
-  clearDraftBtn: "清空当前输入框内容，并撤回本次消息尚未发送的附件。",
-  queueBtn: "把当前输入加入当前存档的本地队列。队列自动开启时会在当前任务结束后继续发送。",
-  insertBtn: "在当前任务运行中插入一条用户输入，进入中途介入流程；任务结束后按设置决定是否继续下一轮。",
-  paletteBtn: "打开命令面板，快速填入常用工程、文件或对话任务模板。快捷键 Ctrl+K。",
-  toggleQueueAutoBtn: "切换当前对话队列的自动执行状态。自动时任务结束后继续发送下一条队列消息。",
-  sendBtn: "发送当前输入和已附加文件。Enter 也会发送，Shift+Enter 换行。",
-  exportWorkflowJsonBtn: "导出当前工作流原始 JSON，便于调试、复盘或提交问题。",
-  exportWorkflowMdBtn: "导出当前工作流 Markdown 摘要，便于阅读和分享。",
-  refreshRunBtn: "按当前 trace 从后端刷新最近监控历史，补回断线或页面刷新期间的工作流事件。",
-  refreshFilesBtn: "刷新 bot 文件区列表和上传状态。",
-  closeFilePanelBtn: "关闭 bot 文件区面板。",
-  refreshArtifactsBtn: "刷新 bot 产物区列表，只显示 bot 推送或生成的可交付文件。",
-  closeArtifactPanelBtn: "关闭 bot 产物区面板。",
-  refreshProjectTreeBtn: "刷新当前项目目录树。使用上方相对目录作为浏览起点。",
-  closeProjectPanelBtn: "关闭项目目录面板。",
-  projectSearchBtn: "在绑定项目目录中搜索文件内容或路径，结果可点击预览。",
-  projectRunBtn: "在绑定项目目录中运行命令。命令会经过后端风险策略处理。",
-  projectDiffBtn: "读取指定项目文件的 diff；可选填写对比文件。",
-  projectDiffExplainBtn: "把当前 diff 内容填入输入框，请 bot 解释改动、风险和验证建议。",
-  closeSettingsBtn: "关闭设置面板。",
-  saveSettingsBtn: "保存当前前端设置，并立即应用后端地址、监控、队列、字号等配置。",
-  clearTranscriptBtn: "清空当前存档的本地 transcript 显示记录。不会删除后端记忆或文件。",
-  exportBtn: "把当前 transcript 导出为 Markdown 文件。",
-  exportStateBtn: "导出整个前端本地状态 JSON，便于备份或迁移。",
-  importStateBtn: "从 JSON 导入前端本地状态，会覆盖当前本地状态。",
-  cleanupBtn: "清理前端本地缓存和过期状态，保留必要配置。",
-  deleteArchiveBtn: "删除当前本地存档及其前端状态。不会直接删除真实项目目录。",
-  closePreviewBtn: "关闭文件预览面板。",
-  closeNodeDetailsBtn: "关闭工作流节点详情面板。",
+  newAccountBtn: "鏂板缓涓€涓湰鍦拌处鍙枫€傝处鍙风敤浜庨殧绂诲瓨妗ｃ€佹枃浠跺尯銆佸璇濈姸鎬佸拰椤圭洰鐩綍閰嶇疆銆?,
+  renameAccountBtn: "淇敼褰撳墠鏈湴璐﹀彿鏄剧ず鍚嶃€傚彧褰卞搷鍓嶇鏄剧ず锛屼笉鏀瑰彉鍚庣鐢ㄦ埛鏍囪瘑銆?,
+  deleteAccountBtn: "鍒犻櫎褰撳墠璐﹀彿鍦ㄦ湰鍓嶇淇濆瓨鐨勬湰鍦扮姸鎬併€備細绉婚櫎璇ヨ处鍙蜂笅鐨勬湰鍦板瓨妗ｅ拰瀵硅瘽璁板綍銆?,
+  newArchiveBtn: "涓哄綋鍓嶈处鍙锋柊寤轰竴涓瓨妗ｃ€傛瘡涓瓨妗ｅ彲浠ョ粦瀹氫竴涓」鐩洰褰曪紝涔熷彲浠ョ暀绌轰綔涓烘櫘閫?bot 瀵硅瘽銆?,
+  duplicateTabBtn: "澶嶅埗褰撳墠瀛樻。涓烘柊鐨勬湰鍦板璇濈獥鍙ｏ紝鐢ㄤ簬骞惰缁存姢鍚屼竴椤圭洰鐨勪笉鍚屼换鍔＄嚎銆?,
+  toggleSidebarBtn: "鏄剧ず鎴栭殣钘忓乏渚ф爮銆傚乏渚ф爮鍖呭惈璐﹀彿銆佸瓨妗ｅ垪琛ㄣ€佸璇濇悳绱㈠拰鏈湴鐘舵€併€?,
+  toggleWorkflowBtn: "鏄剧ず鎴栭殣钘忓彸渚у伐浣滄祦闈㈡澘銆傚伐浣滄祦闈㈡澘灞曠ず涓昏繘绋嬨€乭elper銆佸伐鍏疯皟鐢ㄥ拰鍛戒护杩涘害銆?,
+  recoverBtn: "浠庡悗绔仮澶嶅綋鍓嶈处鍙?瀛樻。鐨勯」鐩槧灏勩€佹椿璺冧换鍔″拰鏈€杩戠洃鎺т簨浠躲€?,
+  syncArchiveBtn: "鎶婂綋鍓嶅瓨妗ｄ笌鍚庣 archive/group/project 鏄犲皠鍚屾锛岀‘淇濆墠绔拰鍚庣鎸囧悜鍚屼竴浼氳瘽銆?,
+  renameArchiveBtn: "淇敼褰撳墠瀛樻。鏍囬銆傚彧鏀瑰彉鍓嶇鏄剧ず鍚嶇О锛屼笉褰卞搷椤圭洰鐩綍銆?,
+  editDirBtn: "璁剧疆鎴栨竻绌哄綋鍓嶅瓨妗ｇ粦瀹氱殑椤圭洰鐩綍銆傜洰褰曚负绌烘椂浣滀负鏅€?bot 瀵硅瘽浣跨敤銆?,
+  pinArchiveBtn: "鍥哄畾鎴栧彇娑堝浐瀹氬綋鍓嶅瓨妗ｃ€傚浐瀹氬瓨妗ｄ細鍦ㄥ乏渚у瓨妗ｅ垪琛ㄤ腑闈犲墠鏄剧ず銆?,
+  archiveArchiveBtn: "褰掓。鎴栧彇娑堝綊妗ｅ綋鍓嶅瓨妗ｃ€傚綊妗ｅ悗榛樿闅愯棌锛屽彲鍦ㄥ瓨妗ｆ悳绱腑杈撳叆 archived 鏌ョ湅銆?,
+  projectPanelBtn: "鎵撳紑椤圭洰鐩綍闈㈡澘銆傚彲鏌ョ湅鐩綍鏍戙€佹悳绱㈤」鐩枃浠躲€侀瑙堟枃浠躲€佽繍琛屽懡浠ゅ拰鏌ョ湅 diff銆?,
+  filePanelBtn: "鎵撳紑 bot 鏂囦欢鍖恒€傝繖閲岀鐞嗕笂浼犵粰 bot 鐨勮緭鍏ユ枃浠讹紝鍙檮鍔犲埌娑堟伅銆侀瑙堛€佷笅杞芥垨鍒犻櫎銆?,
+  artifactPanelBtn: "鎵撳紑 bot 浜х墿鍖恒€傝繖閲屾樉绀?bot 鐢熸垚骞跺彲涓嬭浇鐨勬姤鍛娿€佸浘鐗囥€侀煶棰戙€佸帇缂╁寘绛変骇鐗┿€?,
+  settingsBtn: "鎵撳紑鍓嶇璁剧疆銆傚彲閰嶇疆鍚庣鍦板潃銆佺洃鎺ф祦銆侀槦鍒椼€佽嚜鍔ㄧ户缁€佸瓧鍙峰拰鏈湴鏁版嵁瀵煎叆瀵煎嚭銆?,
+  abortBtn: "璇锋眰涓柇褰撳墠姝ｅ湪杩愯鐨勪换鍔°€備細淇濈暀鐜版湁瀵硅瘽銆侀槦鍒楀拰宸蹭骇鐢熺殑宸ヤ綔娴佽褰曘€?,
+  abortClearBtn: "璇锋眰涓柇褰撳墠浠诲姟骞舵竻绌哄綋鍓嶇獥鍙ｆ湰鍦伴槦鍒椼€傞€傚悎瑕佺珛鍗冲仠姝㈠悗缁嚜鍔ㄤ换鍔℃椂浣跨敤銆?,
+  uploadBtn: "閫夋嫨鏂囦欢涓婁紶鍒?bot 鏂囦欢鍖恒€備笂浼犲悗鍙湪鏈娑堟伅鍙戦€佸墠闄勫姞鎴栨挙鍥炪€?,
+  clearDraftBtn: "娓呯┖褰撳墠杈撳叆妗嗗唴瀹癸紝骞舵挙鍥炴湰娆℃秷鎭皻鏈彂閫佺殑闄勪欢銆?,
+  queueBtn: "鎶婂綋鍓嶈緭鍏ュ姞鍏ュ綋鍓嶅瓨妗ｇ殑鏈湴闃熷垪銆傞槦鍒楄嚜鍔ㄥ紑鍚椂浼氬湪褰撳墠浠诲姟缁撴潫鍚庣户缁彂閫併€?,
+  insertBtn: "鍦ㄥ綋鍓嶄换鍔¤繍琛屼腑鎻掑叆涓€鏉＄敤鎴疯緭鍏ワ紝杩涘叆涓€斾粙鍏ユ祦绋嬶紱浠诲姟缁撴潫鍚庢寜璁剧疆鍐冲畾鏄惁缁х画涓嬩竴杞€?,
+  paletteBtn: "鎵撳紑鍛戒护闈㈡澘锛屽揩閫熷～鍏ュ父鐢ㄥ伐绋嬨€佹枃浠舵垨瀵硅瘽浠诲姟妯℃澘銆傚揩鎹烽敭 Ctrl+K銆?,
+  toggleQueueAutoBtn: "鍒囨崲褰撳墠瀵硅瘽闃熷垪鐨勮嚜鍔ㄦ墽琛岀姸鎬併€傝嚜鍔ㄦ椂浠诲姟缁撴潫鍚庣户缁彂閫佷笅涓€鏉￠槦鍒楁秷鎭€?,
+  sendBtn: "鍙戦€佸綋鍓嶈緭鍏ュ拰宸查檮鍔犳枃浠躲€侲nter 涔熶細鍙戦€侊紝Shift+Enter 鎹㈣銆?,
+  exportWorkflowJsonBtn: "瀵煎嚭褰撳墠宸ヤ綔娴佸師濮?JSON锛屼究浜庤皟璇曘€佸鐩樻垨鎻愪氦闂銆?,
+  exportWorkflowMdBtn: "瀵煎嚭褰撳墠宸ヤ綔娴?Markdown 鎽樿锛屼究浜庨槄璇诲拰鍒嗕韩銆?,
+  refreshRunBtn: "鎸夊綋鍓?trace 浠庡悗绔埛鏂版渶杩戠洃鎺у巻鍙诧紝琛ュ洖鏂嚎鎴栭〉闈㈠埛鏂版湡闂寸殑宸ヤ綔娴佷簨浠躲€?,
+  refreshFilesBtn: "鍒锋柊 bot 鏂囦欢鍖哄垪琛ㄥ拰涓婁紶鐘舵€併€?,
+  closeFilePanelBtn: "鍏抽棴 bot 鏂囦欢鍖洪潰鏉裤€?,
+  refreshArtifactsBtn: "鍒锋柊 bot 浜х墿鍖哄垪琛紝鍙樉绀?bot 鎺ㄩ€佹垨鐢熸垚鐨勫彲浜や粯鏂囦欢銆?,
+  closeArtifactPanelBtn: "鍏抽棴 bot 浜х墿鍖洪潰鏉裤€?,
+  refreshProjectTreeBtn: "鍒锋柊褰撳墠椤圭洰鐩綍鏍戙€備娇鐢ㄤ笂鏂圭浉瀵圭洰褰曚綔涓烘祻瑙堣捣鐐广€?,
+  closeProjectPanelBtn: "鍏抽棴椤圭洰鐩綍闈㈡澘銆?,
+  projectSearchBtn: "鍦ㄧ粦瀹氶」鐩洰褰曚腑鎼滅储鏂囦欢鍐呭鎴栬矾寰勶紝缁撴灉鍙偣鍑婚瑙堛€?,
+  projectRunBtn: "鍦ㄧ粦瀹氶」鐩洰褰曚腑杩愯鍛戒护銆傚懡浠や細缁忚繃鍚庣椋庨櫓绛栫暐澶勭悊銆?,
+  projectDiffBtn: "璇诲彇鎸囧畾椤圭洰鏂囦欢鐨?diff锛涘彲閫夊～鍐欏姣旀枃浠躲€?,
+  projectDiffExplainBtn: "鎶婂綋鍓?diff 鍐呭濉叆杈撳叆妗嗭紝璇?bot 瑙ｉ噴鏀瑰姩銆侀闄╁拰楠岃瘉寤鸿銆?,
+  closeSettingsBtn: "鍏抽棴璁剧疆闈㈡澘銆?,
+  saveSettingsBtn: "淇濆瓨褰撳墠鍓嶇璁剧疆锛屽苟绔嬪嵆搴旂敤鍚庣鍦板潃銆佺洃鎺с€侀槦鍒椼€佸瓧鍙风瓑閰嶇疆銆?,
+  clearTranscriptBtn: "娓呯┖褰撳墠瀛樻。鐨勬湰鍦?transcript 鏄剧ず璁板綍銆備笉浼氬垹闄ゅ悗绔蹇嗘垨鏂囦欢銆?,
+  exportBtn: "鎶婂綋鍓?transcript 瀵煎嚭涓?Markdown 鏂囦欢銆?,
+  exportStateBtn: "瀵煎嚭鏁翠釜鍓嶇鏈湴鐘舵€?JSON锛屼究浜庡浠芥垨杩佺Щ銆?,
+  importStateBtn: "浠?JSON 瀵煎叆鍓嶇鏈湴鐘舵€侊紝浼氳鐩栧綋鍓嶆湰鍦扮姸鎬併€?,
+  cleanupBtn: "娓呯悊鍓嶇鏈湴缂撳瓨鍜岃繃鏈熺姸鎬侊紝淇濈暀蹇呰閰嶇疆銆?,
+  deleteArchiveBtn: "鍒犻櫎褰撳墠鏈湴瀛樻。鍙婂叾鍓嶇鐘舵€併€備笉浼氱洿鎺ュ垹闄ょ湡瀹為」鐩洰褰曘€?,
+  closePreviewBtn: "鍏抽棴鏂囦欢棰勮闈㈡澘銆?,
+  closeNodeDetailsBtn: "鍏抽棴宸ヤ綔娴佽妭鐐硅鎯呴潰鏉裤€?,
 };
 
 const BUTTON_TEXT_TOOLTIPS = {
-  "新建": "新建当前区域对应的对象，例如账号或存档。",
-  "改名": "修改当前选中对象的显示名称。",
-  "删除": "删除当前条目。删除前会按场景进行确认。",
-  "关闭": "关闭当前面板、通知或详情视图。",
-  "刷新": "重新从后端或本地状态读取最新内容。",
-  "预览": "在右侧预览面板打开该文件；支持文本、图片、PDF、音频和视频等常见类型。",
-  "下载": "在浏览器中打开或下载该文件。",
-  "复制": "复制当前代码块内容到剪贴板。",
-  "复制 URL": "复制该文件的后端下载地址到剪贴板。",
-  "复制路径": "复制该文件在工作区或项目中的路径。",
-  "附加": "把该文件附加到下一条将发送给 bot 的消息。",
-  "总结": "把该文件加入输入框，请 bot 总结内容和要点。",
-  "提取": "把该文件加入输入框，请 bot 提取结构化内容或关键文字。",
-  "报告": "把该文件加入输入框，请 bot 基于文件生成报告。",
-  "搜索": "执行当前输入的搜索。",
-  "运行": "执行当前输入的命令。",
-  "Diff": "查看当前文件路径对应的差异内容。",
-  "解释 diff": "把当前 diff 交给 bot 分析。",
-  "详细": "切换到详细工作流视图，按主进程和 helper 分层展示事件。",
-  "简洁": "切换到简洁工作流视图，每行显示最新动作和状态。",
-  "展开": "展开当前工作流节点，查看子步骤、进度或流式内容。",
-  "收起": "收起当前工作流节点，减少工作流面板占用空间。",
-  "发送": "按当前发送模式提交输入。",
-  "队列自动": "当前队列会在任务结束后自动继续发送下一条。",
-  "队列手动": "当前队列不会自动继续，需要手动发送或切回自动。",
-  "清空": "清空当前列表或队列内容。",
-  "上移": "把该队列项向前移动，优先执行。",
-  "下移": "把该队列项向后移动，降低执行优先级。",
-  "编辑": "编辑该队列项内容。",
+  "鏂板缓": "鏂板缓褰撳墠鍖哄煙瀵瑰簲鐨勫璞★紝渚嬪璐﹀彿鎴栧瓨妗ｃ€?,
+  "鏀瑰悕": "淇敼褰撳墠閫変腑瀵硅薄鐨勬樉绀哄悕绉般€?,
+  "鍒犻櫎": "鍒犻櫎褰撳墠鏉＄洰銆傚垹闄ゅ墠浼氭寜鍦烘櫙杩涜纭銆?,
+  "鍏抽棴": "鍏抽棴褰撳墠闈㈡澘銆侀€氱煡鎴栬鎯呰鍥俱€?,
+  "鍒锋柊": "閲嶆柊浠庡悗绔垨鏈湴鐘舵€佽鍙栨渶鏂板唴瀹广€?,
+  "棰勮": "鍦ㄥ彸渚ч瑙堥潰鏉挎墦寮€璇ユ枃浠讹紱鏀寔鏂囨湰銆佸浘鐗囥€丳DF銆侀煶棰戝拰瑙嗛绛夊父瑙佺被鍨嬨€?,
+  "涓嬭浇": "鍦ㄦ祻瑙堝櫒涓墦寮€鎴栦笅杞借鏂囦欢銆?,
+  "澶嶅埗": "澶嶅埗褰撳墠浠ｇ爜鍧楀唴瀹瑰埌鍓创鏉裤€?,
+  "澶嶅埗 URL": "澶嶅埗璇ユ枃浠剁殑鍚庣涓嬭浇鍦板潃鍒板壀璐存澘銆?,
+  "澶嶅埗璺緞": "澶嶅埗璇ユ枃浠跺湪宸ヤ綔鍖烘垨椤圭洰涓殑璺緞銆?,
+  "闄勫姞": "鎶婅鏂囦欢闄勫姞鍒颁笅涓€鏉″皢鍙戦€佺粰 bot 鐨勬秷鎭€?,
+  "鎬荤粨": "鎶婅鏂囦欢鍔犲叆杈撳叆妗嗭紝璇?bot 鎬荤粨鍐呭鍜岃鐐广€?,
+  "鎻愬彇": "鎶婅鏂囦欢鍔犲叆杈撳叆妗嗭紝璇?bot 鎻愬彇缁撴瀯鍖栧唴瀹规垨鍏抽敭鏂囧瓧銆?,
+  "鎶ュ憡": "鎶婅鏂囦欢鍔犲叆杈撳叆妗嗭紝璇?bot 鍩轰簬鏂囦欢鐢熸垚鎶ュ憡銆?,
+  "鎼滅储": "鎵ц褰撳墠杈撳叆鐨勬悳绱€?,
+  "杩愯": "鎵ц褰撳墠杈撳叆鐨勫懡浠ゃ€?,
+  "Diff": "鏌ョ湅褰撳墠鏂囦欢璺緞瀵瑰簲鐨勫樊寮傚唴瀹广€?,
+  "瑙ｉ噴 diff": "鎶婂綋鍓?diff 浜ょ粰 bot 鍒嗘瀽銆?,
+  "璇︾粏": "鍒囨崲鍒拌缁嗗伐浣滄祦瑙嗗浘锛屾寜涓昏繘绋嬪拰 helper 鍒嗗眰灞曠ず浜嬩欢銆?,
+  "绠€娲?: "鍒囨崲鍒扮畝娲佸伐浣滄祦瑙嗗浘锛屾瘡琛屾樉绀烘渶鏂板姩浣滃拰鐘舵€併€?,
+  "灞曞紑": "灞曞紑褰撳墠宸ヤ綔娴佽妭鐐癸紝鏌ョ湅瀛愭楠ゃ€佽繘搴︽垨娴佸紡鍐呭銆?,
+  "鏀惰捣": "鏀惰捣褰撳墠宸ヤ綔娴佽妭鐐癸紝鍑忓皯宸ヤ綔娴侀潰鏉垮崰鐢ㄧ┖闂淬€?,
+  "鍙戦€?: "鎸夊綋鍓嶅彂閫佹ā寮忔彁浜よ緭鍏ャ€?,
+  "闃熷垪鑷姩": "褰撳墠闃熷垪浼氬湪浠诲姟缁撴潫鍚庤嚜鍔ㄧ户缁彂閫佷笅涓€鏉°€?,
+  "闃熷垪鎵嬪姩": "褰撳墠闃熷垪涓嶄細鑷姩缁х画锛岄渶瑕佹墜鍔ㄥ彂閫佹垨鍒囧洖鑷姩銆?,
+  "娓呯┖": "娓呯┖褰撳墠鍒楄〃鎴栭槦鍒楀唴瀹广€?,
+  "涓婄Щ": "鎶婅闃熷垪椤瑰悜鍓嶇Щ鍔紝浼樺厛鎵ц銆?,
+  "涓嬬Щ": "鎶婅闃熷垪椤瑰悜鍚庣Щ鍔紝闄嶄綆鎵ц浼樺厛绾с€?,
+  "缂栬緫": "缂栬緫璇ラ槦鍒楅」鍐呭銆?,
 };
 
 function buttonTooltip(el) {
@@ -354,36 +352,36 @@ function buttonTooltip(el) {
   const text = (el.textContent || "").replace(/\s+/g, " ").trim();
   if (el.dataset.templateId) {
     const item = PROMPT_TEMPLATES.find((tpl) => tpl.id === el.dataset.templateId);
-    return item ? `左键填入输入框；右键加入队列。\n\n模板内容：${item.text}` : "快捷任务模板。左键填入输入框，右键加入队列。";
+    return item ? `宸﹂敭濉叆杈撳叆妗嗭紱鍙抽敭鍔犲叆闃熷垪銆俓n\n妯℃澘鍐呭锛?{item.text}` : "蹇嵎浠诲姟妯℃澘銆傚乏閿～鍏ヨ緭鍏ユ锛屽彸閿姞鍏ラ槦鍒椼€?;
   }
-  if (el.dataset.dismissNotice) return "关闭这条前端通知。";
-  if (el.dataset.detachFile) return "从本次待发送消息中撤回这个附件；不会删除文件区中的原文件。";
-  if (el.dataset.clearQueue) return "清空当前对话的本地消息队列。";
-  if (el.dataset.moveQueue) return el.dataset.dir === "-1" ? "把这条队列消息上移一位。" : "把这条队列消息下移一位。";
-  if (el.dataset.editQueue) return "编辑这条队列消息的文本。";
-  if (el.dataset.removeQueue) return "从当前队列中删除这条尚未发送的消息。";
+  if (el.dataset.dismissNotice) return "鍏抽棴杩欐潯鍓嶇閫氱煡銆?;
+  if (el.dataset.detachFile) return "浠庢湰娆″緟鍙戦€佹秷鎭腑鎾ゅ洖杩欎釜闄勪欢锛涗笉浼氬垹闄ゆ枃浠跺尯涓殑鍘熸枃浠躲€?;
+  if (el.dataset.clearQueue) return "娓呯┖褰撳墠瀵硅瘽鐨勬湰鍦版秷鎭槦鍒椼€?;
+  if (el.dataset.moveQueue) return el.dataset.dir === "-1" ? "鎶婅繖鏉￠槦鍒楁秷鎭笂绉讳竴浣嶃€? : "鎶婅繖鏉￠槦鍒楁秷鎭笅绉讳竴浣嶃€?;
+  if (el.dataset.editQueue) return "缂栬緫杩欐潯闃熷垪娑堟伅鐨勬枃鏈€?;
+  if (el.dataset.removeQueue) return "浠庡綋鍓嶉槦鍒椾腑鍒犻櫎杩欐潯灏氭湭鍙戦€佺殑娑堟伅銆?;
   if (el.dataset.workflowView) return el.dataset.workflowView === "compact"
-    ? "切换到简洁工作流视图，只按时间显示一行一条的最新动作。"
-    : "切换到详细工作流视图，按主进程和 helper 分层展示事件。";
-  if (el.dataset.toggleNode) return text === "收起"
-    ? "收起当前工作流节点的详情和子步骤。"
-    : "展开当前工作流节点的详情、子步骤和流式内容。";
-  if (el.dataset.copyCode !== undefined) return "复制这个代码块的全部内容到剪贴板。";
-  if (el.dataset.attachFile) return "把该文件加入当前输入的附件列表，随下一条消息发送给 bot。";
-  if (el.dataset.previewFile) return "在预览面板打开该文件。";
-  if (el.dataset.downloadFile) return "打开该文件的下载地址。";
-  if (el.dataset.copyFilePath) return "复制该文件在 bot 文件区中的工作区路径。";
-  if (el.dataset.copyFileUrl) return "复制该文件的下载 URL。";
-  if (el.dataset.fileAction === "summary") return "把这个文件生成“总结文件内容”的请求填入输入框。";
-  if (el.dataset.fileAction === "extract") return "把这个文件生成“提取关键内容”的请求填入输入框。";
-  if (el.dataset.fileAction === "report") return "把这个文件生成“写报告”的请求填入输入框。";
-  if (el.dataset.deleteFile) return "从 bot 文件区删除这个文件记录和可管理文件。";
-  if (el.dataset.previewArtifact) return "在预览面板打开这个 bot 生成产物。";
-  if (el.dataset.downloadArtifact) return "打开这个 bot 生成产物的下载地址。";
-  if (el.dataset.copyArtifactUrl) return "复制这个产物的下载 URL。";
-  if (el.dataset.copyArtifactPath) return "复制这个产物在工作区中的路径。";
+    ? "鍒囨崲鍒扮畝娲佸伐浣滄祦瑙嗗浘锛屽彧鎸夋椂闂存樉绀轰竴琛屼竴鏉＄殑鏈€鏂板姩浣溿€?
+    : "鍒囨崲鍒拌缁嗗伐浣滄祦瑙嗗浘锛屾寜涓昏繘绋嬪拰 helper 鍒嗗眰灞曠ず浜嬩欢銆?;
+  if (el.dataset.toggleNode) return text === "鏀惰捣"
+    ? "鏀惰捣褰撳墠宸ヤ綔娴佽妭鐐圭殑璇︽儏鍜屽瓙姝ラ銆?
+    : "灞曞紑褰撳墠宸ヤ綔娴佽妭鐐圭殑璇︽儏銆佸瓙姝ラ鍜屾祦寮忓唴瀹广€?;
+  if (el.dataset.copyCode !== undefined) return "澶嶅埗杩欎釜浠ｇ爜鍧楃殑鍏ㄩ儴鍐呭鍒板壀璐存澘銆?;
+  if (el.dataset.attachFile) return "鎶婅鏂囦欢鍔犲叆褰撳墠杈撳叆鐨勯檮浠跺垪琛紝闅忎笅涓€鏉℃秷鎭彂閫佺粰 bot銆?;
+  if (el.dataset.previewFile) return "鍦ㄩ瑙堥潰鏉挎墦寮€璇ユ枃浠躲€?;
+  if (el.dataset.downloadFile) return "鎵撳紑璇ユ枃浠剁殑涓嬭浇鍦板潃銆?;
+  if (el.dataset.copyFilePath) return "澶嶅埗璇ユ枃浠跺湪 bot 鏂囦欢鍖轰腑鐨勫伐浣滃尯璺緞銆?;
+  if (el.dataset.copyFileUrl) return "澶嶅埗璇ユ枃浠剁殑涓嬭浇 URL銆?;
+  if (el.dataset.fileAction === "summary") return "鎶婅繖涓枃浠剁敓鎴愨€滄€荤粨鏂囦欢鍐呭鈥濈殑璇锋眰濉叆杈撳叆妗嗐€?;
+  if (el.dataset.fileAction === "extract") return "鎶婅繖涓枃浠剁敓鎴愨€滄彁鍙栧叧閿唴瀹光€濈殑璇锋眰濉叆杈撳叆妗嗐€?;
+  if (el.dataset.fileAction === "report") return "鎶婅繖涓枃浠剁敓鎴愨€滃啓鎶ュ憡鈥濈殑璇锋眰濉叆杈撳叆妗嗐€?;
+  if (el.dataset.deleteFile) return "浠?bot 鏂囦欢鍖哄垹闄よ繖涓枃浠惰褰曞拰鍙鐞嗘枃浠躲€?;
+  if (el.dataset.previewArtifact) return "鍦ㄩ瑙堥潰鏉挎墦寮€杩欎釜 bot 鐢熸垚浜х墿銆?;
+  if (el.dataset.downloadArtifact) return "鎵撳紑杩欎釜 bot 鐢熸垚浜х墿鐨勪笅杞藉湴鍧€銆?;
+  if (el.dataset.copyArtifactUrl) return "澶嶅埗杩欎釜浜х墿鐨勪笅杞?URL銆?;
+  if (el.dataset.copyArtifactPath) return "澶嶅埗杩欎釜浜х墿鍦ㄥ伐浣滃尯涓殑璺緞銆?;
   if (BUTTON_TEXT_TOOLTIPS[text]) return BUTTON_TEXT_TOOLTIPS[text];
-  return text ? `${text}：执行当前按钮对应操作。` : "执行当前按钮对应操作。";
+  return text ? `${text}锛氭墽琛屽綋鍓嶆寜閽搴旀搷浣溿€俙 : "鎵ц褰撳墠鎸夐挳瀵瑰簲鎿嶄綔銆?;
 }
 
 function enhanceButtonTooltips(root = document) {
@@ -433,63 +431,6 @@ function hideButtonTooltip(target = null) {
   if (target && tooltipTarget && target !== tooltipTarget) return;
   tooltipTarget = null;
   tooltipEl?.classList.remove("open");
-}
-
-function openUiDialog(options = {}) {
-  if (activeDialogResolve) {
-    activeDialogResolve(null);
-    activeDialogResolve = null;
-  }
-  activeDialog = {
-    id: uid("dialog"),
-    type: options.type || "alert",
-    title: options.title || "",
-    message: options.message || "",
-    defaultValue: options.defaultValue || "",
-    placeholder: options.placeholder || "",
-    multiline: Boolean(options.multiline),
-  };
-  render();
-  requestAnimationFrame(() => {
-    const input = $("#dialogInput");
-    const primary = $("#dialogPrimaryBtn");
-    (input || primary)?.focus();
-    if (input) {
-      input.selectionStart = 0;
-      input.selectionEnd = input.value.length;
-    }
-  });
-  return new Promise((resolve) => {
-    activeDialogResolve = resolve;
-  });
-}
-
-function closeUiDialog(value) {
-  const resolve = activeDialogResolve;
-  activeDialog = null;
-  activeDialogResolve = null;
-  render();
-  if (resolve) resolve(value);
-}
-
-async function promptText(title, defaultValue = "", options = {}) {
-  const value = await openUiDialog({
-    type: "prompt",
-    title,
-    defaultValue,
-    placeholder: options.placeholder || "",
-    multiline: Boolean(options.multiline),
-  });
-  return value === null ? null : String(value);
-}
-
-async function confirmText(message, title = "确认") {
-  if (state.settings.reduceConfirmations) return true;
-  return Boolean(await openUiDialog({ type: "confirm", title, message }));
-}
-
-async function alertText(message, title = "提示") {
-  await openUiDialog({ type: "alert", title, message });
 }
 
 function loadState() {
@@ -597,11 +538,11 @@ async function hydrateFromIndexedDb() {
 function seedState() {
   const account = {
     userId: "local-user",
-    displayName: "本地用户",
+    displayName: "鏈湴鐢ㄦ埛",
     createdAt: nowIso(),
     lastUsedAt: nowIso(),
   };
-  const archive = makeLocalArchive(account.userId, "默认对话", "");
+  const archive = makeLocalArchive(account.userId, "榛樿瀵硅瘽", "");
   return normalizeState({
     ...defaultState,
     accounts: [account],
@@ -702,6 +643,12 @@ function normalizeConversationMessages(conv) {
   conv.messages = next;
 }
 
+function syncBackgroundTasks(tasks = []) {
+  state.ui.backgroundTasks = Array.isArray(tasks)
+    ? tasks.filter((task) => task && String(task.status || "") === "running")
+    : [];
+}
+
 function saveState() {
   trimWorkflowRuns();
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -744,7 +691,7 @@ function makeLocalArchive(userId, title, currentDir) {
     id: uid("local_archive"),
     archiveId: "",
     userId,
-    title: title || "新存档",
+    title: title || "鏂板瓨妗?,
     groupId: `env_user_${userId}`,
     currentDir: currentDir || "",
     projectId: uid("project"),
@@ -812,7 +759,7 @@ async function safeText(resp) {
 }
 
 async function parseSseStream(response, onEvent) {
-  if (!response.body) throw new Error("当前浏览器不支持流式响应");
+  if (!response.body) throw new Error("褰撳墠娴忚鍣ㄤ笉鏀寔娴佸紡鍝嶅簲");
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
@@ -889,7 +836,7 @@ function addWorkflowNode(run, node) {
   run.nodes.push({
     id: uid("node"),
     kind: "workflow",
-    title: "事件",
+    title: "浜嬩欢",
     status: "done",
     detail: "",
     depth: 0,
@@ -961,7 +908,7 @@ function normalizedWorkflowNode(node) {
     helperId,
     taskId,
     helperKind,
-    title: node?.title || detail.title || detail.message || kind || "事件",
+    title: node?.title || detail.title || detail.message || kind || "浜嬩欢",
   };
 }
 
@@ -1022,7 +969,7 @@ function helperRootTitle(node, helperId = "") {
   const normalized = normalizedWorkflowNode(node);
   const kind = helperKindLabel(normalized.helperKind || normalized.kind || "helper");
   const task = normalized.taskId || helperTaskId(normalized) || helperId;
-  return `${kind} helper${task ? ` · ${task}` : ""}`;
+  return `${kind} helper${task ? ` 路 ${task}` : ""}`;
 }
 
 function helperRootDetail(node, helperId = "") {
@@ -1031,16 +978,16 @@ function helperRootDetail(node, helperId = "") {
   const lines = [];
   const kind = helperKindLabel(normalized.helperKind || normalized.kind || "helper");
   const task = normalized.taskId || detail.task_id || detail.helper_task_id || "";
-  lines.push(`类型: ${kind}`);
-  if (task) lines.push(`任务: ${task}`);
-  if (helperId) lines.push(`进程: ${helperId}`);
-  if (normalized.status || detail.status) lines.push(`状态: ${normalized.status || detail.status}`);
-  if (detail.last_iter != null) lines.push(`迭代: ${detail.last_iter}`);
+  lines.push(`绫诲瀷: ${kind}`);
+  if (task) lines.push(`浠诲姟: ${task}`);
+  if (helperId) lines.push(`杩涚▼: ${helperId}`);
+  if (normalized.status || detail.status) lines.push(`鐘舵€? ${normalized.status || detail.status}`);
+  if (detail.last_iter != null) lines.push(`杩唬: ${detail.last_iter}`);
   if (Array.isArray(detail.recent_tools) && detail.recent_tools.length) {
-    lines.push(`最近工具: ${detail.recent_tools.slice(-5).join(", ")}`);
+    lines.push(`鏈€杩戝伐鍏? ${detail.recent_tools.slice(-5).join(", ")}`);
   }
-  if (detail.progress_summary) lines.push(`摘要: ${detail.progress_summary}`);
-  if (detail.last_thought_preview) lines.push(`最近进展: ${detail.last_thought_preview}`);
+  if (detail.progress_summary) lines.push(`鎽樿: ${detail.progress_summary}`);
+  if (detail.last_thought_preview) lines.push(`鏈€杩戣繘灞? ${detail.last_thought_preview}`);
   return lines.join("\n");
 }
 
@@ -1059,11 +1006,11 @@ function helperProgressTitle(data, event = "workflow") {
   if (kind === "helper_progress") {
     const iter = data?.iter ?? data?.last_iter ?? "";
     const tool = Array.isArray(data?.recent_tools) && data.recent_tools.length ? data.recent_tools[data.recent_tools.length - 1] : "";
-    return `${iter ? `iter ${iter}` : "helper 进度"}${tool ? ` · ${tool}` : ""}`;
+    return `${iter ? `iter ${iter}` : "helper 杩涘害"}${tool ? ` 路 ${tool}` : ""}`;
   }
-  if (kind === "helper_start") return "helper 启动";
-  if (kind === "helper_blocked") return "helper 被守卫拦截";
-  if (kind === "helper_registry_done") return "helper 进程已退出";
+  if (kind === "helper_start") return "helper 鍚姩";
+  if (kind === "helper_blocked") return "helper 琚畧鍗嫤鎴?;
+  if (kind === "helper_registry_done") return "helper 杩涚▼宸查€€鍑?;
   return data?.title || data?.message || kind;
 }
 
@@ -1085,30 +1032,23 @@ function workflowDetailText(data, event = "workflow") {
   const kind = data.kind || event || "";
   if (String(kind).startsWith("helper")) {
     const lines = [];
-    if (data.reason) lines.push(`原因: ${data.reason}`);
-    if (data.error) lines.push(`类型: ${data.error}`);
+    if (data.reason) lines.push(`鍘熷洜: ${data.reason}`);
+    if (data.error) lines.push(`绫诲瀷: ${data.error}`);
     if (Array.isArray(data.blocked_tasks) && data.blocked_tasks.length) {
-      lines.push(`被拦截任务: ${data.blocked_tasks.map((item) => item.task_id || item.helper_kind || "helper").join(", ")}`);
+      lines.push(`琚嫤鎴换鍔? ${data.blocked_tasks.map((item) => item.task_id || item.helper_kind || "helper").join(", ")}`);
     }
-    if (data.what_doing) lines.push(`正在: ${data.what_doing}`);
-    if (data.last_thought) lines.push(`进展: ${data.last_thought}`);
-    if (data.last_note) lines.push(`状态: ${data.last_note}`);
-    if (data.progress_summary) lines.push(`摘要: ${data.progress_summary}`);
+    if (data.what_doing) lines.push(`姝ｅ湪: ${data.what_doing}`);
+    if (data.last_thought) lines.push(`杩涘睍: ${data.last_thought}`);
+    if (data.last_note) lines.push(`鐘舵€? ${data.last_note}`);
+    if (data.progress_summary) lines.push(`鎽樿: ${data.progress_summary}`);
     if (Array.isArray(data.recent_tools) && data.recent_tools.length) {
-      lines.push(`最近工具: ${data.recent_tools.slice(-6).join(" -> ")}`);
+      lines.push(`鏈€杩戝伐鍏? ${data.recent_tools.slice(-6).join(" -> ")}`);
     }
-    if (data.elapsed_seconds != null) lines.push(`耗时: ${Number(data.elapsed_seconds).toFixed(1)}s`);
-    if (data.heartbeat_status) lines.push(`心跳: ${data.heartbeat_status}`);
+    if (data.elapsed_seconds != null) lines.push(`鑰楁椂: ${Number(data.elapsed_seconds).toFixed(1)}s`);
+    if (data.heartbeat_status) lines.push(`蹇冭烦: ${data.heartbeat_status}`);
     return lines.join("\n") || helperRootDetail(data, data.proc_id || data.process_id || data.task_id || "");
   }
   return JSON.stringify(data, null, 2);
-}
-
-function syncBackgroundTasks(tasks = []) {
-  state.ui.backgroundTasks = Array.isArray(tasks)
-    ? tasks.filter((task) => String(task.status || "running").toLowerCase() === "running").slice(0, 8)
-    : [];
-  renderBackgroundTasksOnly();
 }
 
 function isBackgroundTaskEvent(data = {}, event = "") {
@@ -1116,62 +1056,128 @@ function isBackgroundTaskEvent(data = {}, event = "") {
   return kind.startsWith("background_") || Boolean(data?.result_path && data?.status_path && data?.task_id);
 }
 
-function backgroundTaskShortText(data = {}, event = "") {
+function backgroundTaskTitle(data = {}, event = "") {
   const kind = String(data.kind || event || "").toLowerCase();
-  const task = data.task_id || data.command_id || "background";
-  const status = data.status ? " (" + data.status + ")" : "";
-  const raw = String(data.status || "").toLowerCase();
-  if (kind === "background_start" || raw === "running") return "\u5f00: " + task;
-  if (kind === "background_done" || ["done", "completed", "failed", "error"].includes(raw)) return "\u7ed3: " + task + status;
-  if (kind === "background_reminder" || kind === "background_direct_reminder") return "\u63d0: " + task + status;
-  return "bg: " + task + status;
+  const task = data.task_id || "background";
+  if (kind === "background_start") return `开始: ${task}`;
+  if (kind === "background_done") return `结束: ${task}`;
+  if (kind === "background_reminder") return `提醒: ${task}`;
+  if (kind === "background_direct_reminder") return `提醒: ${task}`;
+  return `后台: ${task}`;
 }
 
-function renderBackgroundTaskRow(task) {
+function backgroundTaskPreview(data = {}, event = "") {
+  const kind = String(data.kind || event || "").toLowerCase();
+  const task = data.task_id || "background";
+  const status = data.status || "";
+  if (kind === "background_start") return `开始: ${task}`;
+  if (kind === "background_done") return `结束: ${task}${status ? ` (${status})` : ""}`;
+  if (kind === "background_reminder" || kind === "background_direct_reminder") {
+    return `提醒: ${task}${status ? ` (${status})` : ""}`;
+  }
+  return `后台: ${task}${status ? ` (${status})` : ""}`;
+}
+
+function backgroundTaskSourcePath(data = {}) {
+  return String(data.cwd || data.current_dir || data.currentDir || data.working_dir || data.workdir || data.root_dir || "").trim();
+}
+
+function backgroundTaskReminderText(data = {}) {
+  return String(
+    data.reminder_text
+    || data.reminder
+    || data.notify_text
+    || data.notify_message
+    || data.short_reminder
+    || data.message
+    || ""
+  ).trim();
+}
+
+function backgroundTaskPaths(data = {}) {
+  return [data.status_path, data.result_path, data.stdout_path, data.stderr_path]
+    .filter(Boolean)
+    .map((path) => `\`${path}\``)
+    .join(" / ");
+}
+
+function renderBackgroundTaskCard(task) {
   const taskId = task.task_id || task.command_id || "background";
   const status = task.status || "running";
-  return "<div class=\"background-task-row\" title=\"" + escapeHtml(backgroundTaskShortText(task, "background_start")) + "\"><span>" + escapeHtml(taskId) + "</span><code>" + escapeHtml(status) + "</code></div>";
+  return `
+    <div class="background-task-card" data-background-task-id="${escapeHtml(taskId)}">
+      <div class="background-task-head">
+        <strong>${escapeHtml(taskId)}</strong>
+        <span class="status-pill running">${escapeHtml(status)}</span>
+      </div>
+    </div>
+  `;
 }
 
 function renderBackgroundTasksWindow() {
   const tasks = Array.isArray(state.ui.backgroundTasks) ? state.ui.backgroundTasks : [];
   if (!tasks.length) return "";
-  return "<aside class=\"background-tasks-window\" id=\"backgroundTasksWindow\"><div class=\"background-tasks-window-head\"><strong>bg</strong><span class=\"small\">" + escapeHtml(String(tasks.length)) + "</span></div><div class=\"background-task-list\">" + tasks.map(renderBackgroundTaskRow).join("") + "</div></aside>";
+  return `
+    <aside class="background-tasks-window" id="backgroundTasksWindow">
+      <div class="background-tasks-window-head">
+        <strong>\u8fd0\u884c\u4e2d\u540e\u53f0\u4efb\u52a1</strong>
+        <span class="small">${escapeHtml(String(tasks.length))} \u4e2a</span>
+      </div>
+      <div class="background-task-list">
+        ${tasks.map(renderBackgroundTaskCard).join("")}
+      </div>
+    </aside>
+  `;
 }
 
-function renderBackgroundTasksOnly() {
-  const existing = document.querySelector("#backgroundTasksWindow");
-  const html = renderBackgroundTasksWindow();
-  if (!existing) {
-    if (html) document.querySelector(".app-shell")?.insertAdjacentHTML("beforeend", html);
-    return;
+function renderBackgroundTasksPanel() {
+  const tasks = Array.isArray(state.ui.backgroundTasks) ? state.ui.backgroundTasks : [];
+  if (!tasks.length) {
+    return `
+      <div class="section background-tasks-panel">
+        <div class="section-title">
+          <span>\u8fd0\u884c\u4e2d\u540e\u53f0\u4efb\u52a1</span>
+          <span class="small">\u4ec5\u663e\u793a running</span>
+        </div>
+        <div class="empty">\u5f53\u524d\u6ca1\u6709\u8fd0\u884c\u4e2d\u7684\u540e\u53f0\u4efb\u52a1</div>
+      </div>
+    `;
   }
-  if (html) existing.outerHTML = html;
-  else existing.remove();
+  return `
+    <div class="section background-tasks-panel">
+      <div class="section-title">
+          <span>\u8fd0\u884c\u4e2d\u540e\u53f0\u4efb\u52a1</span>
+        <span class="small">${escapeHtml(String(tasks.length))} \u4e2a</span>
+      </div>
+      <div class="background-task-list">
+        ${tasks.map(renderBackgroundTaskCard).join("")}
+      </div>
+    </div>
+  `;
 }
 
 function recordBackgroundRound2Preview(run, data = {}, event = "") {
   if (!isBackgroundTaskEvent(data, event)) return false;
   const msg = currentStreamingAssistantMessage();
   if (!msg) return false;
-  const task = data.task_id || data.command_id || "background";
-  const key = "background:" + task + ":" + (data.kind || event) + ":" + (data.status || "");
+  const task = data.task_id || "background";
+  const key = `background:${task}:${data.kind || event}:${data.status || ""}:${data.result_path || ""}`;
   return appendAssistantRound2Content(msg.id, {
     key,
-    label: "bg",
-    text: backgroundTaskShortText(data, event),
+    label: "鍚庡彴浠诲姟",
+    text: backgroundTaskPreview(data, event),
   });
 }
 
 function mainToolTitle(data = {}, event = "workflow") {
-  if (isBackgroundTaskEvent(data, event)) return backgroundTaskShortText(data, event);
-  const tool = data.tool || data.name || "工具";
+  if (isBackgroundTaskEvent(data, event)) return backgroundTaskTitle(data, event);
+  const tool = data.tool || data.name || "宸ュ叿";
   const iter = data.iteration ? `iter ${data.iteration}` : "";
   const suffix = iter ? ` (${iter})` : "";
-  if (data.kind === "main_tool_start") return `主进程调用 ${tool}${suffix}`;
+  if (data.kind === "main_tool_start") return `涓昏繘绋嬭皟鐢?${tool}${suffix}`;
   if (data.kind === "main_tool_done") {
-    const elapsed = data.elapsed_seconds != null ? `，${data.elapsed_seconds}s` : "";
-    return `主进程完成 ${tool}${suffix}${elapsed}`;
+    const elapsed = data.elapsed_seconds != null ? `锛?{data.elapsed_seconds}s` : "";
+    return `涓昏繘绋嬪畬鎴?${tool}${suffix}${elapsed}`;
   }
   return data.title || data.message || event;
 }
@@ -1206,6 +1212,9 @@ function workflowNodeStatus(status, kind = "", event = "", data = {}) {
 function normalizeWorkflowNodeForRun(node, run) {
   const normalized = normalizedWorkflowNode(node);
   let status = workflowNodeStatus(normalized.status, normalized.kind, "", normalized);
+  if (String(normalized.kind || "") === "background_start" && status === "running") {
+    return { ...normalized, status };
+  }
   if (run?.status && run.status !== "running" && status === "running") {
     status = run.status === "error" ? "error" : run.status === "interrupted" ? "interrupted" : "done";
   }
@@ -1216,6 +1225,9 @@ function finalizeWorkflowRun(run, status = "done") {
   if (!run?.nodes) return;
   const finalStatus = status === "done" ? "done" : (status || "done");
   for (const node of run.nodes) {
+    if (String(node.kind || "") === "background_start" && node.status === "running") {
+      continue;
+    }
     const current = workflowNodeStatus(node.status, node.kind, "", node);
     if (current === "error") {
       node.status = "error";
@@ -1257,7 +1269,7 @@ function upsertWorkflowNode(run, node, options = {}) {
   return existing;
 }
 
-function appendWorkflowStream(run, streamKey, text, title = "LLM 返回流") {
+function appendWorkflowStream(run, streamKey, text, title = "LLM 杩斿洖娴?) {
   if (!run || !text) return null;
   return upsertWorkflowNode(run, {
     streamKey,
@@ -1297,34 +1309,34 @@ function currentStreamingAssistantMessage(conv = activeConversation()) {
 function compactStatusText(text, limit = 220) {
   const value = String(text || "").replace(/\s+/g, " ").trim();
   if (!value) return "";
-  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+  return value.length > limit ? `${value.slice(0, limit - 1)}鈥 : value;
 }
 
 function workflowLabelText(kind = "") {
   const raw = String(kind || "").trim();
   const lower = raw.toLowerCase();
-  if (!raw) return "进度";
-  if (lower.includes("plan") || lower.includes("planning")) return "计划";
-  if (lower.includes("intent")) return "意图";
-  if (lower.includes("memory")) return "记忆";
-  if (lower.includes("tool")) return "工具";
+  if (!raw) return "杩涘害";
+  if (lower.includes("plan") || lower.includes("planning")) return "璁″垝";
+  if (lower.includes("intent")) return "鎰忓浘";
+  if (lower.includes("memory")) return "璁板繂";
+  if (lower.includes("tool")) return "宸ュ叿";
   if (lower.includes("helper")) return "helper";
-  if (lower.includes("command")) return "命令";
-  if (lower.includes("reply") || lower.includes("composing")) return "回复";
+  if (lower.includes("command")) return "鍛戒护";
+  if (lower.includes("reply") || lower.includes("composing")) return "鍥炲";
   return raw;
 }
 
 function intermediateReplyLabel(event = "") {
   const key = String(event || "").toLowerCase();
-  if (key === "helper_blocked") return "分工调整";
-  if (key === "helper_start") return "分工开始";
-  if (key === "helper_done") return "分工结果";
-  if (key === "helper_exit") return "进程退出";
-  if (key === "milestone") return "里程碑";
-  if (key === "long_silence") return "状态更新";
-  if (key === "stuck") return "阻力处理";
-  if (key === "breakthrough") return "突破进展";
-  return "中途反馈";
+  if (key === "helper_blocked") return "鍒嗗伐璋冩暣";
+  if (key === "helper_start") return "鍒嗗伐寮€濮?;
+  if (key === "helper_done") return "鍒嗗伐缁撴灉";
+  if (key === "helper_exit") return "杩涚▼閫€鍑?;
+  if (key === "milestone") return "閲岀▼纰?;
+  if (key === "long_silence") return "鐘舵€佹洿鏂?;
+  if (key === "stuck") return "闃诲姏澶勭悊";
+  if (key === "breakthrough") return "绐佺牬杩涘睍";
+  return "涓€斿弽棣?;
 }
 
 function appendAssistantRound2Content(assistantId, item) {
@@ -1335,7 +1347,7 @@ function appendAssistantRound2Content(assistantId, item) {
   const key = item?.key || `round2:${Date.now()}`;
   const nextItem = {
     key,
-    label: compactStatusText(item?.label || "进度", 24),
+    label: compactStatusText(item?.label || "杩涘害", 24),
     text,
     ts: nowIso(),
   };
@@ -1430,11 +1442,11 @@ function moveQueueItem(queueId, direction) {
   render();
 }
 
-async function editQueueItem(queueId) {
+function editQueueItem(queueId) {
   const conv = activeConversation();
   const item = conv?.queue.find((q) => q.id === queueId);
   if (!item) return;
-  const next = await promptText("编辑队列消息", item.text, { multiline: true });
+  const next = prompt("缂栬緫闃熷垪娑堟伅", item.text);
   if (next === null) return;
   const trimmed = next.trim();
   if (!trimmed) return;
@@ -1443,10 +1455,10 @@ async function editQueueItem(queueId) {
   render();
 }
 
-async function clearQueue() {
+function clearQueue() {
   const conv = activeConversation();
   if (!conv?.queue.length) return;
-  if (!await confirmText("清空当前存档的本地队列？")) return;
+  if (!confirm("娓呯┖褰撳墠瀛樻。鐨勬湰鍦伴槦鍒楋紵")) return;
   conv.queue = [];
   saveState();
   render();
@@ -1509,7 +1521,7 @@ function resetArchivesForAccount(userId) {
       kept.push(archive);
     }
   }
-  const archive = makeLocalArchive(userId, "默认对话", "");
+  const archive = makeLocalArchive(userId, "榛樿瀵硅瘽", "");
   kept.push(archive);
   state.archives = kept;
   state.conversations[archive.id] = emptyConversation(archive.id);
@@ -1545,7 +1557,7 @@ function pruneArchivesAfterBackendSync(userId, projects) {
     if (replacement) {
       state.activeArchiveId = replacement.id;
     } else {
-      const archive = makeLocalArchive(userId, "默认对话", "");
+      const archive = makeLocalArchive(userId, "榛樿瀵硅瘽", "");
       state.archives.push(archive);
       state.conversations[archive.id] = emptyConversation(archive.id);
       state.files[archive.id] = [];
@@ -1558,7 +1570,7 @@ function pruneArchivesAfterBackendSync(userId, projects) {
 
 
 async function ensureBackendArchive(archive, account) {
-  if (!archive || !account) throw new Error("未选择账号或存档");
+  if (!archive || !account) throw new Error("鏈€夋嫨璐﹀彿鎴栧瓨妗?);
   if (archive.archiveId && !archive.localOnly) return archive;
 
   const body = {
@@ -1621,25 +1633,25 @@ async function prepareMessageForSend(text, fileIds, { queuedItem = null, mode = 
   if (queuedItem?.longInputConverted) {
     return { text, fileIds, converted: false };
   }
-  const ok = await confirmAction(
-    `当前输入约 ${text.length.toLocaleString()} 个字符，直接发送会挤占主进程上下文并可能失败。\n\n` +
-    `是否将其转换为 bot 文件区 txt 附件，并只发送一条短指令让 bot 读取该文件？`
+  const ok = confirmAction(
+    `褰撳墠杈撳叆绾?${text.length.toLocaleString()} 涓瓧绗︼紝鐩存帴鍙戦€佷細鎸ゅ崰涓昏繘绋嬩笂涓嬫枃骞跺彲鑳藉け璐ャ€俓n\n` +
+    `鏄惁灏嗗叾杞崲涓?bot 鏂囦欢鍖?txt 闄勪欢锛屽苟鍙彂閫佷竴鏉＄煭鎸囦护璁?bot 璇诲彇璇ユ枃浠讹紵`
   );
   if (!ok) {
-    notify("已取消发送", "请把超长内容保存为文件后上传，或确认自动转为文件。", "warn");
+    notify("宸插彇娑堝彂閫?, "璇锋妸瓒呴暱鍐呭淇濆瓨涓烘枃浠跺悗涓婁紶锛屾垨纭鑷姩杞负鏂囦欢銆?, "warn");
     return null;
   }
   const file = makeTextFile(longInputFilename(), text);
   const savedFile = await uploadSingleBotFile(file, {
     autoAttach: true,
     notifySuccess: true,
-    sourceLabel: "超长输入",
+    sourceLabel: "瓒呴暱杈撳叆",
   });
   const nextIds = [...new Set([...(fileIds || []), savedFile.id])];
   const shortText = [
-    `用户需求已转换为 bot 文件区附件：${savedFile.name}`,
+    `鐢ㄦ埛闇€姹傚凡杞崲涓?bot 鏂囦欢鍖洪檮浠讹細${savedFile.name}`,
     "",
-    "请先读取并完整理解该附件中的用户原始需求，再按其中要求执行。若内容较长，请使用分段读取、摘要和 helper 处理，避免把全文一次性塞入主进程上下文。",
+    "璇峰厛璇诲彇骞跺畬鏁寸悊瑙ｈ闄勪欢涓殑鐢ㄦ埛鍘熷闇€姹傦紝鍐嶆寜鍏朵腑瑕佹眰鎵ц銆傝嫢鍐呭杈冮暱锛岃浣跨敤鍒嗘璇诲彇銆佹憳瑕佸拰 helper 澶勭悊锛岄伩鍏嶆妸鍏ㄦ枃涓€娆℃€у鍏ヤ富杩涚▼涓婁笅鏂囥€?,
   ].join("\n");
   return { text: shortText, fileIds: nextIds, converted: true, file: savedFile };
 }
@@ -1652,7 +1664,7 @@ async function sendMessage(mode = "normal", queuedItem = null) {
   if (mode === "insert" && conv.status !== "running" && !queuedItem) mode = "normal";
   const sendLockId = archive.id;
   if (mode === "normal" && sendingArchiveIds.has(sendLockId)) {
-    notify("正在发送", "上一条消息仍在准备或提交，已忽略重复点击。", "info");
+    notify("姝ｅ湪鍙戦€?, "涓婁竴鏉℃秷鎭粛鍦ㄥ噯澶囨垨鎻愪氦锛屽凡蹇界暐閲嶅鐐瑰嚮銆?, "info");
     return;
   }
   let text = (queuedItem?.text ?? currentDraft).trim();
@@ -1680,7 +1692,7 @@ async function sendMessage(mode = "normal", queuedItem = null) {
       syncDraftToConversation();
       saveState();
       render();
-      notify("超长插入已转为下一轮队列", "运行中插入接口不携带附件；已上传为文件并排入下一轮。", "info");
+      notify("瓒呴暱鎻掑叆宸茶浆涓轰笅涓€杞槦鍒?, "杩愯涓彃鍏ユ帴鍙ｄ笉鎼哄甫闄勪欢锛涘凡涓婁紶涓烘枃浠跺苟鎺掑叆涓嬩竴杞€?, "info");
       return;
     }
     const prepared = await prepareMessageForSend(text, fileIds, { queuedItem, mode });
@@ -1712,7 +1724,7 @@ async function sendMessage(mode = "normal", queuedItem = null) {
       syncDraftToConversation();
       saveState();
       render();
-      notify("已加入队列", text.slice(0, 80), "info");
+      notify("宸插姞鍏ラ槦鍒?, text.slice(0, 80), "info");
       return;
     }
     if (!queuedItem && hasOtherRunningWindow(archive, account)) {
@@ -1723,14 +1735,14 @@ async function sendMessage(mode = "normal", queuedItem = null) {
       syncDraftToConversation();
       saveState();
       render();
-      notify("同锁窗口运行中", "消息已在本窗口排队", "info");
+      notify("鍚岄攣绐楀彛杩愯涓?, "娑堟伅宸插湪鏈獥鍙ｆ帓闃?, "info");
       return;
     }
 
     try {
       await ensureBackendArchive(archive, account);
     } catch (err) {
-      addMessage({ role: "system_status", text: `创建后端存档失败：${err.message || err}`, status: "failed" });
+      addMessage({ role: "system_status", text: `鍒涘缓鍚庣瀛樻。澶辫触锛?{err.message || err}`, status: "failed" });
       return;
     }
 
@@ -1747,11 +1759,11 @@ async function sendMessage(mode = "normal", queuedItem = null) {
       status: "streaming",
       round2PreviewItems: [{
         key: "request:submitted",
-        label: "状态",
-        text: "请求已提交，等待后端开始处理。",
+        label: "鐘舵€?,
+        text: "璇锋眰宸叉彁浜わ紝绛夊緟鍚庣寮€濮嬪鐞嗐€?,
         ts: nowIso(),
       }],
-      currentActionText: "连接后端并准备工作流",
+      currentActionText: "杩炴帴鍚庣骞跺噯澶囧伐浣滄祦",
     });
     run = {
       id: uid("run"),
@@ -1776,34 +1788,34 @@ async function sendMessage(mode = "normal", queuedItem = null) {
     });
     if (response.status === 409) {
       conv.queue.unshift({ id: uid("queue"), text, attachments: fileIds, createdAt: nowIso() });
-      notify("后端忙", "消息已放回队列", "warn");
-      throw new Error("后端已有同一用户任务在运行，本条消息已放回队列");
+      notify("鍚庣蹇?, "娑堟伅宸叉斁鍥為槦鍒?, "warn");
+      throw new Error("鍚庣宸叉湁鍚屼竴鐢ㄦ埛浠诲姟鍦ㄨ繍琛岋紝鏈潯娑堟伅宸叉斁鍥為槦鍒?);
     }
-    if (!response.ok) throw new Error(`请求失败 ${response.status}: ${await safeText(response)}`);
+    if (!response.ok) throw new Error(`璇锋眰澶辫触 ${response.status}: ${await safeText(response)}`);
     await parseSseStream(response, (evt) => handleSseEvent(evt, assistantId, run));
     finishRun(run, assistantId, "done", true, archive.id);
   } catch (err) {
     if (!assistantId || !run) {
-      addMessage({ role: "system_status", text: `发送失败：${err.message || err}`, status: "failed" });
-      notify("发送失败", err.message || String(err), "error");
+      addMessage({ role: "system_status", text: `鍙戦€佸け璐ワ細${err.message || err}`, status: "failed" });
+      notify("鍙戦€佸け璐?, err.message || String(err), "error");
       return;
     }
     if (err?.name === "AbortError") {
       finishRun(run, assistantId, "interrupted", true, archive.id);
-      notify("任务已中断", run.traceId || "", "warn");
+      notify("浠诲姟宸蹭腑鏂?, run.traceId || "", "warn");
     } else {
       addWorkflowNode(run, {
         kind: "error",
-        title: "请求失败",
+        title: "璇锋眰澶辫触",
         status: "error",
         detail: err.message || String(err),
       });
       updateMessage(assistantId, {
         status: "failed",
-        text: currentAssistantText(assistantId, archive.id) || `出错：${err.message || err}`,
+        text: currentAssistantText(assistantId, archive.id) || `鍑洪敊锛?{err.message || err}`,
       }, archive.id);
       finishRun(run, assistantId, "error", false, archive.id);
-      notify("任务失败", err.message || String(err), "error");
+      notify("浠诲姟澶辫触", err.message || String(err), "error");
     }
   } finally {
     sendingArchiveIds.delete(sendLockId);
@@ -1826,12 +1838,12 @@ async function recoverFromBackend() {
     const removed = pruneArchivesAfterBackendSync(account.userId, projects);
     for (const item of projects) mergeArchiveFromBackend(item, account.userId);
     if (removed) {
-      notify("已清理本地存档", `后端已无对应项目，已移除 ${removed} 个本地缓存存档。`, "info");
+      notify("宸叉竻鐞嗘湰鍦板瓨妗?, `鍚庣宸叉棤瀵瑰簲椤圭洰锛屽凡绉婚櫎 ${removed} 涓湰鍦扮紦瀛樺瓨妗ｃ€俙, "info");
     }
     saveState();
     render();
   } catch (err) {
-    addPassiveWorkflow("recover", "后端项目列表恢复失败", "error", err.message || String(err));
+    addPassiveWorkflow("recover", "鍚庣椤圭洰鍒楄〃鎭㈠澶辫触", "error", err.message || String(err));
   }
   await refreshActiveState();
 }
@@ -1884,7 +1896,7 @@ async function refreshActiveState() {
           nodes: [{
             id: uid("node"),
             kind: "recover",
-            title: "恢复后端活跃任务",
+            title: "鎭㈠鍚庣娲昏穬浠诲姟",
             status: "running",
             detail: JSON.stringify(item, null, 2),
             createdAt: nowIso(),
@@ -1897,7 +1909,7 @@ async function refreshActiveState() {
     startMonitor();
     await loadMonitorHistory();
   } catch (err) {
-    addPassiveWorkflow("recover", "活跃任务恢复失败", "error", err.message || String(err));
+    addPassiveWorkflow("recover", "娲昏穬浠诲姟鎭㈠澶辫触", "error", err.message || String(err));
   }
 }
 
@@ -1907,7 +1919,7 @@ async function refreshRunSnapshot() {
   const conv = activeConversation();
   const run = conv?.workflowRuns?.[0];
   if (!archive || !account || !run?.traceId) {
-    await alertText("当前没有可恢复的 trace。");
+    alert("褰撳墠娌℃湁鍙仮澶嶇殑 trace銆?);
     return;
   }
   try {
@@ -1925,7 +1937,7 @@ async function refreshRunSnapshot() {
       upsertWorkflowNode(run, {
         mergeKey: unique,
         kind: payload.kind || item.event || "history",
-        title: payload.title || payload.message || payload.kind || item.event || "历史事件",
+        title: payload.title || payload.message || payload.kind || item.event || "鍘嗗彶浜嬩欢",
         status: payload.status || "done",
         commandId: payload.command_id || "",
         helperId: payload.proc_id || payload.process_id || payload.task_id || "",
@@ -1934,12 +1946,15 @@ async function refreshRunSnapshot() {
         historyKey: unique,
         detail: JSON.stringify(payload, null, 2),
       });
+      if (isBackgroundTaskEvent(payload, item.event)) {
+        recordBackgroundRound2Preview(run, payload, item.event);
+      }
     }
     if (data.active) mergeMonitorSnapshot(data.active);
     saveState();
     renderWorkflowOnly();
   } catch (err) {
-    addPassiveWorkflow("history", "Run 快照加载失败", "error", err.message || String(err));
+    addPassiveWorkflow("history", "Run 蹇収鍔犺浇澶辫触", "error", err.message || String(err));
   }
 }
 
@@ -1965,7 +1980,7 @@ async function loadMonitorHistory() {
       upsertWorkflowNode(run, {
         mergeKey: unique,
         kind: payload.kind || item.event || "history",
-        title: payload.title || payload.message || payload.kind || item.event || "历史事件",
+        title: payload.title || payload.message || payload.kind || item.event || "鍘嗗彶浜嬩欢",
         status: payload.status || "done",
         commandId: payload.command_id || "",
         helperId: payload.proc_id || payload.process_id || payload.task_id || "",
@@ -1974,11 +1989,15 @@ async function loadMonitorHistory() {
         historyKey: unique,
         detail: JSON.stringify(payload, null, 2),
       });
+      if (isBackgroundTaskEvent(payload, item.event)) {
+        recordBackgroundRound2Preview(run, payload, item.event);
+      }
     }
+    if (data.active?.active_background_tasks) syncBackgroundTasks(data.active.active_background_tasks);
     saveState();
     renderWorkflowOnly();
   } catch (err) {
-    addPassiveWorkflow("history", "监控历史加载失败", "error", err.message || String(err));
+    addPassiveWorkflow("history", "鐩戞帶鍘嗗彶鍔犺浇澶辫触", "error", err.message || String(err));
   }
 }
 
@@ -1992,19 +2011,19 @@ function handleSseEvent(evt, assistantId, run) {
       const archive = activeArchive();
       if (archive) adoptProject(archive, env);
     }
-    addWorkflowNode(run, { kind: "run", title: "开始运行", status: "running", detail: JSON.stringify(data, null, 2) });
+    addWorkflowNode(run, { kind: "run", title: "寮€濮嬭繍琛?, status: "running", detail: JSON.stringify(data, null, 2) });
   } else if (isTextStreamEvent(event, data)) {
     const text = streamTextFromData(data);
     if (!text) return;
     if (isThinkStreamEvent(event, data)) {
-      appendWorkflowStream(run, "round3_think", text, "思考流");
+      appendWorkflowStream(run, "round3_think", text, "鎬濊€冩祦");
     } else {
       const msg = activeConversation()?.messages.find((m) => m.id === assistantId);
       if (msg) {
         clearAssistantRound2Preview(assistantId);
         msg.text += text;
       }
-      appendWorkflowStream(run, "round3_reply", text, "Round3 LLM 返回");
+      appendWorkflowStream(run, "round3_reply", text, "Round3 LLM 杩斿洖");
     }
   } else if (event === "intermediate_reply") {
     const text = String(data.message || "").trim();
@@ -2018,7 +2037,7 @@ function handleSseEvent(evt, assistantId, run) {
     upsertWorkflowNode(run, {
       mergeKey: workflowEventMergeKey(data, `intermediate_reply:${Date.now()}`),
       kind: "intermediate_reply",
-      title: text || "中途反馈",
+      title: text || "涓€斿弽棣?,
       status: "done",
       detail: JSON.stringify(data, null, 2),
     });
@@ -2026,7 +2045,7 @@ function handleSseEvent(evt, assistantId, run) {
     upsertWorkflowNode(run, {
       mergeKey: workflowEventMergeKey(data, data.kind || data.round || "progress"),
       kind: data.kind || data.round || "progress",
-      title: data.message || data.kind || data.round || "进度",
+      title: data.message || data.kind || data.round || "杩涘害",
       status: workflowNodeStatus(data.status, data.kind || data.round || "progress", event, data),
       detail: JSON.stringify(data, null, 2),
     });
@@ -2038,7 +2057,7 @@ function handleSseEvent(evt, assistantId, run) {
     upsertWorkflowNode(run, {
       mergeKey: `event:${event}`,
       kind: event,
-      title: event === "done" ? "回复生成完成" : "任务完成",
+      title: event === "done" ? "鍥炲鐢熸垚瀹屾垚" : "浠诲姟瀹屾垚",
       status: "done",
       detail: JSON.stringify(data, null, 2),
     });
@@ -2047,13 +2066,12 @@ function handleSseEvent(evt, assistantId, run) {
   } else if (event === "error") {
     addWorkflowNode(run, {
       kind: "error",
-      title: data.message || "后端错误",
+      title: data.message || "鍚庣閿欒",
       status: "error",
       detail: JSON.stringify(data, null, 2),
     });
   } else {
-    const backgroundEvent = isBackgroundTaskEvent(data, event);
-    const helperId = backgroundEvent ? "" : (data.helperId || data.helper_id || data.proc_id || data.process_id || data.task_id || "");
+    const helperId = data.helperId || data.helper_id || data.proc_id || data.process_id || data.task_id || "";
     upsertWorkflowNode(run, {
       mergeKey: workflowEventMergeKey(data, data.kind || event, { reusable: Boolean(data.command_id || helperId) }),
       kind: data.kind || event,
@@ -2062,7 +2080,7 @@ function handleSseEvent(evt, assistantId, run) {
       commandId: data.command_id || "",
       helperId,
       taskId: data.task_id || "",
-      helperKind: backgroundEvent ? "background" : (data.helper_kind || ""),
+      helperKind: data.helper_kind || "",
       detail: typeof data === "string" ? data : JSON.stringify(data, null, 2),
     });
     updateAssistantCurrentAction(assistantId, run);
@@ -2080,8 +2098,10 @@ function handleSseEvent(evt, assistantId, run) {
 function finishRun(run, assistantId, status, drain = true, archiveId = state.activeArchiveId) {
   const conv = state.conversations[archiveId] || activeConversation();
   if (!conv) return;
-  const forceInsertedContinueCheck = Boolean(
-    Array.isArray(conv.pendingInsertedMessages)
+  const archive = state.archives.find((item) => item.id === archiveId) || activeArchive();
+  const forceEnvironmentContinue = Boolean(
+    archive?.currentDir
+    && Array.isArray(conv.pendingInsertedMessages)
     && conv.pendingInsertedMessages.length
   );
   finalizeWorkflowRun(run, status);
@@ -2099,9 +2119,11 @@ function finishRun(run, assistantId, status, drain = true, archiveId = state.act
   } else {
     updateMessage(assistantId, { status: nextStatus }, archiveId);
   }
-  if (status === "done") notify("任务完成", run.traceId || "", "done");
-  if (drain && status === "done") setTimeout(() => checkAutoContinueIfNeeded(archiveId, assistantId, { force: forceInsertedContinueCheck }), 250);
-  if (drain && status === "interrupted" && forceInsertedContinueCheck) {
+  if (status === "done") notify("浠诲姟瀹屾垚", run.traceId || "", "done");
+  if (drain && status === "done") {
+    setTimeout(() => checkAutoContinueIfNeeded(archiveId, assistantId, { force: forceEnvironmentContinue }), 250);
+  }
+  if (drain && status === "interrupted" && forceEnvironmentContinue) {
     setTimeout(() => checkAutoContinueIfNeeded(archiveId, assistantId, { force: true }), 250);
   }
   if (drain && conv.autoRunQueue !== false && state.settings.autoRunQueue !== false) setTimeout(() => drainQueueIfIdle(archiveId), 500);
@@ -2113,7 +2135,7 @@ function lastUserMessageBefore(conv, assistantId) {
     const inserted = conv.pendingInsertedMessages[conv.pendingInsertedMessages.length - 1];
     return {
       role: "inserted_user",
-      text: `用户在任务运行中补充/修正：${inserted.text || ""}`,
+      text: `鐢ㄦ埛鍦ㄤ换鍔¤繍琛屼腑琛ュ厖/淇锛?{inserted.text || ""}`,
       createdAt: inserted.createdAt || nowIso(),
     };
   }
@@ -2131,25 +2153,6 @@ function clearPendingInsertedMessages(conv) {
   }
 }
 
-async function requestBackendStopForArchive(archive, account) {
-  if (!archive || !account) return;
-  try {
-    await fetchJson("/v1/chat/abort", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        archive_id: archive.archiveId || archive.id,
-        group_id: archive.groupId,
-        user_id: account.userId,
-        current_dir: archive.currentDir || "",
-        project_id: archive.projectId || "",
-      }),
-    });
-  } catch {
-    // Best-effort cleanup; local abort handling still runs at the call site.
-  }
-}
-
 function recentConversationText(conv, limit = 6000) {
   if (!conv) return "";
   const text = conv.messages
@@ -2159,24 +2162,22 @@ function recentConversationText(conv, limit = 6000) {
   return text.length > limit ? text.slice(-limit) : text;
 }
 
-async function checkAutoContinueIfNeeded(archiveId, assistantId, { force = false } = {}) {
+async function checkAutoContinueIfNeeded(archiveId, assistantId, options = {}) {
   const conv = state.conversations[archiveId];
   const assistant = conv?.messages.find((m) => m.id === assistantId);
   const user = lastUserMessageBefore(conv, assistantId);
-  const archive = state.archives.find((item) => item.id === archiveId) || activeArchive();
-  const account = activeAccount();
+  const force = Boolean(options.force);
   if (!conv || !assistant || !user) return;
   if (!force && !state.settings.autoContinue) return;
   if (conv.status === "running" || conv.queue.length) return;
-  if (!force && !assistant.text?.trim()) return;
-  if (!user.text?.trim()) return;
+  if (!assistant.text?.trim() || !user.text?.trim()) return;
 
   const startedAt = conv.autoContinueStartedAt || nowIso();
   conv.autoContinueStartedAt = startedAt;
   const elapsedSec = Math.max(0, (Date.now() - new Date(startedAt).getTime()) / 1000);
   const maxSec = Math.max(1, Number(state.settings.autoContinueMaxSec || 900));
   if (elapsedSec >= maxSec) {
-    notify("自动继续停止", "已达到时间上限", "info");
+    notify("鑷姩缁х画鍋滄", "宸茶揪鍒版椂闂翠笂闄?, "info");
     clearPendingInsertedMessages(conv);
     saveState();
     return;
@@ -2192,17 +2193,15 @@ async function checkAutoContinueIfNeeded(archiveId, assistantId, { force = false
         recent_context: recentConversationText(conv),
         auto_continue_elapsed_sec: elapsedSec,
         max_auto_continue_sec: maxSec,
-        force_environment_continue: force,
       }),
     });
     if (!result.should_continue) {
       conv.autoContinueStartedAt = "";
       clearPendingInsertedMessages(conv);
       saveState();
-      await requestBackendStopForArchive(archive, account);
       return;
     }
-    const text = (result.continue_message || "继续").trim() || "继续";
+    const text = (result.continue_message || "缁х画").trim() || "缁х画";
     conv.queue.push({
       id: uid("queue"),
       text,
@@ -2210,12 +2209,12 @@ async function checkAutoContinueIfNeeded(archiveId, assistantId, { force = false
       createdAt: nowIso(),
       autoContinue: true,
     });
-    notify("自动继续", result.reason || text, "info");
+    notify("鑷姩缁х画", result.reason || text, "info");
     clearPendingInsertedMessages(conv);
     saveState();
     setTimeout(() => drainQueueIfIdle(archiveId), 100);
   } catch (err) {
-    notify("自动继续判定失败", err.message || String(err), "warn");
+    notify("鑷姩缁х画鍒ゅ畾澶辫触", err.message || String(err), "warn");
   }
 }
 
@@ -2225,7 +2224,7 @@ function drainQueueIfIdle(archiveId = state.activeArchiveId) {
   if (sendingArchiveIds.has(archiveId)) return;
   if (archiveId !== state.activeArchiveId) return;
   const item = conv.queue.shift();
-  notify("队列开始执行", item.text.slice(0, 80), "info");
+  notify("闃熷垪寮€濮嬫墽琛?, item.text.slice(0, 80), "info");
   saveState();
   currentDraft = "";
   attachedFileIds = [];
@@ -2258,36 +2257,47 @@ async function insertIntoRun(text) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const ok = Boolean(result.ok || result.queued);
-    const preempted = Boolean(result.aborted);
-    addMessage({
-      role: "inserted_user",
-      text,
-      sendMode: state.settings.insertMode,
-      status: ok ? "done" : "failed",
-      insertStage: result.stage || "",
-      insertPreempted: preempted,
-      insertReason: result.reason || "",
-    });
+    let abortResult = { ok: false };
+    if (result.ok) {
+      abortResult = await fetchJson("/v1/chat/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          archive_id: archive.archiveId || archive.id,
+          group_id: archive.groupId,
+          user_id: account.userId,
+          current_dir: archive.currentDir || "",
+          project_id: archive.projectId || "",
+        }),
+      });
+    }
+    const ok = Boolean(result.ok && abortResult.ok);
+    addMessage({ role: "inserted_user", text, sendMode: state.settings.insertMode, status: ok ? "done" : "failed" });
     if (ok) {
       conv.pendingInsertedMessages = Array.isArray(conv.pendingInsertedMessages) ? conv.pendingInsertedMessages : [];
       conv.pendingInsertedMessages.push({
         text,
         createdAt: nowIso(),
         mode: state.settings.insertMode,
-        stage: result.stage || "",
-        preempted,
-        reason: result.reason || "",
       });
       conv.pendingInsertedMessages = conv.pendingInsertedMessages.slice(-5);
     }
+    if (result.ok && state.settings.insertMode === "inject_then_followup") {
+      conv.queue.push({
+        id: uid("queue"),
+        text,
+        attachments: attachedFileIds.slice(),
+        createdAt: nowIso(),
+        fromInsert: true,
+      });
+    }
     notify(
-      ok ? "插入已触发" : "插入未生效",
-      ok ? "已进入中途介入流程，等待当前任务收束。" : "当前任务未进入可中途介入状态。",
+      ok ? "鎻掑叆宸茶Е鍙? : "鎻掑叆鏈敓鏁?,
+      ok ? "宸茶繘鍏ヤ腑閫斾粙鍏ユ祦绋嬶紝绛夊緟褰撳墠浠诲姟鏀舵潫銆? : (abortResult.reason || "褰撳墠浠诲姟鏈繘鍏ュ彲涓€斾粙鍏ョ姸鎬併€?),
       ok ? "done" : "warn",
     );
   } catch (err) {
-    addMessage({ role: "system_status", text: `插入失败：${err.message || err}`, status: "failed" });
+    addMessage({ role: "system_status", text: `鎻掑叆澶辫触锛?{err.message || err}`, status: "failed" });
     clearPendingInsertedMessages(conv);
   } finally {
     currentDraft = "";
@@ -2301,7 +2311,19 @@ async function abortRun() {
   const account = activeAccount();
   const conv = activeConversation();
   if (!archive || !account) return;
-  await requestBackendStopForArchive(archive, account);
+  try {
+    await fetchJson("/v1/chat/abort", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        archive_id: archive.archiveId || archive.id,
+        group_id: archive.groupId,
+        user_id: account.userId,
+      }),
+    });
+  } catch {
+    // Local abort still matters if the backend is unreachable.
+  }
   if (activeController) activeController.abort();
   if (conv) conv.status = "interrupted";
   saveState();
@@ -2330,7 +2352,7 @@ function startMonitor() {
     })
     .catch((err) => {
       if (err?.name !== "AbortError") {
-        addPassiveWorkflow("monitor", "监控流断开", "error", err.message || String(err));
+        addPassiveWorkflow("monitor", "鐩戞帶娴佹柇寮€", "error", err.message || String(err));
       }
     });
 }
@@ -2343,18 +2365,18 @@ function stopMonitor() {
 function handleMonitorEvent(evt) {
   const conv = activeConversation();
   const run = conv?.workflowRuns?.[0];
-  if (!run || run.status !== "running") return;
-  const payloadTrace = evt.data?.trace_id || "";
+  if (!run) return;
+  const data = evt.data || {};
+  const payloadTrace = data.trace_id || "";
   if (run.traceId && payloadTrace && payloadTrace !== run.traceId) return;
   if (run.traceId && !payloadTrace && evt.event !== "heartbeat" && evt.event !== "snapshot") return;
   if (evt.event === "heartbeat" || evt.event === "snapshot") {
-    mergeMonitorSnapshot(evt.data || {});
+    mergeMonitorSnapshot(data);
     saveState();
     scheduleWorkflowRender();
     renderTranscript();
     return;
   }
-  const data = evt.data || {};
   const backgroundEvent = isBackgroundTaskEvent(data, evt.event);
   const helperId = backgroundEvent ? "" : (data.helperId || data.helper_id || data.process_id || data.proc_id || data.task_id || "");
   const commandId = data.command_id || data.commandId || "";
@@ -2417,7 +2439,7 @@ function mergeMonitorSnapshot(snapshot) {
     activeCommandIds.add(commandId);
     upsertWorkflowNode(run, {
       kind: "command",
-      title: command.title || command.command || "运行命令",
+      title: command.title || command.command || "杩愯鍛戒护",
       status: "running",
       commandId,
       detail: JSON.stringify(command, null, 2),
@@ -2443,7 +2465,7 @@ function mergeMonitorSnapshot(snapshot) {
     upsertWorkflowNode(run, {
       mergeKey: `background:${taskId}`,
       kind: "background_start",
-      title: backgroundTaskShortText(task, "background_start"),
+      title: backgroundTaskTitle(task, "background_start"),
       status: "running",
       taskId,
       helperKind: "background",
@@ -2453,6 +2475,7 @@ function mergeMonitorSnapshot(snapshot) {
   }
   if (Array.isArray(snapshot.active_commands)) {
     for (const node of run.nodes || []) {
+      if (String(node.kind || "") === "background_start") continue;
       if (node.commandId && !activeCommandIds.has(node.commandId) && node.status === "running") {
         node.status = "done";
         node.updatedAt = nowIso();
@@ -2489,9 +2512,9 @@ async function abortCommand(commandId) {
     const result = await fetchJson(`/v1/chat/commands/${encodeURIComponent(commandId)}/abort`, {
       method: "POST",
     });
-    addPassiveWorkflow("command", "命令中断请求已发送", result.ok ? "done" : "error", JSON.stringify(result, null, 2));
+    addPassiveWorkflow("command", "鍛戒护涓柇璇锋眰宸插彂閫?, result.ok ? "done" : "error", JSON.stringify(result, null, 2));
   } catch (err) {
-    addPassiveWorkflow("command", "命令中断失败", "error", err.message || String(err));
+    addPassiveWorkflow("command", "鍛戒护涓柇澶辫触", "error", err.message || String(err));
   }
 }
 
@@ -2520,7 +2543,7 @@ async function refreshFiles() {
     saveState();
     render();
   } catch (err) {
-    addMessage({ role: "system_status", text: `刷新文件失败：${err.message || err}`, status: "failed" });
+    addMessage({ role: "system_status", text: `鍒锋柊鏂囦欢澶辫触锛?{err.message || err}`, status: "failed" });
   }
 }
 
@@ -2533,7 +2556,7 @@ async function refreshArtifacts() {
     saveState();
     render();
   } catch (err) {
-    addMessage({ role: "system_status", text: `刷新产物失败：${err.message || err}`, status: "failed" });
+    addMessage({ role: "system_status", text: `鍒锋柊浜х墿澶辫触锛?{err.message || err}`, status: "failed" });
   }
 }
 
@@ -2570,7 +2593,7 @@ async function uploadFiles(files) {
   try {
     await ensureBackendArchive(archive, account);
   } catch (err) {
-    addMessage({ role: "system_status", text: `创建后端存档失败：${err.message || err}`, status: "failed" });
+    addMessage({ role: "system_status", text: `鍒涘缓鍚庣瀛樻。澶辫触锛?{err.message || err}`, status: "failed" });
     return;
   }
   for (const file of files) {
@@ -2584,14 +2607,14 @@ async function uploadFiles(files) {
   render();
 }
 
-async function uploadSingleBotFile(file, { autoAttach = true, notifySuccess = true, sourceLabel = "文件" } = {}) {
+async function uploadSingleBotFile(file, { autoAttach = true, notifySuccess = true, sourceLabel = "鏂囦欢" } = {}) {
   const archive = activeArchive();
   const account = activeAccount();
-  if (!archive || !account || !file) throw new Error("缺少当前账号或存档");
+  if (!archive || !account || !file) throw new Error("缂哄皯褰撳墠璐﹀彿鎴栧瓨妗?);
   if (!archive.archiveId) await ensureBackendArchive(archive, account);
   if (file.size > LARGE_FILE_WARN_BYTES) {
-    const ok = await confirmAction(`${file.name} 大小为 ${fmtSize(file.size)}，上传和索引可能较慢。继续上传？`);
-    if (!ok) throw new Error("用户取消上传");
+    const ok = confirmAction(`${file.name} 澶у皬涓?${fmtSize(file.size)}锛屼笂浼犲拰绱㈠紩鍙兘杈冩參銆傜户缁笂浼狅紵`);
+    if (!ok) throw new Error("鐢ㄦ埛鍙栨秷涓婁紶");
   }
   const url =
     `/v1/chat/files/${encodeURIComponent(archive.archiveId)}/${encodeURIComponent(archive.groupId)}/upload` +
@@ -2619,7 +2642,7 @@ async function uploadSingleBotFile(file, { autoAttach = true, notifySuccess = tr
     syncDraftToConversation();
     delete uploadProgress[uploadId];
     renderFilePanelOnly();
-    if (notifySuccess) notify(`${sourceLabel}已上传并附加到本次消息`, file.name, "done");
+    if (notifySuccess) notify(`${sourceLabel}宸蹭笂浼犲苟闄勫姞鍒版湰娆℃秷鎭痐, file.name, "done");
     return savedFile;
   } catch (err) {
     const failedId = uid("failed_file");
@@ -2632,8 +2655,8 @@ async function uploadSingleBotFile(file, { autoAttach = true, notifySuccess = tr
       uploadedAt: nowIso(),
       error: err.message || String(err),
     }, ...(state.files[archive.id] || [])];
-    addMessage({ role: "system_status", text: `上传失败：${file.name}\n${err.message || err}`, status: "failed" });
-    notify("文件上传失败", file.name, "error");
+    addMessage({ role: "system_status", text: `涓婁紶澶辫触锛?{file.name}\n${err.message || err}`, status: "failed" });
+    notify("鏂囦欢涓婁紶澶辫触", file.name, "error");
     for (const [id, item] of Object.entries(uploadProgress)) {
       if (item.name === file.name) delete uploadProgress[id];
     }
@@ -2727,7 +2750,7 @@ async function deleteFile(fileId) {
   const archive = activeArchive();
   const file = (state.files[archive?.id] || []).find((f) => f.id === fileId);
   if (!archive || !file) return;
-  if (!await confirmAction(`删除 bot 文件区文件：${file.name}？`)) return;
+  if (!confirmAction(`鍒犻櫎 bot 鏂囦欢鍖烘枃浠讹細${file.name}锛焋)) return;
   try {
     if (archive.archiveId) {
       await fetchJson(`/v1/chat/files/${encodeURIComponent(archive.archiveId)}/${encodeURIComponent(archive.groupId)}/${encodeURIComponent(fileId)}`, {
@@ -2739,7 +2762,7 @@ async function deleteFile(fileId) {
     saveState();
     render();
   } catch (err) {
-    addMessage({ role: "system_status", text: `删除文件失败：${err.message || err}`, status: "failed" });
+    addMessage({ role: "system_status", text: `鍒犻櫎鏂囦欢澶辫触锛?{err.message || err}`, status: "failed" });
   }
 }
 
@@ -2766,7 +2789,7 @@ async function refreshProjectTree(path = state.ui.projectTreePath || ".") {
   const archive = activeArchive();
   const account = activeAccount();
   if (!archive?.currentDir || !archive.projectId || !account) {
-    state.ui.projectTreeStatus = "当前存档未绑定项目目录";
+    state.ui.projectTreeStatus = "褰撳墠瀛樻。鏈粦瀹氶」鐩洰褰?;
     state.ui.projectTree = [];
     saveState();
     render();
@@ -2906,7 +2929,7 @@ async function loadProjectDiff() {
 function explainCurrentDiff() {
   const text = state.ui.projectDiffText || state.ui.projectPreviewText || "";
   if (!text.trim()) return;
-  addDraftText(`请解释这组 diff 的目的、风险和需要验证的地方：\n\n${text.slice(0, 6000)}`);
+  addDraftText(`璇疯В閲婅繖缁?diff 鐨勭洰鐨勩€侀闄╁拰闇€瑕侀獙璇佺殑鍦版柟锛歕n\n${text.slice(0, 6000)}`);
 }
 
 async function abortAndClearQueue() {
@@ -2944,10 +2967,10 @@ function fileQuickAction(fileId, action) {
   if (!file) return;
   attachFile(fileId);
   const prompts = {
-    summary: `请总结这个文件「${file.name}」，列出关键点、异常点和需要注意的问题。`,
-    extract: `请提取这个文件「${file.name}」里的关键数据，必要时整理成表格。`,
-    report: `请基于这个文件「${file.name}」生成结构清晰的报告，区分事实、推断和建议。`,
-    log: `请分析这个日志/错误文件「${file.name}」，按严重程度归类问题并给出修复建议。`,
+    summary: `璇锋€荤粨杩欎釜鏂囦欢銆?{file.name}銆嶏紝鍒楀嚭鍏抽敭鐐广€佸紓甯哥偣鍜岄渶瑕佹敞鎰忕殑闂銆俙,
+    extract: `璇锋彁鍙栬繖涓枃浠躲€?{file.name}銆嶉噷鐨勫叧閿暟鎹紝蹇呰鏃舵暣鐞嗘垚琛ㄦ牸銆俙,
+    report: `璇峰熀浜庤繖涓枃浠躲€?{file.name}銆嶇敓鎴愮粨鏋勬竻鏅扮殑鎶ュ憡锛屽尯鍒嗕簨瀹炪€佹帹鏂拰寤鸿銆俙,
+    log: `璇峰垎鏋愯繖涓棩蹇?閿欒鏂囦欢銆?{file.name}銆嶏紝鎸変弗閲嶇▼搴﹀綊绫婚棶棰樺苟缁欏嚭淇寤鸿銆俙,
   };
   addDraftText(prompts[action] || prompts.summary);
 }
@@ -2957,21 +2980,21 @@ function nodeQuickAction(nodeId, action = "fix") {
   const node = conv?.workflowRuns?.[0]?.nodes?.find((item) => item.id === nodeId);
   if (!node) return;
   const text = action === "explain"
-    ? `请解释这个工作流节点的含义、风险和下一步：\n${node.title}\n${node.detail || ""}`
-    : `刚才这个工作流节点显示了问题，请基于其输出定位原因并修复或给出下一步：\n${node.title}\n${node.detail || ""}`;
+    ? `璇疯В閲婅繖涓伐浣滄祦鑺傜偣鐨勫惈涔夈€侀闄╁拰涓嬩竴姝ワ細\n${node.title}\n${node.detail || ""}`
+    : `鍒氭墠杩欎釜宸ヤ綔娴佽妭鐐规樉绀轰簡闂锛岃鍩轰簬鍏惰緭鍑哄畾浣嶅師鍥犲苟淇鎴栫粰鍑轰笅涓€姝ワ細\n${node.title}\n${node.detail || ""}`;
   addDraftText(text.slice(0, 6000));
 }
 
 function copyText(text) {
   navigator.clipboard?.writeText(text || "").then(
-    () => notify("已复制", "", "done"),
-    () => notify("复制失败", "浏览器拒绝剪贴板访问", "warn")
+    () => notify("宸插鍒?, "", "done"),
+    () => notify("澶嶅埗澶辫触", "娴忚鍣ㄦ嫆缁濆壀璐存澘璁块棶", "warn")
   );
 }
 
-async function confirmAction(message) {
+function confirmAction(message) {
   if (state.settings.reduceConfirmations) return true;
-  return confirmText(message);
+  return confirm(message);
 }
 
 function detailTail(detail) {
@@ -2990,18 +3013,18 @@ function setQueueAutoRun(enabled) {
   render();
 }
 
-async function createAccount() {
-  const displayName = await promptText("账号名称", "本地用户");
+function createAccount() {
+  const displayName = prompt("璐﹀彿鍚嶇О", "鏈湴鐢ㄦ埛");
   if (!displayName) return;
-  let userId = await promptText("用户 ID（必须以字母开头）", `local-${Date.now()}`);
+  let userId = prompt("鐢ㄦ埛 ID锛堝繀椤讳互瀛楁瘝寮€澶达級", `local-${Date.now()}`);
   if (!userId) return;
   if (!/^[a-zA-Z]/.test(userId)) {
-    await alertText("用户 ID 必须以字母开头（a-z 或 A-Z）。");
+    alert("鐢ㄦ埛 ID 蹇呴』浠ュ瓧姣嶅紑澶达紙a-z 鎴?A-Z锛夈€?);
     return;
   }
   state.accounts.push({ userId, displayName, createdAt: nowIso(), lastUsedAt: nowIso() });
   state.activeAccountId = userId;
-  const archive = makeLocalArchive(userId, "默认对话", "");
+  const archive = makeLocalArchive(userId, "榛樿瀵硅瘽", "");
   state.archives.push(archive);
   state.conversations[archive.id] = emptyConversation(archive.id);
   state.files[archive.id] = [];
@@ -3011,10 +3034,10 @@ async function createAccount() {
   render();
 }
 
-async function renameAccount() {
+function renameAccount() {
   const account = activeAccount();
   if (!account) return;
-  const next = await promptText("账号名称", account.displayName);
+  const next = prompt("璐﹀彿鍚嶇О", account.displayName);
   if (!next) return;
   account.displayName = next;
   account.lastUsedAt = nowIso();
@@ -3022,14 +3045,14 @@ async function renameAccount() {
   render();
 }
 
-async function deleteLocalAccount() {
+function deleteLocalAccount() {
   const account = activeAccount();
   if (!account) return;
   if (state.accounts.length <= 1) {
-    await alertText("至少保留一个账号。");
+    alert("鑷冲皯淇濈暀涓€涓处鍙枫€?);
     return;
   }
-  if (!await confirmAction(`删除本地账号：${account.displayName}？后端存档不会被删除。`)) return;
+  if (!confirmAction(`鍒犻櫎鏈湴璐﹀彿锛?{account.displayName}锛熷悗绔瓨妗ｄ笉浼氳鍒犻櫎銆俙)) return;
   const archiveIds = state.archives.filter((a) => a.userId === account.userId).map((a) => a.id);
   state.accounts = state.accounts.filter((a) => a.userId !== account.userId);
   state.archives = state.archives.filter((a) => a.userId !== account.userId);
@@ -3047,12 +3070,12 @@ async function deleteLocalAccount() {
   recoverFromBackend();
 }
 
-async function createArchive() {
+function createArchive() {
   const account = activeAccount();
   if (!account) return;
-  const title = await promptText("存档名称", "新存档");
+  const title = prompt("瀛樻。鍚嶇О", "鏂板瓨妗?);
   if (!title) return;
-  const currentDir = (await promptText("项目目录路径，可为空", "")) || "";
+  const currentDir = prompt("椤圭洰鐩綍璺緞锛屽彲涓虹┖", "") || "";
   const archive = makeLocalArchive(account.userId, title, currentDir);
   state.archives.push(archive);
   state.conversations[archive.id] = emptyConversation(archive.id);
@@ -3066,7 +3089,7 @@ async function createArchive() {
 function duplicateConversationTab() {
   const archive = activeArchive();
   if (!archive) return;
-  const copy = makeLocalArchive(archive.userId, `${archive.title} 副本`, archive.currentDir);
+  const copy = makeLocalArchive(archive.userId, `${archive.title} 鍓湰`, archive.currentDir);
   copy.archiveId = archive.archiveId;
   copy.groupId = archive.groupId;
   copy.projectId = `${archive.projectId || "project"}_${Date.now()}`;
@@ -3089,14 +3112,14 @@ async function syncArchive() {
     await refreshFiles();
     await refreshArtifacts();
   } catch (err) {
-    addMessage({ role: "system_status", text: `同步失败：${err.message || err}`, status: "failed" });
+    addMessage({ role: "system_status", text: `鍚屾澶辫触锛?{err.message || err}`, status: "failed" });
   }
 }
 
 async function renameArchive() {
   const archive = activeArchive();
   if (!archive) return;
-  const next = await promptText("存档名称", archive.title);
+  const next = prompt("瀛樻。鍚嶇О", archive.title);
   if (!next) return;
   archive.title = next;
   archive.lastUsedAt = nowIso();
@@ -3108,7 +3131,7 @@ async function renameArchive() {
 async function editArchiveDir() {
   const archive = activeArchive();
   if (!archive) return;
-  const next = await promptText("项目目录路径，可为空", archive.currentDir || "");
+  const next = prompt("椤圭洰鐩綍璺緞锛屽彲涓虹┖", archive.currentDir || "");
   if (next === null) return;
   archive.currentDir = next;
   archive.localOnly = true;
@@ -3133,10 +3156,10 @@ async function updateBackendProject() {
   }
 }
 
-async function deleteLocalArchive() {
+function deleteLocalArchive() {
   const archive = activeArchive();
   if (!archive) return;
-  if (!await confirmAction(`仅删除本地前端记录：${archive.title}？后端存档不会被删除。`)) return;
+  if (!confirmAction(`浠呭垹闄ゆ湰鍦板墠绔褰曪細${archive.title}锛熷悗绔瓨妗ｄ笉浼氳鍒犻櫎銆俙)) return;
   state.archives = state.archives.filter((a) => a.id !== archive.id);
   delete state.conversations[archive.id];
   delete state.files[archive.id];
@@ -3146,7 +3169,7 @@ async function deleteLocalArchive() {
   if (!next) {
     const account = activeAccount();
     if (account) {
-      const newArchive = makeLocalArchive(account.userId, "默认对话", "");
+      const newArchive = makeLocalArchive(account.userId, "榛樿瀵硅瘽", "");
       state.archives.push(newArchive);
       state.conversations[newArchive.id] = emptyConversation(newArchive.id);
       state.files[newArchive.id] = [];
@@ -3168,9 +3191,9 @@ function archiveLocalOnly(action) {
   render();
 }
 
-async function clearTranscript() {
+function clearTranscript() {
   const conv = activeConversation();
-  if (!conv || !await confirmAction("清空当前前端 transcript？后端记忆不会删除。")) return;
+  if (!conv || !confirmAction("娓呯┖褰撳墠鍓嶇 transcript锛熷悗绔蹇嗕笉浼氬垹闄ゃ€?)) return;
   conv.messages = [];
   conv.workflowRuns = [];
   conv.queue = [];
@@ -3183,41 +3206,41 @@ function exportMarkdown() {
   const archive = activeArchive();
   const conv = activeConversation();
   if (!archive || !conv) return;
-  const lines = [`# ${archive.title}`, "", `- 导出时间：${fmtTime(nowIso())}`, `- 项目目录：${archive.currentDir || "空"}`, ""];
+  const lines = [`# ${archive.title}`, "", `- 瀵煎嚭鏃堕棿锛?{fmtTime(nowIso())}`, `- 椤圭洰鐩綍锛?{archive.currentDir || "绌?}`, ""];
   for (const msg of conv.messages) {
     lines.push(`## ${roleLabel(msg.role)} ${fmtTime(msg.createdAt)}`, "");
     lines.push(msg.text || "");
     if (msg.attachments?.length) {
-      lines.push("", `附件：${fileRefs(msg.attachments).map((f) => f.name).join(", ")}`);
+      lines.push("", `闄勪欢锛?{fileRefs(msg.attachments).map((f) => f.name).join(", ")}`);
     }
     lines.push("");
   }
   downloadBlob(`${archive.title || "bot"}-${Date.now()}.md`, lines.join("\n"), "text/markdown;charset=utf-8");
 }
 
-async function exportWorkflow(format = "json") {
+function exportWorkflow(format = "json") {
   const archive = activeArchive();
   const conv = activeConversation();
   const run = conv?.workflowRuns?.[0];
   if (!archive || !run) {
-    await alertText("当前没有可导出的工作流。");
+    alert("褰撳墠娌℃湁鍙鍑虹殑宸ヤ綔娴併€?);
     return;
   }
   if (format === "md") {
     const lines = [
-      `# ${archive.title} 工作流`,
+      `# ${archive.title} 宸ヤ綔娴乣,
       "",
-      `- 导出时间：${fmtTime(nowIso())}`,
-      `- trace：${run.traceId || "无"}`,
-      `- 状态：${run.status || "unknown"}`,
+      `- 瀵煎嚭鏃堕棿锛?{fmtTime(nowIso())}`,
+      `- trace锛?{run.traceId || "鏃?}`,
+      `- 鐘舵€侊細${run.status || "unknown"}`,
       "",
     ];
     for (const node of run.nodes || []) {
-      lines.push(`## ${node.title || node.kind || "事件"}`);
+      lines.push(`## ${node.title || node.kind || "浜嬩欢"}`);
       lines.push("");
-      lines.push(`- 类型：${node.kind || ""}`);
-      lines.push(`- 状态：${node.status || ""}`);
-      lines.push(`- 时间：${fmtTime(node.createdAt)}`);
+      lines.push(`- 绫诲瀷锛?{node.kind || ""}`);
+      lines.push(`- 鐘舵€侊細${node.status || ""}`);
+      lines.push(`- 鏃堕棿锛?{fmtTime(node.createdAt)}`);
       if (node.detail) {
         lines.push("", "```json", String(node.detail), "```");
       }
@@ -3240,11 +3263,11 @@ function exportStateJson() {
 function importStateJson(file) {
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = async () => {
+  reader.onload = () => {
     try {
       const parsed = JSON.parse(String(reader.result || "{}"));
       const next = normalizeState({ ...defaultState, ...parsed });
-      if (!await confirmAction("导入会替换当前前端本地状态，后端数据不会被删除。继续？")) return;
+      if (!confirmAction("瀵煎叆浼氭浛鎹㈠綋鍓嶅墠绔湰鍦扮姸鎬侊紝鍚庣鏁版嵁涓嶄細琚垹闄ゃ€傜户缁紵")) return;
       state = next;
       attachedFileIds = [];
       currentDraft = "";
@@ -3253,7 +3276,7 @@ function importStateJson(file) {
       render();
       recoverFromBackend();
     } catch (err) {
-      await alertText(`导入失败：${err.message || err}`);
+      alert(`瀵煎叆澶辫触锛?{err.message || err}`);
     }
   };
   reader.readAsText(file, "utf-8");
@@ -3278,30 +3301,30 @@ function cleanupLocalData() {
   render();
   addMessage({
     role: "system_status",
-    text: `已清理当前存档本地数据：工作流 ${beforeRuns} -> ${conv.workflowRuns.length}。后端记录未修改。`,
+    text: `宸叉竻鐞嗗綋鍓嶅瓨妗ｆ湰鍦版暟鎹細宸ヤ綔娴?${beforeRuns} -> ${conv.workflowRuns.length}銆傚悗绔褰曟湭淇敼銆俙,
     status: "done",
   });
 }
 
-async function openCommandPalette() {
-  const cmd = await promptText("命令：new / rename / dir / sync / files / clear / export / workflow / state / import / cleanup / settings / abort / 模板关键词", "");
+function openCommandPalette() {
+  const cmd = prompt("鍛戒护锛歯ew / rename / dir / sync / files / clear / export / workflow / state / import / cleanup / settings / abort / 妯℃澘鍏抽敭璇?, "");
   if (!cmd) return;
   const key = cmd.trim().toLowerCase();
-  if (key === "new") await createArchive();
-  else if (key === "rename") await renameArchive();
-  else if (key === "dir") await editArchiveDir();
+  if (key === "new") createArchive();
+  else if (key === "rename") renameArchive();
+  else if (key === "dir") editArchiveDir();
   else if (key === "sync") syncArchive();
   else if (key === "files") toggleFilePanel();
   else if (key === "project") toggleProjectPanel();
-  else if (key === "clear") await clearTranscript();
+  else if (key === "clear") clearTranscript();
   else if (key === "export") exportMarkdown();
-  else if (key === "workflow") await exportWorkflow("json");
+  else if (key === "workflow") exportWorkflow("json");
   else if (key === "state") exportStateJson();
   else if (key === "import") promptImportStateJson();
   else if (key === "cleanup") cleanupLocalData();
   else if (key === "settings") toggleSettings();
   else if (key === "abort") abortRun();
-  else if (key === "queue") await clearQueue();
+  else if (key === "queue") clearQueue();
   else if (key === "trace") copyText(activeConversation()?.workflowRuns?.[0]?.traceId || "");
   else if (key === "search") {
     $("#transcriptSearch")?.focus();
@@ -3354,7 +3377,6 @@ function render() {
       ${renderPreviewPanel()}
       ${renderNodeDetailsPanel()}
       ${renderBackgroundTasksWindow()}
-      ${renderUiDialog()}
       <div id="notifications">${renderNotifications()}</div>
     </div>
   `;
@@ -3504,26 +3526,6 @@ function renderNotificationsOnly() {
   enhanceButtonTooltips(el);
 }
 
-function renderUiDialog() {
-  if (!activeDialog) return "";
-  const isConfirm = activeDialog.type === "confirm";
-  const isPrompt = activeDialog.type === "prompt";
-  return `
-    <div class="ui-dialog-backdrop" data-dialog-backdrop="1">
-      <div class="ui-dialog" role="dialog" aria-modal="true" aria-labelledby="uiDialogTitle">
-        <div class="ui-dialog-title" id="uiDialogTitle">${escapeHtml(activeDialog.title || (isConfirm ? "确认" : "提示"))}</div>
-        ${activeDialog.message ? `<div class="ui-dialog-message">${escapeHtml(activeDialog.message)}</div>` : ""}
-        ${isPrompt ? `
-          <textarea id="dialogInput" class="ui-dialog-input" rows="${activeDialog.multiline ? 5 : 1}" placeholder="${escapeHtml(activeDialog.placeholder || "")}">${escapeHtml(activeDialog.defaultValue || "")}</textarea>
-        ` : ""}
-        <div class="row ui-dialog-actions">
-          ${isConfirm ? `<button id="dialogCancelBtn">取消</button><button id="dialogPrimaryBtn" class="primary">确定</button>` : `<button id="dialogPrimaryBtn" class="primary">确定</button>`}
-        </div>
-      </div>
-    </div>
-  `;
-}
-
 function renderSidebar() {
   const account = activeAccount();
   const archiveSearch = (state.ui.archiveSearch || "").trim().toLowerCase();
@@ -3537,8 +3539,8 @@ function renderSidebar() {
   return `
     <div class="section">
       <div class="section-title">
-        <span>账号</span>
-        <div class="row"><button id="newAccountBtn">新建</button><button id="renameAccountBtn">改名</button><button class="danger" id="deleteAccountBtn">删除</button></div>
+        <span>璐﹀彿</span>
+        <div class="row"><button id="newAccountBtn">鏂板缓</button><button id="renameAccountBtn">鏀瑰悕</button><button class="danger" id="deleteAccountBtn">鍒犻櫎</button></div>
       </div>
       <select class="account-select" id="accountSelect">
         ${state.accounts.map((a) => `<option value="${escapeHtml(a.userId)}" ${a.userId === state.activeAccountId ? "selected" : ""}>${escapeHtml(a.displayName)}</option>`).join("")}
@@ -3546,22 +3548,22 @@ function renderSidebar() {
     </div>
     <div class="section">
       <div class="section-title">
-        <span>存档</span>
-        <div class="row"><button id="newArchiveBtn">新建</button><button id="duplicateTabBtn">新窗口</button></div>
+        <span>瀛樻。</span>
+        <div class="row"><button id="newArchiveBtn">鏂板缓</button><button id="duplicateTabBtn">鏂扮獥鍙?/button></div>
       </div>
-      <input id="archiveSearchInput" class="wide-input" placeholder="搜索存档/目录；输入 archived 查看归档" value="${escapeHtml(state.ui.archiveSearch || "")}" />
-      <div class="archive-list">${archives.map(renderArchiveItem).join("") || `<div class="empty">没有存档</div>`}</div>
+      <input id="archiveSearchInput" class="wide-input" placeholder="鎼滅储瀛樻。/鐩綍锛涜緭鍏?archived 鏌ョ湅褰掓。" value="${escapeHtml(state.ui.archiveSearch || "")}" />
+      <div class="archive-list">${archives.map(renderArchiveItem).join("") || `<div class="empty">娌℃湁瀛樻。</div>`}</div>
     </div>
     <div class="section">
-      <div class="section-title"><span>对话搜索</span></div>
-      <input id="transcriptSearch" class="wide-input" placeholder="搜索当前 transcript" value="${escapeHtml(state.ui.transcriptSearch || "")}" />
+      <div class="section-title"><span>瀵硅瘽鎼滅储</span></div>
+      <input id="transcriptSearch" class="wide-input" placeholder="鎼滅储褰撳墠 transcript" value="${escapeHtml(state.ui.transcriptSearch || "")}" />
     </div>
     <div class="section">
-      <div class="section-title"><span>本地状态</span></div>
-      <div class="small">队列：${activeConversation()?.queue.length || 0}</div>
-      <div class="small">文件：${(state.files[activeArchive()?.id] || []).length}</div>
-      <div class="small">后端：${escapeHtml(state.settings.backendUrl)}</div>
-      <div class="small">持久化：${idbReady ? "IndexedDB" : "localStorage"}</div>
+      <div class="section-title"><span>鏈湴鐘舵€?/span></div>
+      <div class="small">闃熷垪锛?{activeConversation()?.queue.length || 0}</div>
+      <div class="small">鏂囦欢锛?{(state.files[activeArchive()?.id] || []).length}</div>
+      <div class="small">鍚庣锛?{escapeHtml(state.settings.backendUrl)}</div>
+      <div class="small">鎸佷箙鍖栵細${idbReady ? "IndexedDB" : "localStorage"}</div>
     </div>
   `;
 }
@@ -3571,8 +3573,8 @@ function renderArchiveItem(archive) {
   return `
     <div class="archive-item ${archive.id === state.activeArchiveId ? "active" : ""}" data-archive-id="${escapeHtml(archive.id)}">
       <div class="archive-title">${escapeHtml(archive.title)}</div>
-      <div class="archive-path">${escapeHtml(archive.currentDir || "空目录：普通 bot 模式")}</div>
-      <div class="archive-path">状态：${escapeHtml(conv.status)} · 队列 ${conv.queue.length} ${archive.pinned ? "· pinned" : ""} ${archive.archived ? "· archived" : ""}</div>
+      <div class="archive-path">${escapeHtml(archive.currentDir || "绌虹洰褰曪細鏅€?bot 妯″紡")}</div>
+      <div class="archive-path">鐘舵€侊細${escapeHtml(conv.status)} 路 闃熷垪 ${conv.queue.length} ${archive.pinned ? "路 pinned" : ""} ${archive.archived ? "路 archived" : ""}</div>
     </div>
   `;
 }
@@ -3584,7 +3586,7 @@ function renderNotifications() {
     <div class="toast ${escapeHtml(item.kind || "info")}" data-notice-id="${escapeHtml(item.id)}">
       <div class="toast-title">${escapeHtml(item.title)}</div>
       ${item.detail ? `<div class="toast-detail">${escapeHtml(item.detail)}</div>` : ""}
-      <button class="mini" data-dismiss-notice="${escapeHtml(item.id)}">关闭</button>
+      <button class="mini" data-dismiss-notice="${escapeHtml(item.id)}">鍏抽棴</button>
     </div>
   `).join("")}</div>`;
 }
@@ -3595,25 +3597,25 @@ function renderTopbar() {
   return `
     <div class="topbar">
       <div class="top-title">
-        <strong>${escapeHtml(archive?.title || "未选择存档")}</strong>
-        <span class="small">${escapeHtml(archive?.currentDir || "未绑定项目目录，作为成熟对话 bot 使用")}</span>
+        <strong>${escapeHtml(archive?.title || "鏈€夋嫨瀛樻。")}</strong>
+        <span class="small">${escapeHtml(archive?.currentDir || "鏈粦瀹氶」鐩洰褰曪紝浣滀负鎴愮啛瀵硅瘽 bot 浣跨敤")}</span>
       </div>
       <div class="top-actions">
-        <button id="toggleSidebarBtn">侧栏</button>
-        <button id="toggleWorkflowBtn">工作流</button>
+        <button id="toggleSidebarBtn">渚ф爮</button>
+        <button id="toggleWorkflowBtn">宸ヤ綔娴?/button>
         <span class="status-pill ${conv?.status === "running" ? "running" : conv?.status === "error" ? "error" : ""}">${escapeHtml(conv?.status || "idle")}</span>
-        <button id="recoverBtn">恢复</button>
-        <button id="syncArchiveBtn">同步</button>
-        <button id="renameArchiveBtn">改名</button>
-        <button id="editDirBtn">目录</button>
-        <button id="pinArchiveBtn">固定</button>
-        <button id="archiveArchiveBtn">归档</button>
-        <button id="projectPanelBtn">项目</button>
-        <button id="filePanelBtn">文件</button>
-        <button id="artifactPanelBtn">产物</button>
-        <button id="settingsBtn">设置</button>
-        <button class="danger" id="abortBtn" ${conv?.status === "running" ? "" : "disabled"}>中断</button>
-        <button class="danger" id="abortClearBtn" ${conv?.status === "running" || conv?.queue?.length ? "" : "disabled"}>停止并清队列</button>
+        <button id="recoverBtn">鎭㈠</button>
+        <button id="syncArchiveBtn">鍚屾</button>
+        <button id="renameArchiveBtn">鏀瑰悕</button>
+        <button id="editDirBtn">鐩綍</button>
+        <button id="pinArchiveBtn">鍥哄畾</button>
+        <button id="archiveArchiveBtn">褰掓。</button>
+        <button id="projectPanelBtn">椤圭洰</button>
+        <button id="filePanelBtn">鏂囦欢</button>
+        <button id="artifactPanelBtn">浜х墿</button>
+        <button id="settingsBtn">璁剧疆</button>
+        <button class="danger" id="abortBtn" ${conv?.status === "running" ? "" : "disabled"}>涓柇</button>
+        <button class="danger" id="abortClearBtn" ${conv?.status === "running" || conv?.queue?.length ? "" : "disabled"}>鍋滄骞舵竻闃熷垪</button>
       </div>
     </div>
   `;
@@ -3641,12 +3643,10 @@ function renderQuickTemplates() {
 
 function renderTranscriptHtml() {
   const conv = activeConversation();
-  if (!conv?.messages.length) return `<div class="empty">开始和 bot 对话。可以绑定项目目录，也可以留空作为普通本地助手使用。</div>`;
   const search = (state.ui.transcriptSearch || "").trim().toLowerCase();
   const messages = search
     ? conv.messages.filter((msg) => `${roleLabel(msg.role)}\n${msg.text || ""}`.toLowerCase().includes(search))
     : conv.messages;
-  if (!messages.length) return `<div class="empty">当前搜索没有匹配消息</div>`;
   return messages.map((msg) => renderMessage(msg, search)).join("");
 }
 
@@ -3663,10 +3663,10 @@ function renderTranscript() {
 
 function roleLabel(role) {
   if (role === "assistant") return "bot";
-  if (role === "inserted_user") return "插入";
-  if (role === "system_status") return "状态";
-  if (role === "user") return "你";
-  return role || "系统";
+  if (role === "inserted_user") return "鎻掑叆";
+  if (role === "system_status") return "鐘舵€?;
+  if (role === "user") return "浣?;
+  return role || "绯荤粺";
 }
 
 function highlightText(text, search) {
@@ -3865,7 +3865,7 @@ function renderMarkdownContent(text) {
     }
     out.push(`
       <div class="code-block">
-        <div class="code-block-head"><span>${escapeHtml(lang || "code")}</span><button class="mini" data-copy-code>复制</button></div>
+        <div class="code-block-head"><span>${escapeHtml(lang || "code")}</span><button class="mini" data-copy-code>澶嶅埗</button></div>
         <pre><code${lang ? ` class="language-${escapeHtml(lang)}"` : ""}>${escapeHtml(code.join("\n"))}</code></pre>
       </div>
     `);
@@ -3915,9 +3915,9 @@ function renderMessageProgressPreview(msg) {
     ? items.map((item) => {
         const label = String(item.label || "").trim();
         const body = String(item.text || "").trim();
-        return body ? `${label ? `**${label}**：` : ""}${body}` : "";
+        return body ? `${label ? `**${label}**锛歚 : ""}${body}` : "";
       }).filter(Boolean).join("\n\n")
-    : "正在处理请求，等待主回复开始。";
+    : "姝ｅ湪澶勭悊璇锋眰锛岀瓑寰呬富鍥炲寮€濮嬨€?;
   return `
     <div class="message-progress-preview markdown-body" aria-live="polite">
       ${renderMessageContent(text, "")}
@@ -3927,7 +3927,7 @@ function renderMessageProgressPreview(msg) {
 
 function renderMessageCurrentAction(msg) {
   if (msg.status !== "streaming" || !msg.currentActionText) return "";
-  return `<div class="message-current-action" aria-live="polite"><span>当前</span><strong>${escapeHtml(msg.currentActionText)}</strong></div>`;
+  return `<div class="message-current-action" aria-live="polite"><span>褰撳墠</span><strong>${escapeHtml(msg.currentActionText)}</strong></div>`;
 }
 
 function renderMessage(msg, search = "") {
@@ -3937,8 +3937,8 @@ function renderMessage(msg, search = "") {
   return `
     <div class="message ${escapeHtml(msg.role)}" data-message-id="${escapeHtml(msg.id || "")}">
       <div class="message-head">
-        <span>${escapeHtml(roleLabel(msg.role))}${msg.sendMode ? ` · ${escapeHtml(msg.sendMode)}` : ""}</span>
-        <span>${fmtTime(msg.createdAt)} ${msg.status ? `· ${escapeHtml(msg.status)}` : ""}</span>
+        <span>${escapeHtml(roleLabel(msg.role))}${msg.sendMode ? ` 路 ${escapeHtml(msg.sendMode)}` : ""}</span>
+        <span>${fmtTime(msg.createdAt)} ${msg.status ? `路 ${escapeHtml(msg.status)}` : ""}</span>
       </div>
       <div class="message-text markdown-body">${hasText ? renderMessageContent(text, search) : (msg.status === "streaming" ? renderMessageProgressPreview(msg) : "")}</div>
       ${renderMessageCurrentAction(msg)}
@@ -3953,26 +3953,26 @@ function renderComposer() {
   return `
     <div class="composer">
       ${renderQuickTemplates()}
-      ${files.length ? `<div class="attachments">${files.map((f) => `<span class="chip">${escapeHtml(f.name)} <button data-detach-file="${escapeHtml(f.id)}">×</button></span>`).join("")}</div>` : ""}
-      <textarea id="draftInput" placeholder="向 bot 发送消息。Enter 发送，Shift+Enter 换行。">${escapeHtml(currentDraft)}</textarea>
+      ${files.length ? `<div class="attachments">${files.map((f) => `<span class="chip">${escapeHtml(f.name)} <button data-detach-file="${escapeHtml(f.id)}">脳</button></span>`).join("")}</div>` : ""}
+      <textarea id="draftInput" placeholder="鍚?bot 鍙戦€佹秷鎭€侲nter 鍙戦€侊紝Shift+Enter 鎹㈣銆?>${escapeHtml(currentDraft)}</textarea>
       <div class="composer-actions">
         <div class="row">
           <input type="file" id="fileInput" multiple hidden />
-          <button id="uploadBtn">上传文件</button>
-          <button id="clearDraftBtn">清空输入</button>
-          <button id="queueBtn">加入队列</button>
-          <button id="insertBtn" ${conv?.status === "running" ? "" : "disabled"}>插入当前任务</button>
+          <button id="uploadBtn">涓婁紶鏂囦欢</button>
+          <button id="clearDraftBtn">娓呯┖杈撳叆</button>
+          <button id="queueBtn">鍔犲叆闃熷垪</button>
+          <button id="insertBtn" ${conv?.status === "running" ? "" : "disabled"}>鎻掑叆褰撳墠浠诲姟</button>
           <select id="defaultSendModeSelect">
-            <option value="normal" ${state.settings.defaultSendMode === "normal" ? "selected" : ""}>发送</option>
-            <option value="queue" ${state.settings.defaultSendMode === "queue" ? "selected" : ""}>队列</option>
-            <option value="insert" ${state.settings.defaultSendMode === "insert" ? "selected" : ""}>插入</option>
+            <option value="normal" ${state.settings.defaultSendMode === "normal" ? "selected" : ""}>鍙戦€?/option>
+            <option value="queue" ${state.settings.defaultSendMode === "queue" ? "selected" : ""}>闃熷垪</option>
+            <option value="insert" ${state.settings.defaultSendMode === "insert" ? "selected" : ""}>鎻掑叆</option>
           </select>
-          <button id="paletteBtn">命令</button>
-          <button id="toggleQueueAutoBtn">${conv?.autoRunQueue === false ? "队列手动" : "队列自动"}</button>
+          <button id="paletteBtn">鍛戒护</button>
+          <button id="toggleQueueAutoBtn">${conv?.autoRunQueue === false ? "闃熷垪鎵嬪姩" : "闃熷垪鑷姩"}</button>
         </div>
-        <button class="primary" id="sendBtn">发送</button>
+        <button class="primary" id="sendBtn">鍙戦€?/button>
       </div>
-      ${conv?.queue.length ? `<div class="queue-panel"><div class="section-title"><strong>队列</strong><button data-clear-queue="1">清空</button></div>${conv.queue.map((q, idx) => `<div class="queue-item"><span>${escapeHtml(q.text.slice(0, 120))}</span><div class="row"><button data-move-queue="${escapeHtml(q.id)}" data-dir="-1" ${idx === 0 ? "disabled" : ""}>上移</button><button data-move-queue="${escapeHtml(q.id)}" data-dir="1" ${idx === conv.queue.length - 1 ? "disabled" : ""}>下移</button><button data-edit-queue="${escapeHtml(q.id)}">编辑</button><button data-remove-queue="${escapeHtml(q.id)}">删除</button></div></div>`).join("")}</div>` : ""}
+      ${conv?.queue.length ? `<div class="queue-panel"><div class="section-title"><strong>闃熷垪</strong><button data-clear-queue="1">娓呯┖</button></div>${conv.queue.map((q, idx) => `<div class="queue-item"><span>${escapeHtml(q.text.slice(0, 120))}</span><div class="row"><button data-move-queue="${escapeHtml(q.id)}" data-dir="-1" ${idx === 0 ? "disabled" : ""}>涓婄Щ</button><button data-move-queue="${escapeHtml(q.id)}" data-dir="1" ${idx === conv.queue.length - 1 ? "disabled" : ""}>涓嬬Щ</button><button data-edit-queue="${escapeHtml(q.id)}">缂栬緫</button><button data-remove-queue="${escapeHtml(q.id)}">鍒犻櫎</button></div></div>`).join("")}</div>` : ""}
     </div>
   `;
 }
@@ -3985,26 +3985,27 @@ function renderWorkflow() {
   return `
       <div class="section">
         <div class="section-title">
-          <span>工作流</span>
-          <span class="small">${escapeHtml(run?.traceId || "无 trace")}</span>
+          <span>宸ヤ綔娴?/span>
+          <span class="small">${escapeHtml(run?.traceId || "鏃?trace")}</span>
         </div>
         <div class="row" style="margin-bottom:8px">
-          <button id="exportWorkflowJsonBtn">导出 JSON</button>
-          <button id="exportWorkflowMdBtn">导出 Markdown</button>
-          <button id="refreshRunBtn" ${run?.traceId ? "" : "disabled"}>刷新 run</button>
+          <button id="exportWorkflowJsonBtn">瀵煎嚭 JSON</button>
+          <button id="exportWorkflowMdBtn">瀵煎嚭 Markdown</button>
+          <button id="refreshRunBtn" ${run?.traceId ? "" : "disabled"}>鍒锋柊 run</button>
         </div>
         <div class="segmented" style="margin-bottom:8px">
-          <button class="${compact ? "" : "active"}" data-workflow-view="detailed">详细</button>
-          <button class="${compact ? "active" : ""}" data-workflow-view="compact">简洁</button>
+          <button class="${compact ? "" : "active"}" data-workflow-view="detailed">璇︾粏</button>
+          <button class="${compact ? "active" : ""}" data-workflow-view="compact">绠€娲?/button>
         </div>
         <select id="workflowFilter">
         ${["all", "run", "progress", "workflow", "command", "helper", "error"].map((v) => `<option value="${v}" ${state.ui.workflowFilter === v ? "selected" : ""}>${v}</option>`).join("")}
       </select>
-      <input id="workflowSearch" style="margin-top:8px;width:100%" placeholder="搜索工作流" value="${escapeHtml(state.ui.workflowSearch || "")}" />
-      <div class="small" style="margin-top:8px">${compact ? "简洁模式按时间追加最新动作，一行显示当前在做什么。" : "主进程、helper、工具调用和命令事件会在这里持续追加。"}</div>
-      ${run ? `<div class="small" style="margin-top:6px">命令：${Number(run.commandCount || 0)} · helper：${Number(run.helperCount || 0)}</div>` : ""}
+      <input id="workflowSearch" style="margin-top:8px;width:100%" placeholder="鎼滅储宸ヤ綔娴? value="${escapeHtml(state.ui.workflowSearch || "")}" />
+      <div class="small" style="margin-top:8px">${compact ? "绠€娲佹ā寮忔寜鏃堕棿杩藉姞鏈€鏂板姩浣滐紝涓€琛屾樉绀哄綋鍓嶅湪鍋氫粈涔堛€? : "涓昏繘绋嬨€乭elper銆佸伐鍏疯皟鐢ㄥ拰鍛戒护浜嬩欢浼氬湪杩欓噷鎸佺画杩藉姞銆?}</div>
+      ${run ? `<div class="small" style="margin-top:6px">鍛戒护锛?{Number(run.commandCount || 0)} 路 helper锛?{Number(run.helperCount || 0)}</div>` : ""}
     </div>
-    <div class="workflow-list ${compact ? "compact" : ""}">${compact ? renderWorkflowCompact(run) : (nodes.length ? nodes.map((node) => renderNode(node, 0)).join("") : `<div class="empty">暂无工作流事件</div>`)}</div>
+    ${renderBackgroundTasksPanel()}
+    <div class="workflow-list ${compact ? "compact" : ""}">${compact ? renderWorkflowCompact(run) : (nodes.length ? nodes.map((node) => renderNode(node, 0)).join("") : `<div class="empty">鏆傛棤宸ヤ綔娴佷簨浠?/div>`)}</div>
   `;
 }
 
@@ -4030,7 +4031,7 @@ function workflowDisplayNodes(nodes, run = activeConversation()?.workflowRuns?.[
   const main = {
     id: "workflow_main",
     kind: "main",
-    title: "主进程",
+    title: "涓昏繘绋?,
     status: activeRun?.status === "running" ? "running" : (activeRun?.status || "done"),
     detail: "",
     children: [],
@@ -4078,7 +4079,7 @@ function workflowDisplayNodes(nodes, run = activeConversation()?.workflowRuns?.[
     main.children.push({
       ...node,
       id: node.id || rawNode.id,
-      title: node.title || rawNode.title || "事件",
+      title: node.title || rawNode.title || "浜嬩欢",
     });
   }
   for (const helper of helpers) {
@@ -4121,15 +4122,15 @@ function compactNodeText(node) {
     textDetail,
     node.title,
   ].filter(Boolean);
-  let text = String(candidates[0] || rawDetail || node.kind || "事件");
+  let text = String(candidates[0] || rawDetail || node.kind || "浜嬩欢");
   text = text.replace(/\s+/g, " ").trim();
   if (!text && rawDetail) text = rawDetail.replace(/\s+/g, " ").trim();
-  return text || "事件";
+  return text || "浜嬩欢";
 }
 
 function renderWorkflowCompact(run) {
   const rows = workflowCompactRows(run);
-  if (!rows.length) return `<div class="empty">暂无工作流事件</div>`;
+  if (!rows.length) return `<div class="empty">鏆傛棤宸ヤ綔娴佷簨浠?/div>`;
   return `
     <div class="workflow-compact-list">
       ${rows.map((node) => {
@@ -4158,8 +4159,8 @@ function renderNode(node, depth = 0) {
   return `
     <div class="node-item ${escapeHtml(node.status)}" data-node-id="${escapeHtml(node.id)}" data-node-depth="${Number(depth)}" style="--depth:${Number(depth)}">
       <div class="node-title">
-        <span>${canToggle ? `<button class="mini" data-toggle-node="${escapeHtml(node.id)}">${detailOpen ? "收起" : "展开"}</button>` : ""} ${escapeHtml(node.title)}</span>
-        <span class="small">${escapeHtml(node.kind)} · ${escapeHtml(node.status)}</span>
+        <span>${canToggle ? `<button class="mini" data-toggle-node="${escapeHtml(node.id)}">${detailOpen ? "鏀惰捣" : "灞曞紑"}</button>` : ""} ${escapeHtml(node.title)}</span>
+        <span class="small">${escapeHtml(node.kind)} 路 ${escapeHtml(node.status)}</span>
       </div>
       ${detail && (!children.length || detailOpen) ? `<div class="node-detail ${detailOpen ? "open" : ""}">${escapeHtml(detailOpen ? detail : detail.slice(0, 900))}</div>` : ""}
       ${children.length && detailOpen ? `<div class="node-children">${children.map((child) => renderNode(child, depth + 1)).join("")}</div>` : ""}
@@ -4214,24 +4215,24 @@ function renderFilePanel() {
     <div class="file-panel ${state.ui.filePanelOpen ? "open" : ""}" id="filePanel">
       <div class="section">
         <div class="section-title">
-          <span>bot 文件区</span>
-          <div class="row"><button id="refreshFilesBtn">刷新</button><button id="closeFilePanelBtn">关闭</button></div>
+          <span>bot 鏂囦欢鍖?/span>
+          <div class="row"><button id="refreshFilesBtn">鍒锋柊</button><button id="closeFilePanelBtn">鍏抽棴</button></div>
         </div>
-        <div class="drop-zone" id="dropZone">拖放或粘贴文件上传到 bot 文件区。这里不写入项目目录。</div>
-        <input id="fileSearchInput" class="wide-input" style="margin-top:8px" placeholder="搜索文件区" value="${escapeHtml(state.ui.fileSearch || "")}" />
+        <div class="drop-zone" id="dropZone">鎷栨斁鎴栫矘璐存枃浠朵笂浼犲埌 bot 鏂囦欢鍖恒€傝繖閲屼笉鍐欏叆椤圭洰鐩綍銆?/div>
+        <input id="fileSearchInput" class="wide-input" style="margin-top:8px" placeholder="鎼滅储鏂囦欢鍖? value="${escapeHtml(state.ui.fileSearch || "")}" />
       </div>
       ${progressItems.length ? `<div class="section">${progressItems.map((item) => {
         const percent = Math.max(0, Math.min(100, Number(item.percent || 0)));
         return `
           <div class="upload-progress">
-            <div class="small">${escapeHtml(item.name)}：${escapeHtml(item.status)} ${percent}%</div>
-            <div class="upload-progress-track" aria-label="${escapeHtml(item.name)} 上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
+            <div class="small">${escapeHtml(item.name)}锛?{escapeHtml(item.status)} ${percent}%</div>
+            <div class="upload-progress-track" aria-label="${escapeHtml(item.name)} 涓婁紶杩涘害" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent}">
               <div class="upload-progress-bar" style="width:${percent}%"></div>
             </div>
           </div>
         `;
       }).join("")}</div>` : ""}
-      <div class="file-list">${files.length ? files.map(renderFileItem).join("") : `<div class="empty">暂无文件</div>`}</div>
+      <div class="file-list">${files.length ? files.map(renderFileItem).join("") : `<div class="empty">鏆傛棤鏂囦欢</div>`}</div>
     </div>
   `;
 }
@@ -4279,12 +4280,12 @@ function renderArtifactPanel() {
     <div class="artifact-panel ${state.ui.artifactPanelOpen ? "open" : ""}" id="artifactPanel">
       <div class="section">
         <div class="section-title">
-          <span>bot 产物区</span>
-          <div class="row"><button id="refreshArtifactsBtn">刷新</button><button id="closeArtifactPanelBtn">关闭</button></div>
+          <span>bot 浜х墿鍖?/span>
+          <div class="row"><button id="refreshArtifactsBtn">鍒锋柊</button><button id="closeArtifactPanelBtn">鍏抽棴</button></div>
         </div>
-        <div class="small">这里显示 bot 本轮或历史任务生成并可下载的文件。上传给 bot 的输入文件在“文件”区。</div>
+        <div class="small">杩欓噷鏄剧ず bot 鏈疆鎴栧巻鍙蹭换鍔＄敓鎴愬苟鍙笅杞界殑鏂囦欢銆備笂浼犵粰 bot 鐨勮緭鍏ユ枃浠跺湪鈥滄枃浠垛€濆尯銆?/div>
       </div>
-      <div class="file-list">${artifacts.length ? artifacts.map(renderArtifactItem).join("") : `<div class="empty">暂无产物。任务生成文件后会自动出现在这里。</div>`}</div>
+      <div class="file-list">${artifacts.length ? artifacts.map(renderArtifactItem).join("") : `<div class="empty">鏆傛棤浜х墿銆備换鍔＄敓鎴愭枃浠跺悗浼氳嚜鍔ㄥ嚭鐜板湪杩欓噷銆?/div>`}</div>
     </div>
   `;
 }
@@ -4294,12 +4295,12 @@ function renderArtifactItem(file) {
   return `
     <div class="file-item artifact-item">
       <div class="file-name">${escapeHtml(file.name || file.rel_path || "artifact")}</div>
-      <div class="file-meta">${file.size ? fmtSize(file.size) + " · " : ""}${escapeHtml(file.rel_path || file.workspace_path || "")}</div>
+      <div class="file-meta">${file.size ? fmtSize(file.size) + " 路 " : ""}${escapeHtml(file.rel_path || file.workspace_path || "")}</div>
       <div class="row" style="margin-top:8px">
-        <button data-preview-artifact="${escapeHtml(file.id)}" ${!url ? "disabled" : ""}>预览</button>
-        <button data-download-artifact="${escapeHtml(url)}" ${!url ? "disabled" : ""}>下载</button>
-        <button data-copy-artifact-url="${escapeHtml(url)}" ${!url ? "disabled" : ""}>复制 URL</button>
-        <button data-copy-artifact-path="${escapeHtml(file.rel_path || file.workspace_path || "")}">复制路径</button>
+        <button data-preview-artifact="${escapeHtml(file.id)}" ${!url ? "disabled" : ""}>棰勮</button>
+        <button data-download-artifact="${escapeHtml(url)}" ${!url ? "disabled" : ""}>涓嬭浇</button>
+        <button data-copy-artifact-url="${escapeHtml(url)}" ${!url ? "disabled" : ""}>澶嶅埗 URL</button>
+        <button data-copy-artifact-path="${escapeHtml(file.rel_path || file.workspace_path || "")}">澶嶅埗璺緞</button>
       </div>
     </div>
   `;
@@ -4310,18 +4311,18 @@ function renderFileItem(file) {
   return `
     <div class="file-item ${failed ? "failed" : ""}">
       <div class="file-name">${escapeHtml(file.name)}</div>
-      <div class="file-meta">${fmtSize(file.size)} · ${escapeHtml(file.status || "ready")} · ${escapeHtml(file.workspace_path || "")}</div>
+      <div class="file-meta">${fmtSize(file.size)} 路 ${escapeHtml(file.status || "ready")} 路 ${escapeHtml(file.workspace_path || "")}</div>
       ${file.error ? `<div class="file-error">${escapeHtml(file.error)}</div>` : ""}
       <div class="row" style="margin-top:8px">
-        <button data-attach-file="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>附加</button>
-        <button data-preview-file="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>预览</button>
-        <button data-download-file="${escapeHtml(file.download_url || "")}" ${!file.download_url ? "disabled" : ""}>下载</button>
-        <button data-copy-file-path="${escapeHtml(file.workspace_path || "")}">复制路径</button>
-        <button data-copy-file-url="${escapeHtml(file.download_url || "")}" ${!file.download_url ? "disabled" : ""}>复制 URL</button>
-        <button data-file-action="summary" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>总结</button>
-        <button data-file-action="extract" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>提取</button>
-        <button data-file-action="report" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>报告</button>
-        <button class="danger" data-delete-file="${escapeHtml(file.id)}">删除</button>
+        <button data-attach-file="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>闄勫姞</button>
+        <button data-preview-file="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>棰勮</button>
+        <button data-download-file="${escapeHtml(file.download_url || "")}" ${!file.download_url ? "disabled" : ""}>涓嬭浇</button>
+        <button data-copy-file-path="${escapeHtml(file.workspace_path || "")}">澶嶅埗璺緞</button>
+        <button data-copy-file-url="${escapeHtml(file.download_url || "")}" ${!file.download_url ? "disabled" : ""}>澶嶅埗 URL</button>
+        <button data-file-action="summary" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>鎬荤粨</button>
+        <button data-file-action="extract" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>鎻愬彇</button>
+        <button data-file-action="report" data-file-id="${escapeHtml(file.id)}" ${failed ? "disabled" : ""}>鎶ュ憡</button>
+        <button class="danger" data-delete-file="${escapeHtml(file.id)}">鍒犻櫎</button>
       </div>
     </div>
   `;
@@ -4336,33 +4337,33 @@ function renderProjectPanel() {
     <div class="project-panel ${state.ui.projectPanelOpen ? "open" : ""}">
       <div class="section">
         <div class="section-title">
-          <span>项目目录</span>
-          <div class="row"><button id="refreshProjectTreeBtn" ${hasDir ? "" : "disabled"}>刷新</button><button id="closeProjectPanelBtn">关闭</button></div>
+          <span>椤圭洰鐩綍</span>
+          <div class="row"><button id="refreshProjectTreeBtn" ${hasDir ? "" : "disabled"}>鍒锋柊</button><button id="closeProjectPanelBtn">鍏抽棴</button></div>
         </div>
-        <div class="small">${escapeHtml(archive?.currentDir || "当前存档未绑定项目目录")}</div>
+        <div class="small">${escapeHtml(archive?.currentDir || "褰撳墠瀛樻。鏈粦瀹氶」鐩洰褰?)}</div>
         <div class="row" style="margin-top:8px">
-          <input id="projectTreePathInput" class="wide-input" placeholder="相对目录" value="${escapeHtml(state.ui.projectTreePath || ".")}" />
+          <input id="projectTreePathInput" class="wide-input" placeholder="鐩稿鐩綍" value="${escapeHtml(state.ui.projectTreePath || ".")}" />
         </div>
       </div>
       <div class="section project-tools">
-        <input id="projectSearchInput" placeholder="搜索项目文件" value="${escapeHtml(state.ui.projectSearch || "")}" />
-        <button id="projectSearchBtn" ${hasDir ? "" : "disabled"}>搜索</button>
-        <input id="projectCommandInput" placeholder="在当前目录运行命令" value="${escapeHtml(state.ui.projectCommand || "")}" />
-        <button id="projectRunBtn" ${hasDir ? "" : "disabled"}>运行</button>
-        <input id="projectDiffPathInput" placeholder="diff 源文件" value="${escapeHtml(state.ui.projectDiffPath || state.ui.projectPreviewPath || "")}" />
-        <input id="projectDiffCompareInput" placeholder="diff 对比文件，可空" value="${escapeHtml(state.ui.projectDiffComparePath || "")}" />
+        <input id="projectSearchInput" placeholder="鎼滅储椤圭洰鏂囦欢" value="${escapeHtml(state.ui.projectSearch || "")}" />
+        <button id="projectSearchBtn" ${hasDir ? "" : "disabled"}>鎼滅储</button>
+        <input id="projectCommandInput" placeholder="鍦ㄥ綋鍓嶇洰褰曡繍琛屽懡浠? value="${escapeHtml(state.ui.projectCommand || "")}" />
+        <button id="projectRunBtn" ${hasDir ? "" : "disabled"}>杩愯</button>
+        <input id="projectDiffPathInput" placeholder="diff 婧愭枃浠? value="${escapeHtml(state.ui.projectDiffPath || state.ui.projectPreviewPath || "")}" />
+        <input id="projectDiffCompareInput" placeholder="diff 瀵规瘮鏂囦欢锛屽彲绌? value="${escapeHtml(state.ui.projectDiffComparePath || "")}" />
         <button id="projectDiffBtn" ${hasDir ? "" : "disabled"}>Diff</button>
-        <button id="projectDiffExplainBtn">解释 diff</button>
+        <button id="projectDiffExplainBtn">瑙ｉ噴 diff</button>
       </div>
       <div class="project-body">
         <div class="project-tree">
-          <div class="small">状态：${escapeHtml(state.ui.projectTreeStatus || "idle")}</div>
-          ${tree.length ? tree.map(renderProjectTreeItem).join("") : `<div class="empty">暂无目录数据</div>`}
-          ${results.length ? `<div class="section-title" style="margin-top:12px"><span>搜索结果</span></div>${results.map(renderProjectSearchItem).join("")}` : ""}
+          <div class="small">鐘舵€侊細${escapeHtml(state.ui.projectTreeStatus || "idle")}</div>
+          ${tree.length ? tree.map(renderProjectTreeItem).join("") : `<div class="empty">鏆傛棤鐩綍鏁版嵁</div>`}
+          ${results.length ? `<div class="section-title" style="margin-top:12px"><span>鎼滅储缁撴灉</span></div>${results.map(renderProjectSearchItem).join("")}` : ""}
         </div>
         <div class="project-preview">
           <div class="section-title">
-            <span>${escapeHtml(state.ui.projectPreviewPath || "文件预览")}</span>
+            <span>${escapeHtml(state.ui.projectPreviewPath || "鏂囦欢棰勮")}</span>
             <span class="small">${escapeHtml(state.ui.projectPreviewStatus || "idle")}</span>
           </div>
           <pre class="preview-text">${escapeHtml(state.ui.projectPreviewText || state.ui.projectCommandOutput || "")}</pre>
@@ -4396,73 +4397,73 @@ function renderSettingsPanel() {
     <div class="settings-panel ${state.ui.settingsOpen ? "open" : ""}">
       <div class="section">
         <div class="section-title">
-          <span>设置</span>
-          <button id="closeSettingsBtn">关闭</button>
+          <span>璁剧疆</span>
+          <button id="closeSettingsBtn">鍏抽棴</button>
         </div>
         <label class="settings-row">
-          <span>后端</span>
+          <span>鍚庣</span>
           <input id="backendUrlInput" value="${escapeHtml(state.settings.backendUrl)}" />
         </label>
         <label class="settings-row">
-          <span>监控流</span>
+          <span>鐩戞帶娴?/span>
           <select id="monitorEnabledSelect">
-            <option value="true" ${state.settings.monitorEnabled ? "selected" : ""}>开启</option>
-            <option value="false" ${!state.settings.monitorEnabled ? "selected" : ""}>关闭</option>
+            <option value="true" ${state.settings.monitorEnabled ? "selected" : ""}>寮€鍚?/option>
+            <option value="false" ${!state.settings.monitorEnabled ? "selected" : ""}>鍏抽棴</option>
           </select>
         </label>
         <label class="settings-row">
-          <span>插入策略</span>
+          <span>鎻掑叆绛栫暐</span>
           <select id="insertModeSelect">
-            <option value="inject_only" ${state.settings.insertMode === "inject_only" ? "selected" : ""}>只插入当前任务</option>
-            <option value="inject_then_followup" ${state.settings.insertMode === "inject_then_followup" ? "selected" : ""}>插入后由后端判定续跑</option>
+            <option value="inject_only" ${state.settings.insertMode === "inject_only" ? "selected" : ""}>鍙彃鍏ュ綋鍓嶄换鍔?/option>
+            <option value="inject_then_followup" ${state.settings.insertMode === "inject_then_followup" ? "selected" : ""}>鎻掑叆鍚庢帓闃熶笅涓€杞?/option>
           </select>
         </label>
         <label class="settings-row">
-          <span>工作流保留</span>
+          <span>宸ヤ綔娴佷繚鐣?/span>
           <input id="maxWorkflowRunsInput" type="number" min="1" max="500" value="${escapeHtml(state.settings.maxWorkflowRuns)}" />
         </label>
         <label class="settings-row">
-          <span>队列自动执行</span>
+          <span>闃熷垪鑷姩鎵ц</span>
           <select id="autoRunQueueSelect">
-            <option value="true" ${state.settings.autoRunQueue !== false ? "selected" : ""}>开启</option>
-            <option value="false" ${state.settings.autoRunQueue === false ? "selected" : ""}>关闭</option>
+            <option value="true" ${state.settings.autoRunQueue !== false ? "selected" : ""}>寮€鍚?/option>
+            <option value="false" ${state.settings.autoRunQueue === false ? "selected" : ""}>鍏抽棴</option>
           </select>
         </label>
         <label class="settings-row">
-          <span>自动继续</span>
+          <span>鑷姩缁х画</span>
           <select id="autoContinueSelect">
-            <option value="false" ${!state.settings.autoContinue ? "selected" : ""}>关闭</option>
-            <option value="true" ${state.settings.autoContinue ? "selected" : ""}>开启</option>
+            <option value="false" ${!state.settings.autoContinue ? "selected" : ""}>鍏抽棴</option>
+            <option value="true" ${state.settings.autoContinue ? "selected" : ""}>寮€鍚?/option>
           </select>
         </label>
         <label class="settings-row">
-          <span>自动继续时间上限(秒)</span>
+          <span>鑷姩缁х画鏃堕棿涓婇檺(绉?</span>
           <input id="autoContinueMaxSecInput" type="number" min="1" max="86400" value="${escapeHtml(state.settings.autoContinueMaxSec || 900)}" />
         </label>
         <label class="settings-row">
-          <span>减少确认</span>
+          <span>鍑忓皯纭</span>
           <select id="reduceConfirmationsSelect">
-            <option value="false" ${!state.settings.reduceConfirmations ? "selected" : ""}>关闭</option>
-            <option value="true" ${state.settings.reduceConfirmations ? "selected" : ""}>开启</option>
+            <option value="false" ${!state.settings.reduceConfirmations ? "selected" : ""}>鍏抽棴</option>
+            <option value="true" ${state.settings.reduceConfirmations ? "selected" : ""}>寮€鍚?/option>
           </select>
         </label>
         <label class="settings-row">
-          <span>日志 tail</span>
+          <span>鏃ュ織 tail</span>
           <input id="logTailLinesInput" type="number" min="20" max="2000" value="${escapeHtml(state.settings.logTailLines)}" />
         </label>
         <label class="settings-row">
-          <span>字号</span>
+          <span>瀛楀彿</span>
           <input id="fontSizeInput" type="number" min="12" max="20" value="${escapeHtml(state.settings.fontSize)}" />
         </label>
         <div class="row">
-          <button id="saveSettingsBtn" class="primary">保存</button>
-          <button id="clearTranscriptBtn">清空 transcript</button>
-          <button id="exportBtn">导出 Markdown</button>
-          <button id="exportStateBtn">导出状态</button>
-          <button id="importStateBtn">导入状态</button>
-          <button id="cleanupBtn">清理本地</button>
+          <button id="saveSettingsBtn" class="primary">淇濆瓨</button>
+          <button id="clearTranscriptBtn">娓呯┖ transcript</button>
+          <button id="exportBtn">瀵煎嚭 Markdown</button>
+          <button id="exportStateBtn">瀵煎嚭鐘舵€?/button>
+          <button id="importStateBtn">瀵煎叆鐘舵€?/button>
+          <button id="cleanupBtn">娓呯悊鏈湴</button>
           <input id="stateImportInput" type="file" accept="application/json,.json" hidden />
-          <button class="danger" id="deleteArchiveBtn">删本地存档</button>
+          <button class="danger" id="deleteArchiveBtn">鍒犳湰鍦板瓨妗?/button>
         </div>
       </div>
     </div>
@@ -4474,23 +4475,23 @@ function renderPreviewPanel() {
   const file = (state.files[archive?.id] || []).find((f) => f.id === state.ui.previewFileId);
   const type = file ? previewTypeForFile(file) : "";
   const url = file?.download_url ? backend(file.download_url) : "";
-  let body = `<div class="empty">未选择文件</div>`;
+  let body = `<div class="empty">鏈€夋嫨鏂囦欢</div>`;
   if (file) {
     if (type === "image") body = `<img class="preview-media" src="${escapeHtml(url)}" alt="${escapeHtml(file.name)}" />`;
     else if (type === "pdf") body = `<iframe class="preview-frame" src="${escapeHtml(url)}"></iframe>`;
     else if (type === "audio") body = `<audio class="preview-media" controls src="${escapeHtml(url)}"></audio>`;
     else if (type === "video") body = `<video class="preview-media" controls src="${escapeHtml(url)}"></video>`;
     else if (type === "text") body = `<pre class="preview-text">${escapeHtml(state.ui.previewText || state.ui.previewStatus)}</pre>`;
-    else body = `<div class="empty">该类型暂不内嵌预览，可下载查看。</div>`;
+    else body = `<div class="empty">璇ョ被鍨嬫殏涓嶅唴宓岄瑙堬紝鍙笅杞芥煡鐪嬨€?/div>`;
   }
   return `
     <div class="preview-panel ${state.ui.previewOpen ? "open" : ""}">
       <div class="section">
         <div class="section-title">
-          <span>${escapeHtml(file?.name || "文件预览")}</span>
-          <button id="closePreviewBtn">关闭</button>
+          <span>${escapeHtml(file?.name || "鏂囦欢棰勮")}</span>
+          <button id="closePreviewBtn">鍏抽棴</button>
         </div>
-        <div class="small">状态：${escapeHtml(state.ui.previewStatus || "idle")}</div>
+        <div class="small">鐘舵€侊細${escapeHtml(state.ui.previewStatus || "idle")}</div>
       </div>
       <div class="preview-body">${body}</div>
     </div>
@@ -4506,10 +4507,10 @@ function renderNodeDetailsPanel() {
     <div class="node-details-panel ${node ? "open" : ""}">
       <div class="section">
         <div class="section-title">
-          <span>${escapeHtml(node?.title || "节点详情")}</span>
-          <button id="closeNodeDetailsBtn">关闭</button>
+          <span>${escapeHtml(node?.title || "鑺傜偣璇︽儏")}</span>
+          <button id="closeNodeDetailsBtn">鍏抽棴</button>
         </div>
-        ${node ? `<div class="small">${escapeHtml(node.kind)} · ${escapeHtml(node.status)} · ${fmtTime(node.createdAt)}</div>` : ""}
+        ${node ? `<div class="small">${escapeHtml(node.kind)} 路 ${escapeHtml(node.status)} 路 ${fmtTime(node.createdAt)}</div>` : ""}
       </div>
       <pre class="preview-text">${escapeHtml(node?.detail || "")}</pre>
     </div>
@@ -4781,7 +4782,6 @@ function bindEvents() {
   bindWorkflowEvents();
   bindDropZone();
   bindNotificationEvents();
-  bindUiDialogEvents();
 }
 
 function bindArtifactEvents() {
@@ -4815,26 +4815,6 @@ function bindArtifactEvents() {
 function bindNotificationEvents() {
   document.querySelectorAll("[data-dismiss-notice]").forEach((el) => {
     el.addEventListener("click", () => dismissNotification(el.dataset.dismissNotice));
-  });
-}
-
-function bindUiDialogEvents() {
-  if (!activeDialog) return;
-  const input = $("#dialogInput");
-  const submit = () => {
-    if (activeDialog?.type === "prompt") closeUiDialog(input?.value ?? "");
-    else closeUiDialog(true);
-  };
-  $("#dialogPrimaryBtn")?.addEventListener("click", submit);
-  $("#dialogCancelBtn")?.addEventListener("click", () => closeUiDialog(null));
-  document.querySelector("[data-dialog-backdrop]")?.addEventListener("click", (event) => {
-    if (event.target?.dataset?.dialogBackdrop) closeUiDialog(null);
-  });
-  input?.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey && !activeDialog.multiline) {
-      event.preventDefault();
-      submit();
-    }
   });
 }
 
@@ -4979,11 +4959,6 @@ window.addEventListener("keydown", (e) => {
     saveState();
     render();
   } else if (e.key === "Escape") {
-    if (activeDialog) {
-      e.preventDefault();
-      closeUiDialog(null);
-      return;
-    }
     state.ui.filePanelOpen = false;
     state.ui.projectPanelOpen = false;
     state.ui.settingsOpen = false;
@@ -5047,3 +5022,4 @@ async function boot() {
 }
 
 boot();
+

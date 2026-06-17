@@ -34,7 +34,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
-from app.api.interrupts import interrupt_messages_raw, pop_interrupt_messages, push_interrupt_message
+from app.api.interrupts import interrupt_messages_raw, pop_interrupt_messages, pop_interrupt_payloads, push_interrupt_message
 from app.schemas.api import (
     AutoContinueCheckRequest,
     AutoContinueCheckResponse,
@@ -128,6 +128,9 @@ def _normalize_auto_continue(raw: dict, req: AutoContinueCheckRequest) -> AutoCo
         reason = reason[:300]
 
     continue_message = str(raw.get("continue_message") or "继续").strip() or "继续"
+    if should_continue and continue_message in {"继续", "缁х画"}:
+        anchor = _truncate_for_auto_continue(req.user_message, 80)
+        continue_message = f"继续完成同一任务：{anchor}" if anchor else "继续"
     if len(continue_message) > 80:
         continue_message = continue_message[:80].strip() or "继续"
 
@@ -170,6 +173,10 @@ def _interrupt_key(archive_id: str, group_id: str, user_id: str) -> tuple[str, s
 
 def _pop_interrupt_messages(archive_id: str, group_id: str, user_id: str) -> list[str]:
     return pop_interrupt_messages(archive_id, group_id, user_id)
+
+
+def _pop_interrupt_payloads(archive_id: str, group_id: str, user_id: str) -> list[dict]:
+    return pop_interrupt_payloads(archive_id, group_id, user_id)
 
 
 def _push_interrupt_message(req: InterruptMessageRequest) -> None:
@@ -511,6 +518,37 @@ async def chat_stream(req: ChatRequest):
         orch_task = None
         env_task = None
         dream_sup = None
+        interrupt_state = {"loaded": False, "payloads": [], "seen": set()}
+
+        def _shared_interrupt_payloads() -> list[dict]:
+            fresh = _pop_interrupt_payloads(
+                req.archive_id, req.group_id, req.user_id,
+            )
+            if fresh:
+                for item in fresh:
+                    payload = dict(item)
+                    client_msg_id = str(payload.get("client_msg_id") or "").strip()
+                    signature = client_msg_id or repr((
+                        payload.get("kind"),
+                        payload.get("source"),
+                        payload.get("message"),
+                        payload.get("meta"),
+                    ))
+                    if signature in interrupt_state["seen"]:
+                        continue
+                    interrupt_state["seen"].add(signature)
+                    interrupt_state["payloads"].append(payload)
+                interrupt_state["loaded"] = True
+            elif not interrupt_state["loaded"]:
+                interrupt_state["loaded"] = True
+            return [dict(item) for item in interrupt_state["payloads"]]
+
+        def _shared_interrupt_messages() -> list[str]:
+            return [
+                str(item.get("message") or "").strip()
+                for item in _shared_interrupt_payloads()
+                if str(item.get("kind") or "user") == "user" and str(item.get("message") or "").strip()
+            ]
         try:
             try:
                 from app.core.dream import supervisor as dream_sup
@@ -522,9 +560,8 @@ async def chat_stream(req: ChatRequest):
                 async for event_name, payload in orchestrate(
                     req,
                     trace_id=trace_id,
-                    interrupt_messages_getter=lambda: _pop_interrupt_messages(
-                        req.archive_id, req.group_id, req.user_id,
-                    ),
+                    interrupt_messages_getter=_shared_interrupt_messages,
+                    interrupt_payloads_getter=_shared_interrupt_payloads,
                 ):
                     yield _record_and_format_event(event_name, payload)
             else:
@@ -542,9 +579,8 @@ async def chat_stream(req: ChatRequest):
                     agen = orchestrate(
                         req,
                         trace_id=trace_id,
-                        interrupt_messages_getter=lambda: _pop_interrupt_messages(
-                            req.archive_id, req.group_id, req.user_id,
-                        ),
+                        interrupt_messages_getter=_shared_interrupt_messages,
+                        interrupt_payloads_getter=_shared_interrupt_payloads,
                     ).__aiter__()
                     orch_task = asyncio.create_task(agen.__anext__())
                     env_task = asyncio.create_task(event_queue.get())
@@ -671,6 +707,23 @@ async def interrupt_message(req: InterruptMessageRequest) -> dict:
     if active:
         queue_req = req.model_copy(update={"archive_id": archive_id, "group_id": group_id, "user_id": user_id})
         _push_interrupt_message(queue_req)
+        stage = guard.get_stage(archive_id, group_id, user_id) if hasattr(guard, "get_stage") else ""
+        signaled = await guard.signal_abort(
+            archive_id=archive_id,
+            group_id=group_id,
+            user_id=user_id,
+        )
+        debug.log(
+            "chat.interrupt_message.abort",
+            f"active={active} signaled={signaled} stage={stage or 'none'} archive={archive_id} group={group_id} user={user_id}",
+        )
+        return {
+            "ok": active,
+            "queued": True,
+            "aborted": signaled,
+            "stage": stage,
+            "reason": "" if signaled else ("queued_no_preempt" if stage in {"round3", "round2_5"} else "not_preempted"),
+        }
     return {"ok": active}
 
 
@@ -921,8 +974,8 @@ async def abort_chat(body: dict):
         group_id=group_id,
         user_id=user_id,
     )
+    stage = guard.get_stage(archive_id, group_id, user_id) if hasattr(guard, "get_stage") else ""
     if not ok:
-        stage = guard.get_stage(archive_id, group_id, user_id)
         debug.log("chat.abort.done", f"ok={ok} stage={stage or 'none'}")
         return {"ok": False, "reason": "no_active_task" if not stage else f"stage={stage}"}
     # signal_abort affects the current task; stop mode also suppresses immediate follow-up work.
@@ -932,8 +985,11 @@ async def abort_chat(body: dict):
         user_id=user_id,
         duration_sec=20.0,
     )
-    debug.log("chat.abort.done", f"ok={ok} stop_mode_entered=20s")
-    return {"ok": ok}
+    debug.log("chat.abort.done", f"ok={ok} stage={stage or 'none'} stop_mode_entered=20s")
+    response = {"ok": ok}
+    if stage:
+        response["stage"] = stage
+    return response
 
 
 @router.get("/stage")

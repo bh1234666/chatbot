@@ -3726,6 +3726,47 @@ def _translate_windows_command(cmd: str, ws_dir: str) -> str:
         stripped_cmd = null_translated
         cmd = stripped_cmd
 
+    def _translate_unix_sleep_segments(src: str) -> str:
+        """Translate simple shell `sleep` waits into a cmd.exe-safe form.
+
+        This targets command-segment waits such as `sleep 5 && ...` that a
+        Unix-trained model may emit on Windows. It avoids touching Python code
+        or arbitrary quoted text by only rewriting segment-leading commands.
+        """
+
+        def repl(match: re.Match) -> str:
+            prefix = match.group("prefix") or ""
+            seconds_text = match.group("seconds")
+            try:
+                seconds_value = float(seconds_text)
+            except ValueError:
+                return match.group(0)
+            if seconds_value < 0:
+                return match.group(0)
+            if seconds_value.is_integer():
+                ps_wait = f"Start-Sleep -Seconds {int(seconds_value)}"
+            else:
+                millis = max(1, int(round(seconds_value * 1000.0)))
+                ps_wait = f"Start-Sleep -Milliseconds {millis}"
+            translated_sleep = f'powershell -NoProfile -Command "{ps_wait}"'
+            return f"{prefix}{translated_sleep}"
+
+        return re.sub(
+            r'(?P<prefix>(?:^|&&\s*|\|\|\s*))sleep\s+(?P<seconds>\d+(?:\.\d+)?)\b',
+            repl,
+            src,
+            flags=re.IGNORECASE,
+        )
+
+    sleep_translated = _translate_unix_sleep_segments(stripped_cmd)
+    if sleep_translated != stripped_cmd:
+        debug.log(
+            "workspace.translate.sleep",
+            f"unix sleep command translated for Windows: {sleep_translated[:120]}",
+        )
+        stripped_cmd = sleep_translated
+        cmd = stripped_cmd
+
     # set VAR=value && python -c "..." → preserve the env prefix safely, but still move -c code to a temp file.
     consumed_set = _consume_leading_set_assignments(stripped_cmd)
     if consumed_set:

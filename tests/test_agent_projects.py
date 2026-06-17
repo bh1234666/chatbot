@@ -293,3 +293,41 @@ async def test_agent_project_run_isolates_pytest_from_parent_repo(monkeypatch, t
     assert ".env_pytest_empty.ini" in captured["command"]
     assert (root / ".env_pytest_empty.ini").is_file()
     assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
+
+
+async def test_agent_project_run_timeout_kills_process_tree(tmp_path):
+    import sys
+    import time
+    from app.api import agent
+    from app.core import environment_projects
+
+    root = tmp_path / "proj"
+    root.mkdir()
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(environment_projects, "_read_mapping", lambda: {
+            "projects": {
+                "u:p1": {
+                    "user_id": "u",
+                    "project_key": "p1",
+                    "archive_id": "arch_1",
+                    "group_id": "env_user_u",
+                    "root_dir": str(root),
+                    "project_name": "proj",
+                },
+            }
+        })
+        cmd = (
+            f'"{sys.executable}" -c '
+            '"import time; print(123, flush=True); time.sleep(5); print(456, flush=True)"'
+        )
+        start = time.monotonic()
+        result = await agent.project_run("p1", {"command": cmd, "timeout_sec": 1}, user_id="u")
+        elapsed = time.monotonic() - start
+    finally:
+        monkeypatch.undo()
+
+    assert elapsed < 3.0
+    assert result["ok"] is False
+    assert result["timed_out"] is True
+    assert "456" not in result["stdout"]

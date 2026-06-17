@@ -175,6 +175,11 @@ class ResponsePlan(BaseModel):
     delivery_partial: list[str] = Field(default_factory=list)  # L5-2 (2026-05-09): promote 失败的 deliverable 名
     upgrade_to_hard: bool = False  # medium 路径下模型觉得困难时可申请升级
     upgrade_to_veryhard: bool = False  # hard 路径下模型觉得极度困难时可申请升级
+    # Round2-only route corrections. These refine later Round2 stages but must
+    # never downgrade the workflow to easy.
+    round2_complexity: Optional[Literal["medium", "hard"]] = None
+    round2_needs_tools: Optional[bool] = None
+    round2_needs_recall: Optional[bool] = None
 
 
 # ── Bot 管理 ──────────────────────────────────────────────────

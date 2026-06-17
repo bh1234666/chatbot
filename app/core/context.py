@@ -2220,6 +2220,14 @@ def round3_messages(
         "You may say you saw, read, checked, ran, or verified something only when the response plan or work/tool evidence supports it. When evidence is missing, state that the part needs checking or was not completed.\n"
         "看过、读过、跑过、验证过等动作声明需要证据支撑。\n"
     )
+    round3_dynamic_blocks.append(
+        "## User-visible wording boundary\n"
+        "Use work/tool evidence, but final prose must not expose internal execution names: helper/delegate/Round*, "
+        "`_helpers_shared`, `_shared`, `internal_shared`, `_env`, `.temp`, `internal_run_*`, `processing_records`, "
+        "guard labels, toolchain/helper wording, or `_voice_*.wav`. "
+        "Describe these as work evidence, project checks, generated files, file areas, automated steps, or the voice reply; "
+        "name only user-facing deliverables from file delivery facts."
+    )
 
     # ── 2026-05-02 part15:plan 不一致时,作为本轮动态事实放到 user tail ──
     # 保持在动态块后部，让当前回复模型看到最新交付一致性事实，但不污染 system prefix。

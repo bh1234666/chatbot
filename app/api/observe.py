@@ -17,6 +17,7 @@ from app.core.bg_tasks import schedule
 from app.schemas.api import ObserveRequest, ObserveResponse
 from app.memory import archive as archive_dao
 from app.memory import group_messages as gm
+from app.memory import hot
 from app.memory import kb as kb_mem
 
 
@@ -47,6 +48,15 @@ async def observe(
         user_name=req.user_name,
         content=req.content,
         addressed_bot=req.addressed_bot,
+    )
+    await hot.append_group_event(
+        archive_id=archive_id,
+        group_id=group_id,
+        actor_user_id=req.user_id,
+        actor_name=req.user_name,
+        narration=f"{req.user_name}: {req.content}",
+        raw_content=req.content,
+        kind="narration",
     )
     schedule(
         kb_mem.maybe_compress_kb(archive_id, group_id),

@@ -33,6 +33,7 @@ from app.llm.tools.memory_guard import (
     workspace_memory_limits,
 )
 from app.llm.tools.output_spill import spill_text_field, write_tool_output_spill
+from app.llm.tools.environment_background import ENV_BACKGROUND_SCHEMA, handle_background_tool
 from app.llm.tools.process_utils import _kill_process_tree
 from app.llm.tools.result_budget import apply_result_budget
 from app.llm.tools.workspace import _translate_windows_command
@@ -1330,6 +1331,7 @@ ENVIRONMENT_TOOL_SCHEMAS = [
     ENV_APPLY_REPLACE_SCHEMA,
     ENV_APPLY_CREATE_SCHEMA,
     ENV_RUN_SCHEMA,
+    ENV_BACKGROUND_SCHEMA,
 ]
 
 
@@ -1533,6 +1535,8 @@ async def handle_environment_tool(name: str, workspace_dir: str, args: dict) -> 
             result = _handle_apply_create(workspace_dir, args)
         elif name == "env_run":
             result = await _handle_run(args, workspace_dir=workspace_dir)
+        elif name == "env_background":
+            result = await handle_background_tool(workspace_dir, args)
         else:
             result = {"ok": False, "error": f"unknown environment tool: {name}"}
     except Exception as e:

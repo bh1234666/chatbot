@@ -192,13 +192,20 @@ After all needed tools, output exactly one strict JSON object, first character `
   "voice_reply_text": "only for explicit final voice-reply text; otherwise empty",
   "voice_reply_file": "only when a generated audio file is the final voice reply; otherwise empty",
   "upgrade_to_hard": false,
-  "upgrade_to_veryhard": false
+  "upgrade_to_veryhard": false,
+  "round2_complexity": null,
+  "round2_needs_tools": null,
+  "round2_needs_recall": null
 }
 ```
 
 When the work is done, the very next assistant message is this JSON object itself. A pre-final summary, contract self-assessment, acceptance checklist, or "the plan would satisfy..." narration costs an extra full-context turn and gets discarded; put completion facts inside `intent`/`key_points`/`internal_note` directly.
 
+`round2_complexity`, `round2_needs_tools`, and `round2_needs_recall` are optional corrections to the Round2 route for later planning stages. Leave them `null` unless the visible evidence shows the entry route was wrong. `round2_complexity` may be only `"medium"` or `"hard"`; never output `"easy"` or use these fields to downgrade out of Round2.
+
 `intent`, `key_points`, `deliverables`, `delivery_partial`, and voice reply fields are user-facing plan inputs for Round3. Express results, evidence, uncertainty, blockers, and files without internal routing labels such as helper/delegate/producer/background work, unless the user explicitly asks about those implementation labels. Keep internal workflow notes in `internal_note` and phrase them generically.
+
+If the user asks to add, remove, revise, select, or compare against a referenced prior answer/version/item, a conclusion like "already included", "already satisfied", "no change needed", or "no further action" requires concrete source evidence from the referenced content. Put the compared excerpt or precise evidence in `key_points`. If you cannot see enough of that prior content, call recall/search/read tools or set `round2_needs_recall=true` and upgrade instead of emitting a no-action plan.
 
 `deliverables` lists only generated or freshly accepted user-facing filenames from this round that satisfy the current user request. Exclude uploads, pre-existing files, historical task outputs, internal evidence, framework contracts, scripts, staged copies, caches, and failed versions unless the current request explicitly re-delivers/reuses a pre-existing file and `key_points` states why.
 

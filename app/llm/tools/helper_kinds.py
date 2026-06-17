@@ -532,8 +532,13 @@ def _filter_tools_for_kind(kind: str, all_tools: list) -> list:
         k = "read"
     if k == "summarize":
         k = "inventory"
+    try:
+        from app.core.runtime_mode import is_environment_mode
+        environment_mode = bool(is_environment_mode())
+    except Exception:
+        environment_mode = False
 
-    cache_key = (k, _helper_tool_filter_signature(all_tools))
+    cache_key = (k, environment_mode, _helper_tool_filter_signature(all_tools))
     cached = _HELPER_TOOL_FILTER_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -604,6 +609,8 @@ def _filter_tools_for_kind(kind: str, all_tools: list) -> list:
                         filtered.append(EDIT_WORKSPACE_TOOL_SCHEMA)
                     continue
                 filtered.append(t)
+            continue
+        if name == "env_background" and not (k == "code" and environment_mode):
             continue
         if name == "workspace" and k == "verify":
             from app.llm.tools.tool_schemas import VERIFY_WORKSPACE_TOOL_SCHEMA

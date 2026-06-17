@@ -1,21 +1,9 @@
-"""Primary orchestration entrypoint implementation."""
+﻿"""Primary orchestration entrypoint implementation."""
 from __future__ import annotations
 
-import asyncio
-import glob
-import json
-import logging
-import os
 import re
-import shutil
-import time as _time
-import uuid
-from typing import AsyncIterator, Optional
 
-from app.core import debug
 from app.core.orchestrator_utils import _is_internal_deliverable_file
-
-log = logging.getLogger(__name__)
 
 
 _ENV_PROJECT_PATH_RE = re.compile(
@@ -66,6 +54,8 @@ _USER_VISIBLE_INTERNAL_ACTION_RE = re.compile(
     r"<\s*(?:read|write|edit|glob|search|run|tool|env_[a-z_]+)\b",
     re.IGNORECASE,
 )
+
+
 def _looks_like_user_visible_protocol_text(text: str) -> bool:
     """Detect hidden tool/protocol fragments before streaming final text.
 
@@ -274,64 +264,27 @@ def _background_interrupt_context_block(payloads: list[dict]) -> str:
     return "\n".join(lines)
 
 
-_STOP_INTERRUPT_HINTS = (
-    "interrupt", "stop", "pause", "abort", "cancel", "halt",
-    "中断", "停止", "停下", "暂停", "打断", "终止", "取消",
-)
-
-_REORGANIZE_INTERRUPT_HINTS = (
-    "reorganize", "re-organize",
-    "重新整理", "整理一下",
-)
-
-
-def _is_control_interrupt_message(text: str) -> bool:
-    """Return true for mid-turn control messages that should not replace the task."""
-    value = str(text or "").strip()
-    if not value:
-        return False
-    lowered = value.lower()
-    if any(hint in lowered or hint in value for hint in _STOP_INTERRUPT_HINTS):
-        return True
-    return any(hint in lowered or hint in value for hint in _REORGANIZE_INTERRUPT_HINTS)
-
-
 def _message_with_user_interrupts(message: str, payloads: list[dict]) -> str:
     """Merge user interrupt messages into the active request for rerouting."""
     user_payloads, _background_payloads, _other_payloads = _classify_interrupt_payloads(payloads)
-    control_messages: list[str] = []
-    replacement_messages: list[str] = []
+    user_messages: list[str] = []
     seen: set[str] = set()
     for payload in user_payloads:
         text = str(payload.get("message") or "").strip()
         if not text or text in seen:
             continue
         seen.add(text)
-        if _is_control_interrupt_message(text):
-            control_messages.append(text)
-        else:
-            replacement_messages.append(text)
-    if not control_messages and not replacement_messages:
+        user_messages.append(text)
+    if not user_messages:
         return message
-    blocks = [message]
-    if replacement_messages:
-        joined = "\n".join(f"- {text}" for text in replacement_messages[:5])
-        blocks.append(
-            "## Mid-turn user interruption\n"
-            "The user sent the following newer instruction while this request was being routed. "
-            "Treat it as the latest instruction for this same turn and let it override conflicting earlier details.\n"
-            f"{joined}"
-        )
-    if control_messages:
-        joined = "\n".join(f"- {text}" for text in control_messages[:5])
-        blocks.append(
-            "## Mid-turn control interruption\n"
-            "The user interrupted the running turn with a control request. Do not treat this as a replacement task. "
-            "Keep the original user request as the task, but adjust the response according to the control request "
-            "(for example stop ongoing work, summarize current evidence, or reorganize the answer).\n"
-            f"{joined}"
-        )
-    return "\n\n".join(blocks)
+    joined = "\n".join(f"- {text}" for text in user_messages[:5])
+    return (
+        f"{message}\n\n"
+        "## Mid-turn user interruption\n"
+        "The user sent the following newer instruction while this request was being routed. "
+        "Treat it as the latest instruction for this same turn and let it override conflicting earlier details.\n"
+        f"{joined}"
+    )
 
 def _environment_project_tool_route(message: str) -> tuple[bool, bool, str]:
     """Classify project-mode turns that need real project tools.
@@ -2133,6 +2086,11 @@ async def orchestrate(
                     {"flagged": sorted(_internal_in_want)},
                 )
             if _deliverable_warning_facts:
+                existing_points = list(plan.key_points or [])
+                for _fact in _deliverable_warning_facts:
+                    if _fact not in existing_points:
+                        existing_points.append(_fact)
+                plan.key_points = existing_points
                 _note = (plan.internal_note or "").strip()
                 _warn_note = "deliverable boundary facts recorded for final response"
                 plan.internal_note = ((_note + " | " if _note else "") + _warn_note)[:300]

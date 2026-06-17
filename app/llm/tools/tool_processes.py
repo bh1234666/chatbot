@@ -27,7 +27,7 @@ PROCESSES_TOOL_SCHEMA = {
             "## Actions\n"
             "- **list**: List all processes you own (or all in your trace if main thread).\n"
             "  Returns: {\"ok\": true, \"processes\": [...], \"stats\": {...}}\n"
-            "- **kill**: Kill a specific process by proc_id. Requires a valid kill reason.\n"
+            "- **kill**: Kill a specific process by proc_id. Requires a valid kill reason. Set terminate=true for a hard terminate that also clears preserved helper state.\n"
             "  Returns fields such as ok, killed_proc_id, and error.\n"
             "\n"
             "## Valid kill reasons (required for helper kills)\n"
@@ -75,6 +75,14 @@ PROCESSES_TOOL_SCHEMA = {
                         "终止原因，必须使用允许值。"
                     ),
                 },
+                "terminate": {
+                    "type": "boolean",
+                    "description": (
+                        "For action=kill only. true means hard terminate the helper and clear preserved helper state/workspace when available.\n"
+                        "Hard terminate the helper and clear preserved helper state/workspace when available."
+                    ),
+                    "default": False,
+                },
             },
             "required": ["action", "owner"],
         },
@@ -111,6 +119,7 @@ async def handle_processes(args: dict) -> dict[str, Any]:
     elif action == "kill":
         proc_id = (args.get("proc_id") or "").strip()
         reason = (args.get("reason") or "").strip()
+        terminate = bool(args.get("terminate", False))
 
         if not proc_id:
             return {"ok": False, "error": "Missing proc_id. Use processes(action='list') to find killable proc_id values.\n缺少 proc_id 参数。"}
@@ -125,9 +134,51 @@ async def handle_processes(args: dict) -> dict[str, Any]:
                 ),
             }
 
+        helper = await reg.get(proc_id)
         result = await reg.kill(
             proc_id, requested_by=owner, reason=reason,
+            force=terminate,
         )
+        if not terminate or not result.get("ok") or result.get("proc_type") != "helper":
+            return result
+
+        helper_task_id = str(result.get("task_id") or getattr(helper, "helper_task_id", "") or "").strip()
+        helper_ws = str(getattr(helper, "helper_workspace", "") or "").strip()
+        helper_archive_id = str(getattr(helper, "archive_id", "") or "").strip()
+        helper_group_id = str(getattr(helper, "group_id", "") or "").strip()
+        helper_user_id = str(getattr(helper, "user_id", "") or "").strip()
+
+        if helper_ws:
+            try:
+                import shutil
+                from pathlib import Path
+
+                ws_path = Path(helper_ws).resolve()
+                shutil.rmtree(ws_path, ignore_errors=True)
+                result["helper_workspace_removed"] = not ws_path.exists()
+                result["helper_workspace"] = str(ws_path)
+            except Exception as exc:
+                result["helper_workspace_removed"] = False
+                result["helper_workspace_error"] = f"{type(exc).__name__}: {exc}"
+
+        if helper_task_id and helper_archive_id and helper_group_id and helper_user_id:
+            try:
+                from app.core import pause_state as _pause_state
+
+                await _pause_state.remove_helper_from_pause(
+                    archive_id=helper_archive_id,
+                    group_id=helper_group_id,
+                    user_id=helper_user_id,
+                    task_id=helper_task_id,
+                )
+                result["pause_state_pruned"] = True
+            except Exception as exc:
+                result["pause_state_pruned"] = False
+                result["pause_state_error"] = f"{type(exc).__name__}: {exc}"
+
+        result["terminate"] = terminate
+        if terminate:
+            result["terminate_mode"] = "hard"
         return result
 
     else:

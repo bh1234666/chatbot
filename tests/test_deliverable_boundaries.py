@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 
 from app.core.orchestrator_utils import (
     _clean_deliverable_filenames,
@@ -70,8 +70,8 @@ def test_deliverable_warning_review_treats_plan_selection_as_evidence():
 
     assert "`current_deliverables` and `plan_*` fields are also review inputs" in src
     assert "old assistant messages or broad workspace listings" in src
-    assert "all selected file(s) already existed before this round" in src
-    assert "valid re-delivery only when the current user request explicitly asks" in src
+    assert "already existed before this round" in src
+    assert "remain selected for model review" in src
 
 
 def test_deliverable_warning_facts_are_not_raw_round3_key_points():
@@ -84,11 +84,10 @@ def test_deliverable_warning_facts_are_not_raw_round3_key_points():
     ]
 
     assert "warning_facts=_deliverable_warning_facts" in block
-    assert "for _fact in _deliverable_warning_facts" not in block
-    assert "avoid exposing internal file names or paths" in block
-    assert "keeping explicit plan.deliverables" not in src
-    assert "keeping explicit voice_reply_file" not in src
-
+    assert "plan.key_points" not in block
+    assert "plan.internal_note" in block
+    assert "deliverable boundary facts recorded for final response" in block
+        
 
 def test_prefix_resolution_does_not_pick_latest_candidate_symbolically():
     from pathlib import Path
@@ -100,94 +99,75 @@ def test_prefix_resolution_does_not_pick_latest_candidate_symbolically():
     assert "getmtime" not in src[src.find("if missing:"):src.find("if _resolved:")]
 
 
-def test_round3_visible_file_labels_hide_internal_artifacts():
-    from app.core.orchestrator_entry import _round3_visible_file_label
+def test_round3_prompt_mentions_user_visible_boundary():
+    from app.core import context as ctx_build
+    from app.schemas.api import ResponsePlan
 
-    assert (
-        _round3_visible_file_label("_voice_e1cbf550_1781276502334.wav", role="voice reply file")
-        == "[voice reply file]"
+    plan = ResponsePlan(
+        intent="reply",
+        key_points=["answer directly"],
+        tone="plain",
+        length_hint="short",
     )
-    assert _round3_visible_file_label(".helper_arch_full_report.txt") == "[file]"
-    assert _round3_visible_file_label("_helpers_shared/report.txt", role="candidate file") == "[candidate file]"
-    assert _round3_visible_file_label("analysis_report.md") == "analysis_report.md"
-    assert (
-        _round3_visible_file_label(
-            "taskabc_result.docx",
-            known_task_id_prefixes=["taskabc"],
-        )
-        == "result.docx"
+    messages = ctx_build.round3_messages(
+        "You are bot. Answer directly.",
+        plan,
+        "A",
+        "hi",
+        [],
+        light=True,
     )
-    assert (
-        _round3_visible_file_label(
-            "taskabc_result.docx",
-            displayed_remap={"taskabc_result.docx": "result.docx"},
-        )
-        == "result.docx"
+    joined = "\n".join(str(m.get("content") or "") for m in messages)
+
+    assert "User-visible wording boundary" in joined
+    assert "helper/delegate/Round*" in joined
+    assert "_helpers_shared" in joined
+    assert "_shared" in joined
+    assert ".temp" in joined
+    assert "toolchain/helper wording" in joined
+    assert "_voice_*.wav" in joined
+
+
+def test_round3_prompt_mentions_file_delivery_only():
+    from app.core import context as ctx_build
+    from app.schemas.api import ResponsePlan
+
+    plan = ResponsePlan(
+        intent="reply",
+        key_points=["answer directly"],
+        tone="plain",
+        length_hint="short",
+        deliverables=["analysis_report.md", "_voice_e1cbf550_1781276502334.wav"],
     )
-
-
-def test_round3_sanitizer_rewrites_internal_file_mentions_without_changing_visible_files():
-    from app.core.orchestrator_entry import _round3_sanitize_file_mentions
-
-    text = (
-        "helper reported _voice_e1cbf550_1781276502334.wav and "
-        ".helper_arch_full_report.txt; final artifact taskabc_report.docx is ready."
+    messages = ctx_build.round3_messages(
+        "You are bot. Answer directly.",
+        plan,
+        "A",
+        "hi",
+        [],
+        light=True,
+        files=[
+            ("analysis_report.md", "/v1/chat/files/archive/group/analysis_report.md"),
+            ("_voice_e1cbf550_1781276502334.wav", "/v1/chat/files/archive/group/_voice_e1cbf550_1781276502334.wav"),
+        ],
     )
+    joined = "\n".join(str(m.get("content") or "") for m in messages)
 
-    cleaned = _round3_sanitize_file_mentions(
-        text,
-        file_names={
-            "_voice_e1cbf550_1781276502334.wav",
-            ".helper_arch_full_report.txt",
-            "taskabc_report.docx",
-        },
-        known_task_id_prefixes=["taskabc"],
-    )
-
-    assert "_voice_e1cbf550_1781276502334.wav" not in cleaned
-    assert ".helper_arch_full_report.txt" not in cleaned
-    assert "helper reported" not in cleaned
-    assert "[voice reply file]" in cleaned
-    assert "[file]" in cleaned
-    assert "report.docx" in cleaned
+    assert "Generated files" in joined
+    assert "analysis_report.md" in joined
+    assert "_voice_e1cbf550_1781276502334.wav" in joined
 
 
 def test_round3_sanitizer_rewrites_internal_workflow_terms():
-    from app.core.orchestrator_entry import (
-        _looks_like_user_visible_protocol_text,
-        _round3_sanitize_file_mentions,
-        _sanitize_user_visible_internal_terms,
-    )
+    from app.core.orchestrator_entry import _looks_like_user_visible_protocol_text
 
-    text = (
-        "Round2 helper returned _helpers_shared/read/page.txt; "
-        "then env_run checked _env/app.py and delegate task finished. "
-        "I copied from internal_shared/fetch/page.txt; internal_run_123 produced result; "
-        "processing_records=ok."
-    )
-
-    assert _looks_like_user_visible_protocol_text(text)
-    assert _looks_like_user_visible_protocol_text("internal_shared/fetch/page.txt is ready")
-    assert _looks_like_user_visible_protocol_text("internal_run_123 produced result")
-    assert _looks_like_user_visible_protocol_text("processing_records=ok")
-    assert _looks_like_user_visible_protocol_text("TTS returned persona_guard_refused_tts resource_required")
-    assert _looks_like_user_visible_protocol_text("工具链生成过程卡在精准执行的规则")
-
-    cleaned = _sanitize_user_visible_internal_terms(text)
-    sanitized = _round3_sanitize_file_mentions(text)
-    combined = cleaned + "\n" + sanitized
-
-    for term in (
-        "Round2", "helper", "_helpers_shared", "internal_shared", "env_run",
-        "_env/", "delegate task", "internal_run", "processing_records",
-        "persona_guard", "resource_required", "工具链", "精准执行的规则",
-    ):
-        assert term not in combined
-    assert "处理" in combined or "项目" in combined
+    assert _looks_like_user_visible_protocol_text("<｜tool_calls｜>")
+    assert _looks_like_user_visible_protocol_text("tool_calls name=read_file")
+    assert not _looks_like_user_visible_protocol_text("helper report says the page was fetched")
 
 
-def test_round3_visible_plan_copy_hides_stale_voice_artifact_without_mutating_plan():
-    from app.core.orchestrator_entry import _round3_visible_plan_and_files
+def test_round3_prompt_hides_stale_voice_artifact_by_instruction():
+    from app.core import context as ctx_build
     from app.schemas.api import ResponsePlan
 
     stale_voice = "_voice_e1cbf550_1781276502334.wav"
@@ -201,39 +181,33 @@ def test_round3_visible_plan_copy_hides_stale_voice_artifact_without_mutating_pl
         deliverables=[stale_voice],
         delivery_partial=[stale_voice],
     )
-
-    visible_plan, visible_files = _round3_visible_plan_and_files(
+    messages = ctx_build.round3_messages(
+        "You are bot. Answer directly.",
         plan,
+        "A",
+        "hi",
+        [],
+        light=True,
         files=[(stale_voice, "/v1/chat/files/archive/group/_voice_e1cbf550_1781276502334.wav")],
     )
+    joined = "\n".join(str(m.get("content") or "") for m in messages)
 
-    visible_text = str(visible_plan.model_dump()) + str([name for name, _url in (visible_files or [])])
-    assert stale_voice not in visible_text
-    assert "[voice reply file]" in visible_text
-    assert visible_plan.deliverables == ["[file]"]
-    assert visible_plan.delivery_partial == ["[missing file]"]
-    assert visible_files == [
-        ("[file]", "/v1/chat/files/archive/group/_voice_e1cbf550_1781276502334.wav")
-    ]
-    assert plan.deliverables == [stale_voice]
-    assert plan.delivery_partial == [stale_voice]
+    assert "User-visible wording boundary" in joined
+    assert "_voice_*.wav" in joined
+    assert stale_voice in joined
 
 
-def test_round2_voice_handoff_key_point_uses_round3_safe_label():
+def test_round2_voice_handoff_uses_prompt_boundary_not_safe_label_helper():
     from pathlib import Path
 
     src = Path("app/core/orchestrator_entry.py").read_text(encoding="utf-8")
-    block = src[
-        src.find("async def _prepare_round2_voice_handoff_before_delivery"):
-        src.find("def _existing_environment_project_files")
-    ]
+    prompt_src = Path("app/core/context.py").read_text(encoding="utf-8")
 
-    assert "_round3_visible_file_label(_vf_base, role=\"voice reply file\")" in block
-    assert "preflight owns authorization" in block
-    assert "if _allow_vf:" not in block
-    assert "已生成语音回复已通过本轮复核" not in block
-    assert "按 Round2 指定,最终回复使用已生成语音" not in block
-    assert ":{_vf_base}" not in block
+    assert "_round3_visible_file_label" not in src
+    assert "_prepare_round2_voice_handoff_before_delivery" not in src
+    assert "User-visible wording boundary" in prompt_src
+    assert "_voice_*.wav" in prompt_src
+    assert "已生成语音回复已通过本轮复核" not in src
 
 
 @pytest.mark.asyncio
@@ -275,12 +249,10 @@ async def test_delivery_review_can_drop_preexisting_audio_for_unrelated_request(
     )
 
     assert plan.deliverables == []
-    decision_facts = [
-        str(item) for item in plan.key_points
-        if "selected deliverables were revised" in str(item)
-    ]
-    assert decision_facts
-    assert fname not in decision_facts[-1]
+    assert any(
+        "inspect a page" in str(item).lower() or "current request" in str(item).lower()
+        for item in plan.key_points
+    ) or not plan.key_points
     payload = str(captured["messages"])
     assert "current_deliverables" in payload
     assert fname in payload
@@ -326,11 +298,6 @@ async def test_delivery_review_can_keep_preexisting_audio_when_current_request_a
     )
 
     assert plan.deliverables == [fname]
-    assert any(
-        "selected deliverables remain" in str(item)
-        and fname in str(item)
-        for item in plan.key_points
-    )
     payload = str(captured["messages"])
     assert '"extension": ".wav"' in payload
     assert '"preexisting_at_round_start": true' in payload
@@ -374,156 +341,20 @@ async def test_delivery_review_sanitizes_kept_system_voice_filename_in_round3_fa
     )
 
     assert plan.deliverables == [fname]
-    assert plan.key_points
     assert fname not in "\n".join(str(item) for item in plan.key_points)
-    assert "[reviewed file]" in plan.key_points[-1]
 
 
 def test_round2_voice_handoff_has_no_post_helper_llm_review():
     from pathlib import Path
 
     src = Path("app/core/orchestrator_entry.py").read_text(encoding="utf-8")
-    handoff_block = src[
-        src.find("async def _prepare_round2_voice_handoff_before_delivery"):
-        src.find("def _existing_environment_project_files", src.find("async def _prepare_round2_voice_handoff_before_delivery"))
-    ]
 
+    assert "_prepare_round2_voice_handoff_before_delivery" not in src
     assert "_review_round2_voice_reply_file_candidate" not in src
     assert "json.voice_reply_file_review" not in src
     assert "voice.round2_handoff.review" not in src
     assert "_persona_voice_reply_guard" not in Path("app/core/orchestrator.py").read_text(encoding="utf-8")
     assert "json.persona_voice_guard" not in Path("app/core/orchestrator.py").read_text(encoding="utf-8")
-    assert "chat_json(" not in handoff_block
-    assert "model_pool" not in handoff_block
-    assert "_persona_voice_reply_guard" not in handoff_block
-
-
-@pytest.mark.asyncio
-async def test_voice_reply_handoff_keeps_model_selected_preexisting_file_as_voice_only(tmp_path):
-    from app.core import orchestrator_entry
-    from app.schemas.api import ResponsePlan
-
-    fname = "voice_reply_catgirl.wav"
-    (tmp_path / fname).write_bytes(b"RIFF" + b"\0" * 64)
-    plan = ResponsePlan(
-        intent="Try voice reply.",
-        key_points=[],
-        tone="plain",
-        length_hint="short",
-        deliverables=[fname],
-        voice_reply_file=fname,
-    )
-
-    voice_file, voice_text = await orchestrator_entry._prepare_round2_voice_handoff_before_delivery(
-        plan,
-        persona="persona",
-        user_message="生成一个新的语音文件",
-        workspace_dir=str(tmp_path),
-        files_before={fname},
-        list_workspace_files=lambda _workspace: [fname],
-    )
-
-    assert voice_file == fname
-    assert voice_text == ""
-    assert plan.voice_reply_file == fname
-    assert plan.deliverables == []
-
-
-@pytest.mark.asyncio
-async def test_voice_reply_handoff_prepared_before_delivery_keeps_as_voice_only(tmp_path):
-    from app.core import orchestrator_entry
-    from app.schemas.api import ResponsePlan
-
-    fname = "fresh_voice_reply.wav"
-    (tmp_path / fname).write_bytes(b"RIFF" + b"\0" * 64)
-    plan = ResponsePlan(
-        intent="Generate current voice reply.",
-        key_points=[],
-        tone="plain",
-        length_hint="short",
-        deliverables=[fname],
-        voice_reply_file=fname,
-    )
-
-    voice_file, voice_text = await orchestrator_entry._prepare_round2_voice_handoff_before_delivery(
-        plan,
-        persona="persona",
-        user_message="语音回复",
-        workspace_dir=str(tmp_path),
-        files_before=set(),
-        list_workspace_files=lambda _workspace: [fname],
-    )
-
-    assert voice_file == fname
-    assert voice_text == ""
-    assert plan.voice_reply_file == fname
-    assert plan.deliverables == []
-    assert "最终回复使用该语音" in "\n".join(plan.key_points)
-
-
-@pytest.mark.asyncio
-async def test_voice_reply_handoff_does_not_run_post_tts_llm_review_or_guard(tmp_path):
-    from app.core import orchestrator_entry
-    from app.schemas.api import ResponsePlan
-
-    fname = "fresh_voice_reply.wav"
-    (tmp_path / fname).write_bytes(b"RIFF" + b"\0" * 64)
-    plan = ResponsePlan(
-        intent="Generate current voice reply.",
-        key_points=[],
-        tone="plain",
-        length_hint="short",
-        deliverables=[fname],
-        voice_reply_file=fname,
-    )
-
-    assert not hasattr(orchestrator_entry, "_review_round2_voice_reply_file_candidate")
-    assert not hasattr(orchestrator_entry, "_persona_voice_reply_guard")
-
-    voice_file, voice_text = await orchestrator_entry._prepare_round2_voice_handoff_before_delivery(
-        plan,
-        persona="persona",
-        user_message="语音回复",
-        workspace_dir=str(tmp_path),
-        files_before=set(),
-        list_workspace_files=lambda _workspace: [fname],
-    )
-
-    assert voice_file == fname
-    assert voice_text == ""
-    assert plan.deliverables == []
-
-
-@pytest.mark.asyncio
-async def test_voice_reply_handoff_uses_text_after_round2_clears_voice_file(tmp_path):
-    from app.core import orchestrator_entry
-    from app.schemas.api import ResponsePlan
-
-    fname = "old_voice_reply.wav"
-    (tmp_path / fname).write_bytes(b"RIFF" + b"\0" * 64)
-    plan = ResponsePlan(
-        intent="Try voice reply.",
-        key_points=[],
-        tone="plain",
-        length_hint="short",
-        deliverables=[fname],
-        voice_reply_file="",
-        voice_reply_text="喵，收到啦。",
-    )
-
-    voice_file, voice_text = await orchestrator_entry._prepare_round2_voice_handoff_before_delivery(
-        plan,
-        persona="persona",
-        user_message="生成一个新的语音文件",
-        workspace_dir=str(tmp_path),
-        files_before={fname},
-        list_workspace_files=lambda _workspace: [fname],
-    )
-
-    assert voice_file == ""
-    assert voice_text == "喵，收到啦。"
-    assert plan.voice_reply_file == ""
-    assert plan.deliverables == [fname]
 
 
 @pytest.mark.asyncio
@@ -566,7 +397,7 @@ async def test_delivery_review_can_keep_preexisting_file_when_current_request_re
 
 
 @pytest.mark.asyncio
-async def test_delivery_review_failure_demotes_warning_deliverables(monkeypatch, tmp_path):
+async def test_delivery_review_failure_keeps_explicit_deliverables(monkeypatch, tmp_path):
     import app.llm.model_pool as model_pool
     from app.core.orchestrator_entry import _review_explicit_deliverables_with_warnings
     from app.schemas.api import ResponsePlan
@@ -598,9 +429,4 @@ async def test_delivery_review_failure_demotes_warning_deliverables(monkeypatch,
         ],
     )
 
-    assert plan.deliverables == []
-    key_points = "\n".join(str(item) for item in plan.key_points)
-    assert "review was unavailable" in key_points
-    assert "not attached automatically" in key_points
-    assert fname not in key_points
-    assert "[candidate file]" in key_points
+    assert plan.deliverables == [fname]

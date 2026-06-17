@@ -180,12 +180,9 @@ class GroupGuard:
         所以拒绝打断——bridge 应只排队等 round3 自然结束。
         """
         key = (archive_id, group_id, user_id)
-        holder_trace: Optional[str] = None
         async with self._lock:
-            holder = self._active.get(key)
-            if holder is None:
+            if key not in self._active:
                 return False
-            holder_trace = holder[0]
             if self._stages.get(key) in {"round3", "round2_5"}:
                 return False
             ch = self._abort_channels.get(key)
@@ -193,14 +190,7 @@ class GroupGuard:
                 ch = _AbortChannel()
                 self._abort_channels[key] = ch
             ch.signal()
-        if holder_trace:
-            try:
-                from app.core.core_processes import registry
-
-                await registry().cancel_all_helpers_in_trace(holder_trace)
-            except Exception:
-                pass
-        return True
+            return True
 
     async def release(
         self, archive_id: str, group_id: str, user_id: str, trace_id: str,
