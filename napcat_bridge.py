@@ -789,6 +789,17 @@ def _detect_media_type(fname: str) -> str:
     return "file"
 
 
+def _normalize_delivery_filename(fname: str, local_path: str = "", url: str = "") -> str:
+    """Return a safe QQ display/upload filename, never an internal path."""
+    for value in (fname, local_path, url.split("?", 1)[0]):
+        cleaned = str(value or "").strip().replace("\\", "/").rstrip("/")
+        if cleaned:
+            base = cleaned.rsplit("/", 1)[-1]
+            if base and base not in (".", ".."):
+                return base
+    return "file"
+
+
 async def _napcat_ok(resp: httpx.Response) -> bool:
     if resp.status_code != 200:
         return False
@@ -818,15 +829,19 @@ async def _send_generated_files(
     Voice reply (voice_reply_file match) → WAV→AMR via ffmpeg, then [CQ:record]
     Voice files (non-match .wav/.mp3 etc.) → upload_group_file
     Executables → 警告 + 链接(不自动 upload_group_file,防群成员双击执行 RCE)
-    Other files → upload_group_file with local path (falls back to download link)
+    Other files → upload_group_file with local path; failures are reported without
+    leaking an unusable localhost link.
 
     Returns: True if a voice message was sent successfully, False otherwise.
     """
     voice_sent = False
     for f in files:
-        fname = f.get("name", "file")
+        raw_fname = f.get("name", "file")
         url = f.get("url", "")
         local_path = f.get("local_path", "")
+        fname = _normalize_delivery_filename(raw_fname, local_path, url)
+        if fname != raw_fname:
+            log.warning("normalized generated file name for QQ: %r -> %r", raw_fname, fname)
         if not url:
             continue
         file_url = f"{CHATBOT_URL}{url}"
@@ -933,15 +948,15 @@ async def _send_generated_files(
                 else:
                     log.warning("file upload failed: %s status=%d body=%s -- retrying via download+reupload", fname, resp.status_code, resp.text[:300])
                     if not await _download_and_reupload(client, group_id, fname, file_url):
-                        await _send_file_link_fallback(client, group_id, fname, file_url)
+                        await _send_file_delivery_failure(client, group_id, fname)
             else:
-                # 无本地路径：先尝试下载后上传，再回退到链接
+                # 无本地路径：先尝试下载后上传；失败则明确报告。
                 if not await _download_and_reupload(client, group_id, fname, file_url):
-                    await _send_file_link_fallback(client, group_id, fname, file_url)
+                    await _send_file_delivery_failure(client, group_id, fname)
         except Exception as e:
             log.error("file send failed: %s error=%s", fname, e)
             try:
-                await _send_file_link_fallback(client, group_id, fname, file_url)
+                await _send_file_delivery_failure(client, group_id, fname)
             except Exception:
                 pass
     return voice_sent
@@ -1031,14 +1046,13 @@ async def _download_and_reupload(
             pass
 
 
-async def _send_file_link_fallback(
+async def _send_file_delivery_failure(
     client: httpx.AsyncClient,
     group_id: str,
     fname: str,
-    file_url: str,
 ) -> None:
-    """Fallback: send a download link for the file."""
-    download_msg = f"[文件] {fname}\n下载：{file_url}"
+    """Report upload failure without pretending a local URL is deliverable."""
+    download_msg = f"[文件推送失败] {fname}\n文件已经生成，但未能上传到QQ群，请稍后重试。"
     await client.post(
         f"{NAPCAT_URL}/send_group_msg",
         json={"group_id": int(group_id), "message": download_msg},

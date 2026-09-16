@@ -1,4 +1,4 @@
-"""Primary orchestration entrypoint implementation."""
+﻿"""Primary orchestration entrypoint implementation."""
 from __future__ import annotations
 
 import asyncio
@@ -274,63 +274,29 @@ def _background_interrupt_context_block(payloads: list[dict]) -> str:
     return "\n".join(lines)
 
 
-_STOP_INTERRUPT_HINTS = (
-    "interrupt", "stop", "pause", "abort", "cancel", "halt",
-    "中断", "停止", "停下", "暂停", "打断", "终止", "取消",
-)
-
-_REORGANIZE_INTERRUPT_HINTS = (
-    "reorganize", "re-organize",
-    "重新整理", "整理一下",
-)
-
-
-def _is_control_interrupt_message(text: str) -> bool:
-    """Return true for mid-turn control messages that should not replace the task."""
-    value = str(text or "").strip()
-    if not value:
-        return False
-    lowered = value.lower()
-    if any(hint in lowered or hint in value for hint in _STOP_INTERRUPT_HINTS):
-        return True
-    return any(hint in lowered or hint in value for hint in _REORGANIZE_INTERRUPT_HINTS)
-
-
 def _message_with_user_interrupts(message: str, payloads: list[dict]) -> str:
     """Merge user interrupt messages into the active request for rerouting."""
     user_payloads, _background_payloads, _other_payloads = _classify_interrupt_payloads(payloads)
-    control_messages: list[str] = []
-    replacement_messages: list[str] = []
+    interrupt_messages: list[str] = []
     seen: set[str] = set()
     for payload in user_payloads:
         text = str(payload.get("message") or "").strip()
         if not text or text in seen:
             continue
         seen.add(text)
-        if _is_control_interrupt_message(text):
-            control_messages.append(text)
-        else:
-            replacement_messages.append(text)
-    if not control_messages and not replacement_messages:
+        interrupt_messages.append(text)
+    if not interrupt_messages:
         return message
-    blocks = [message]
-    if replacement_messages:
-        joined = "\n".join(f"- {text}" for text in replacement_messages[:5])
-        blocks.append(
-            "## Mid-turn user interruption\n"
-            "The user sent the following newer instruction while this request was being routed. "
-            "Treat it as the latest instruction for this same turn and let it override conflicting earlier details.\n"
-            f"{joined}"
-        )
-    if control_messages:
-        joined = "\n".join(f"- {text}" for text in control_messages[:5])
-        blocks.append(
-            "## Mid-turn control interruption\n"
-            "The user interrupted the running turn with a control request. Do not treat this as a replacement task. "
-            "Keep the original user request as the task, but adjust the response according to the control request "
-            "(for example stop ongoing work, summarize current evidence, or reorganize the answer).\n"
-            f"{joined}"
-        )
+    joined = "\n".join(f"- {text}" for text in interrupt_messages[:5])
+    blocks = [
+        message,
+        "## Mid-turn interruption\n"
+        "The user sent a newer message while this request was being routed. Treat the original request as the task context and "
+        "the interruption text as the latest user input. If the interruption only asks to stop, pause, summarize, or reorganize, "
+        "preserve the original objective and adjust the response accordingly. If the interruption explicitly changes the task, "
+        "use that new objective while still honoring any stop or pause request.\n"
+        f"{joined}",
+    ]
     return "\n\n".join(blocks)
 
 def _environment_project_tool_route(message: str) -> tuple[bool, bool, str]:

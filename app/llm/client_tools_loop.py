@@ -4383,6 +4383,11 @@ async def chat_with_tools_loop(
     _available_tool_names = _tool_names_from_schemas(tools)
     extra_body = _thinking_extra_body(reasoning, model_spec.provider if model_spec else None)
     _provider = model_spec.provider if model_spec else None  # captured for retry paths
+    _context_input_budget = model_spec.input_budget_tokens
+    _max_output_tokens = model_spec.max_output_tokens
+    _tool_schema_tokens = len(
+        json.dumps(tools or [], ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
     msgs = [m.copy() if isinstance(m, dict) else m for m in messages]
     _tool_result_spill_root = _infer_tool_result_spill_root(dispatcher)
 
@@ -4453,7 +4458,9 @@ async def chat_with_tools_loop(
     HARD_ITER_CAP = None  # None = 无轮数上限
     effective_cap = max_iter  # caller 仍可传(目前已无 caller 传值,保留参数路径)
 
-    # ── 2026-05-11 A1 核心改: token budget 大幅下调到检索绿区 ──
+    # Context thresholds derive from the active model-pool entry.  They are
+    # quality/compaction thresholds inside the hard input budget, not a second
+    # model-window declaration.
     # 之前的阈值 786K/838K/944K 来自"1M window × 75%~90%"假设,但 DeepSeek V4 官方
     # 数据:MRCR 8-needle 在 256K tokens 时 0.82,1M 时仅 0.59。窗口够大但检索质量
     # 在 256K 之后断崖式下降。
@@ -4469,10 +4476,13 @@ async def chat_with_tools_loop(
     # 2026-05-11 实测调整 (主进程起始 53KB, 跑长后工具链膨胀快):
     # 2026-06-06: 用户将主进程目标上限调为 256K,因此把所有门限继续前移。
     # 压缩仍先走语义 fold / 冗余 fold, emergency compact 只作为后段恢复。
-    _TOKEN_BUDGET_PROACTIVE = 60_000     # 早期软压老工具链
-    _TOKEN_BUDGET_SOFT = 120_000         # 软警戒线 — 常规压缩
-    _TOKEN_BUDGET_HARD = 180_000         # 主动 emergency compact
-    _TOKEN_BUDGET_PANIC = 240_000        # 256K 基准前的兜底抢救
+    _TOKEN_BUDGET_PROACTIVE = max(1, int(_context_input_budget * .35))
+    _TOKEN_BUDGET_SOFT = max(1, int(_context_input_budget * .55))
+    _TOKEN_BUDGET_HARD = max(1, int(_context_input_budget * .75))
+    _TOKEN_BUDGET_PANIC = max(1, int(_context_input_budget * .90))
+    _TOKEN_TARGET_HARD = max(1, int(_context_input_budget * .55) - _tool_schema_tokens)
+    _TOKEN_TARGET_PANIC = max(1, int(_context_input_budget * .65) - _tool_schema_tokens)
+    _TOKEN_TARGET_RECOVERY = max(1, int(_context_input_budget * .60) - _tool_schema_tokens)
 
     # 2026-05-12 P44: 工具结果预算 (参考 Claude Code applyToolResultBudget)
     # 不同 tool 的合理输出上限不同:
@@ -5186,6 +5196,17 @@ async def chat_with_tools_loop(
                             reasoning = new_model_spec.reasoning
                             extra_body = _thinking_extra_body(reasoning, new_model_spec.provider)
                             _cli_container[0] = _client_for_spec(new_model_spec)
+                        model_spec = new_model_spec
+                        _provider = model_spec.provider
+                        _context_input_budget = model_spec.input_budget_tokens
+                        _max_output_tokens = model_spec.max_output_tokens
+                        _TOKEN_BUDGET_PROACTIVE = max(1, int(_context_input_budget * .35))
+                        _TOKEN_BUDGET_SOFT = max(1, int(_context_input_budget * .55))
+                        _TOKEN_BUDGET_HARD = max(1, int(_context_input_budget * .75))
+                        _TOKEN_BUDGET_PANIC = max(1, int(_context_input_budget * .90))
+                        _TOKEN_TARGET_HARD = max(1, int(_context_input_budget * .55) - _tool_schema_tokens)
+                        _TOKEN_TARGET_PANIC = max(1, int(_context_input_budget * .65) - _tool_schema_tokens)
+                        _TOKEN_TARGET_RECOVERY = max(1, int(_context_input_budget * .60) - _tool_schema_tokens)
                     elif new_reasoning and new_reasoning != reasoning:
                         debug.log(
                             "llm.tools.reasoning_switch",
@@ -5205,6 +5226,17 @@ async def chat_with_tools_loop(
                             reasoning = _new_spec.reasoning
                             extra_body = _thinking_extra_body(reasoning, _new_spec.provider)
                             _cli_container[0] = _client_for_spec(_new_spec)
+                            model_spec = _new_spec
+                            _provider = model_spec.provider
+                            _context_input_budget = model_spec.input_budget_tokens
+                            _max_output_tokens = model_spec.max_output_tokens
+                            _TOKEN_BUDGET_PROACTIVE = max(1, int(_context_input_budget * .35))
+                            _TOKEN_BUDGET_SOFT = max(1, int(_context_input_budget * .55))
+                            _TOKEN_BUDGET_HARD = max(1, int(_context_input_budget * .75))
+                            _TOKEN_BUDGET_PANIC = max(1, int(_context_input_budget * .90))
+                            _TOKEN_TARGET_HARD = max(1, int(_context_input_budget * .55) - _tool_schema_tokens)
+                            _TOKEN_TARGET_PANIC = max(1, int(_context_input_budget * .65) - _tool_schema_tokens)
+                            _TOKEN_TARGET_RECOVERY = max(1, int(_context_input_budget * .60) - _tool_schema_tokens)
                 except Exception as _cb_e:
                     debug.log(
                         "llm.tools.reasoning_callback.error",
@@ -5256,20 +5288,20 @@ async def chat_with_tools_loop(
             except Exception:
                 log.exception("pre-budget soft compact failed (non-fatal)")
 
-            est_tokens = _estimate_msgs_token_size(msgs)
+            est_tokens = _estimate_msgs_token_size(msgs) + _tool_schema_tokens
             # 2026-05-11 A1: 四级渐进压缩,不硬截只软退化
             if est_tokens >= _TOKEN_BUDGET_PANIC:
                 debug.warn(
                     f"token budget PANIC: est={est_tokens} >= {_TOKEN_BUDGET_PANIC} "
-                    f"(near 256K baseline); emergency compact target 140K"
+                    f"(input budget={_context_input_budget}); compact target={_TOKEN_TARGET_PANIC}"
                 )
-                _emergency_compact_msgs(msgs, target_token_budget=140_000)
+                _emergency_compact_msgs(msgs, target_token_budget=_TOKEN_TARGET_PANIC)
             elif est_tokens >= _TOKEN_BUDGET_HARD:
                 debug.warn(
                     f"token budget HARD: est={est_tokens} >= {_TOKEN_BUDGET_HARD} "
-                    f"(above 256K baseline comfort zone); emergency compact target 110K"
+                    f"(input budget={_context_input_budget}); compact target={_TOKEN_TARGET_HARD}"
                 )
-                _emergency_compact_msgs(msgs, target_token_budget=110_000)
+                _emergency_compact_msgs(msgs, target_token_budget=_TOKEN_TARGET_HARD)
             elif est_tokens >= _TOKEN_BUDGET_SOFT:
                 # 软警戒线 — 激进 fold (keep_recent 收到 2,force size 降到 8K)
                 _fold_old_tool_messages(msgs, keep_recent_iters=2,
@@ -5317,6 +5349,13 @@ async def chat_with_tools_loop(
                             f"P43: 主进程 iter {it} 折叠 {_fold_n} 条老 tool result "
                             f"(est={est_tokens}, prev={_last_routine_est})",
                         )
+
+            _validated_context_tokens = _estimate_msgs_token_size(msgs) + _tool_schema_tokens
+            if _validated_context_tokens > _context_input_budget:
+                raise ValueError(
+                    f"model input exceeds configured budget: "
+                    f"estimated={_validated_context_tokens} budget={_context_input_budget}"
+                )
 
             # 2026-05-12 P43: 主进程 ctx 大小监控 log
             # 病因(实测 21:05 trace): 主进程 51 iter / 65min, fold 静默运行无 log,
@@ -5503,6 +5542,7 @@ async def chat_with_tools_loop(
                     label_suffix=" prefix" if _use_beta else "",
                     chunk_callback=chunk_callback,
                     stream_event_cb=stream_event_cb,
+                    max_output_tokens=_max_output_tokens,
                 )
                 # 把 collector 挂到响应上,便于上层在 idle_timeout 时拿 partial 续写
                 try:
@@ -5621,7 +5661,9 @@ async def chat_with_tools_loop(
                             "llm.tools.recovery_attempt",
                             f"context length err -> emergency compact + retry iter {it}"
                         )
-                        new_size = _emergency_compact_msgs(msgs, target_token_budget=160_000)
+                        new_size = _emergency_compact_msgs(
+                            msgs, target_token_budget=_TOKEN_TARGET_RECOVERY
+                        )
                         debug.log(
                             "llm.tools.context_recovery",
                             f"compacted msgs to ~{new_size} tokens; retrying iter {it}",
@@ -5951,6 +5993,7 @@ async def chat_with_tools_loop(
                             label_suffix=" continuation",
                             chunk_callback=chunk_callback,
                             stream_event_cb=stream_event_cb,
+                            max_output_tokens=_max_output_tokens,
                         )
                         if _exit == "ok":
                             # 把续写部分前面拼上原 partial(让上层看到完整内容)
@@ -6027,6 +6070,7 @@ async def chat_with_tools_loop(
                             label_suffix=f" no-think retry reasoning={_retry_reasoning}",
                             chunk_callback=chunk_callback,
                             stream_event_cb=stream_event_cb,
+                            max_output_tokens=_max_output_tokens,
                         )
                         if _exit == "ok":
                             return _resp_compat

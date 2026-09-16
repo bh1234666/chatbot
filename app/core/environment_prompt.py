@@ -69,15 +69,15 @@ def environment_round2_system_prompt() -> dict | None:
         "role": "system",
         "content": (
             "## Environment Round2 Focus\n"
-            "Project file paths are evidence, not guesses. Use env_* for facts; workspace/_env is staging/handoff. Tool failures may add path/schema facts dynamically.\n"
+            "Project file paths are evidence, not guesses. Use env_* for facts; workspace/_env is staging/handoff. workspace/_env only for existing staged copies. Tool failures may add path/schema facts dynamically.\n"
             "Resolve paths/checks with project_map/file_summary/impact_review/read/code/edit/draw/verify. `delegate_inventory` only spawns an `inventory` helper; env_run uses the real project tree.\n"
             "Keep the main thread light: preserve acceptance checklist/routing, delegate bulk authoring/extraction/computation and edits/tests, inspect outputs, apply verified slices.\n"
             "Broad work uses a compact framework contract: slots, ownership, inputs, outputs, checks, merge order.\n"
-            "Project deliverables use env_apply_create/env_apply_replace. workspace.write and bare helper filenames are chat-workspace artifacts; project outputs use `_env/...` before apply.\n"
+            "Project deliverables use env_apply_create/env_apply_replace; use env_apply_create or env_apply_replace for project writes. workspace.write is chat-workspace scratch; Bare helper filenames and workspace.write are chat-workspace artifacts, not project-verifier-visible; project outputs use `_env/...` before apply.\n"
             "env_background results are file-backed: read_file absolute result_path/status_path/stdout_path/stderr_path. Delayed follow-up/timers/watchers/nonblocking work must be delegated to a code helper launching env_background; do not sleep or wait inline.\n"
-            "Avoid batches of main-thread source/test reads; delegate bulk source/test reads.\n"
+            "Avoid batches of main-thread source/test reads; a batch of main-thread source/test reads usually duplicates helper work; delegate bulk source/test reads.\n"
             "Use env_run python_code for inspection scripts outside the project tree. Label units exactly. run project pytest from the project's own root.\n"
+            "Inspection scripts are not project files; transient inspection scripts stay outside the project tree.\n"
             "Finalize only from verified project evidence or a blocker. Final reports use project-relative paths without `_env/` plus observed commands/results.\n\n"
-            "摘要：env 证据；helper；验收。"
         ),
     }

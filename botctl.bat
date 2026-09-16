@@ -1,10 +1,12 @@
 @echo off
 chcp 65001 >nul
 title Bot Controller
-set PY=.venv\Scripts\python.exe botctl_helper.py
+set "PYRUN=scripts\repo_python.bat"
+set "PY=%PYRUN% botctl_helper.py"
 
 if /i "%~1"=="--check" (
     echo botctl.bat OK
+    call "%PYRUN%" -HealthCheck || exit /b 1
     exit /b 0
 )
 
@@ -28,7 +30,7 @@ REM  Creates a new archive + persona, optionally adds to group.
 REM ==========================================
 :cmd_create
 if "%2"=="" (echo Usage: botctl create ^<name^> [group_id] && goto end)
-%PY% create %2 %3 %4
+call %PY% create %2 %3 %4
 goto end
 
 REM ==========================================
@@ -38,9 +40,9 @@ REM  With GROUP_ID: list personas in that group with summaries.
 REM ==========================================
 :cmd_list
 if "%2"=="" (
-    %PY% list-groups
+    call %PY% list-groups
 ) else (
-    %PY% list-personas %2
+    call %PY% list-personas %2
 )
 goto end
 
@@ -51,7 +53,7 @@ REM  Without AID: interactive selection with summaries.
 REM ==========================================
 :cmd_switch
 if "%2"=="" (echo Usage: botctl switch ^<group_id^> [archive_id] && goto end)
-%PY% switch %2 %3
+call %PY% switch %2 %3
 goto end
 
 REM ==========================================
@@ -59,7 +61,7 @@ REM  botctl leave GROUP_ID
 REM ==========================================
 :cmd_leave
 if "%2"=="" (echo Usage: botctl leave ^<group_id^> && goto end)
-%PY% leave %2
+call %PY% leave %2
 goto end
 
 REM ==========================================
@@ -68,7 +70,7 @@ REM  Interactive warm memory deletion.
 REM ==========================================
 :cmd_del
 if "%2"=="" (echo Usage: botctl del ^<group_id^> && goto end)
-%PY% del %2
+call %PY% del %2
 goto end
 
 REM ==========================================
@@ -77,7 +79,7 @@ REM  Quick raw JSON dump of group config.
 REM ==========================================
 :cmd_info
 if "%2"=="" (echo Usage: botctl info ^<group_id^> && goto end)
-curl -s "http://localhost:8000/v1/bot/groups/%2" | .venv\Scripts\python.exe -m json.tool 2>nul
+curl -s "http://localhost:8000/v1/bot/groups/%2" | "%PYRUN%" -m json.tool 2>nul
 if errorlevel 1 curl -s "http://localhost:8000/v1/bot/groups/%2"
 echo.
 goto end
@@ -88,7 +90,7 @@ REM  Show recent conversation events in a group.
 REM ==========================================
 :cmd_recent
 if "%2"=="" (echo Usage: botctl recent ^<group_id^> [count] && goto end)
-%PY% recent %2 %3
+call %PY% recent %2 %3
 goto end
 
 REM ==========================================
@@ -97,7 +99,7 @@ REM  Set the admin group for in-QQ botctl commands.
 REM ==========================================
 :cmd_admin
 if "%2"=="" (echo Usage: botctl admin ^<group_id^> && goto end)
-%PY% admin %2
+call %PY% admin %2
 goto end
 
 REM ==========================================
@@ -105,7 +107,7 @@ REM  botctl help
 REM  Show all available commands.
 REM ==========================================
 :cmd_help
-%PY% help
+call %PY% help
 goto end
 
 REM ==========================================

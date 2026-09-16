@@ -7,10 +7,11 @@
 """
 import re
 import re as _re
+from app.config import settings
 from app.llm.tools.workspace_utils import _has_office_document_output
 
 
-_HELPER_TOOL_FILTER_CACHE: dict[tuple[str, tuple[tuple[str, int], ...]], list] = {}
+_HELPER_TOOL_FILTER_CACHE: dict[tuple, list] = {}
 
 
 def _helper_tool_filter_signature(all_tools: list) -> tuple[tuple[str, int], ...]:
@@ -29,7 +30,7 @@ def _helper_tool_filter_signature(all_tools: list) -> tuple[tuple[str, int], ...
 MODEL_VISIBLE_HELPER_KINDS = (
     "code", "edit", "verify", "draw", "tts", "read",
     "project_map", "file_summary", "impact_review", "inventory",
-)
+) + (("image_gen",) if settings.image_generation_enabled else ())
 
 
 LEGACY_HELPER_KIND_ALIASES = ("summarize",)
@@ -484,6 +485,19 @@ HELPER_CONFIGS: dict[str, dict] = {
         "supports_verify":      False,
         "_branch_locations": "delegate.py:_select_helper_system/_filter_tools_for_kind",
     },
+    "image_gen": {
+        "description":          "AI text-to-image and image-to-image generation helper",
+        "default_timeout_sec":  None,
+        "has_stuck_detector":   True,
+        "can_write_workspace":  True,
+        "can_run_bash":         False,
+        "can_spawn_subhelper":  False,
+        "default_model_tier":   "main",
+        "supports_resume":      True,
+        "supports_hard_mode":   True,
+        "supports_verify":      False,
+        "_branch_locations": "helper_prompt_catalog.py/_filter_tools_for_kind",
+    },
     "read": {
         "description":          "File-content and visual-evidence reading helper",
         "default_timeout_sec":  None,
@@ -538,7 +552,22 @@ def _filter_tools_for_kind(kind: str, all_tools: list) -> list:
     except Exception:
         environment_mode = False
 
-    cache_key = (k, environment_mode, _helper_tool_filter_signature(all_tools))
+    from app.config import settings
+
+    vision_enabled = bool(
+        settings.model_vision_enabled
+        or (settings.vision_enabled and not settings.gpu_disabled)
+    )
+    voice_enabled = bool(settings.voice_enabled and not settings.gpu_disabled)
+    image_generation_enabled = bool(settings.image_generation_enabled)
+    cache_key = (
+        k,
+        environment_mode,
+        vision_enabled,
+        voice_enabled,
+        image_generation_enabled,
+        _helper_tool_filter_signature(all_tools),
+    )
     cached = _HELPER_TOOL_FILTER_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -571,6 +600,10 @@ def _filter_tools_for_kind(kind: str, all_tools: list) -> list:
             "fetch_indexed_file", "fetch_group_file", "fetch_to_temp", "workspace",
             "request_resource",
         },
+        "image_gen": {
+            "image_generate", "inspect_file", "read_file", "fetch_to_temp",
+            "fetch_indexed_file", "fetch_group_file", "request_resource",
+        },
         "read": {
             "inspect_file", "read_file", "search_in_file", "search_files",
             "fetch_indexed_file", "fetch_group_file", "fetch_to_temp", "office", "ocr", "workspace",
@@ -587,6 +620,10 @@ def _filter_tools_for_kind(kind: str, all_tools: list) -> list:
             filtered.append(t)
             continue
         name = (t.get("function", {}) or {}).get("name", "")
+        if (name == "ocr" and not vision_enabled) or (name == "tts" and not voice_enabled):
+            continue
+        if name == "image_generate" and (not image_generation_enabled or k != "image_gen"):
+            continue
         if allowed is not None:
             if name in allowed:
                 if name == "workspace" and k in {"edit", "read", "tts", "inventory", "verify"}:

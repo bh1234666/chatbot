@@ -395,26 +395,12 @@ def _short_action_desc(name: str, args: dict) -> str:
 
 
 def _estimate_msgs_token_size(msgs: list[dict]) -> int:
-    """粗略估算 messages 总 token 数。
+    """Conservative tokenizer-free upper bound used by model-pool budgets.
 
-    经验比例: 中文 ~0.5 token/字, 英文 ~0.25 token/字。混合内容用 0.4 兜底。
-    精度无所谓 — 只用于"是否接近 context 上限"的预警判断。
+    Every token contains at least one encoded byte for the supported text
+    providers, so UTF-8 payload bytes cannot underestimate token usage.
     """
-    total_chars = 0
-    for m in msgs:
-        c = m.get("content", "")
-        if isinstance(c, str):
-            total_chars += len(c)
-        elif isinstance(c, list):
-            for part in c:
-                if isinstance(part, dict) and isinstance(part.get("text"), str):
-                    total_chars += len(part["text"])
-        # tool_calls 里也有内容
-        for tc in (m.get("tool_calls") or []):
-            args = (tc.get("function") or {}).get("arguments", "")
-            if isinstance(args, str):
-                total_chars += len(args)
-    return int(total_chars * 0.4)
+    return len(json.dumps(msgs, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def _soft_compact_redundant_tool_results(msgs: list[dict]) -> int:

@@ -69,19 +69,9 @@ _MAX_BUFFER = 60
 _buffer_var: ContextVar[list[str] | None] = ContextVar("debug_buffer", default=None)
 
 DEBUG_REPORT_SYSTEM = (
-    "You summarize internal workflow events into one short user-visible Chinese status phrase.\n"
-    "\n"
-    "## Requirements\n"
-    "- Return one short Chinese phrase, no more than 30 Chinese characters.\n"
-    "- State only observable progress from the provided events.\n"
-    "- Prioritize ERROR or WARN only when present.\n"
-    "- Use file-generation wording only when the events show workspace/file write, delivery, office, image, audio, or artifact activity.\n"
-    "- For read-only analysis, use process wording such as 正在阅读工程, 正在核对内容, 正在分析结构, or 正在整理结果.\n"
-    "- Use user-friendly process wording rather than internal event names.\n"
-    "- If a clean user-facing phrase is not possible, return an empty string.\n"
-    "- Output only the status phrase, with no extra text.\n"
-    "\n"
-    "把内部事件压缩成一句用户可见的中文状态；只在确有文件或产物动作时说生成文件。"
+    "Summarize the provided events into one short Chinese phrase.\n"
+    "Mention only observable progress. Prefer read-only wording unless events show file or artifact creation.\n"
+    "Output only the phrase."
 )
 
 
@@ -195,9 +185,9 @@ def section(title: str) -> None:
     head = _header("section")
     # 控制台（带颜色）— 三行原子化防止并发交错
     with _stderr_lock:
-        print(_c("33", f"{head} {bar}"), file=sys.stderr, flush=True)
-        print(_c("33;1", f"{head} > {title}"), file=sys.stderr, flush=True)
-        print(_c("33", f"{head} {bar}"), file=sys.stderr, flush=True)
+        _safe_stderr_print(_c("33", f"{head} {bar}"))
+        _safe_stderr_print(_c("33;1", f"{head} > {title}"))
+        _safe_stderr_print(_c("33", f"{head} {bar}"))
     # 文件:单行只写 title,不写横线(parser 友好)
     _write_file("section", title)
 
@@ -416,6 +406,14 @@ def _console_enabled() -> bool:
     return bool(getattr(settings, "debug_console", False))
 
 
+def _safe_stderr_print(line: str) -> None:
+    """Debug output must never break request handling when stderr is detached."""
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def _emit_console(category: str, msg: str, payload: Any | None, *, color: str = "36") -> None:
     """输出到 stderr（带颜色，可选 payload）。受 _stderr_lock 保护防止并发交错。"""
     if not _console_enabled():
@@ -423,7 +421,7 @@ def _emit_console(category: str, msg: str, payload: Any | None, *, color: str = 
     head = _header(category)
     line = _c(color, head) + " " + str(msg)
     with _stderr_lock:
-        print(line, file=sys.stderr, flush=True)
+        _safe_stderr_print(line)
     if payload is None:
         return
     try:
@@ -442,7 +440,7 @@ def _emit_console(category: str, msg: str, payload: Any | None, *, color: str = 
         )
     for line in body.split("\n"):
         with _stderr_lock:
-            print(_c("90", head) + "   " + line, file=sys.stderr, flush=True)
+            _safe_stderr_print(_c("90", head) + "   " + line)
 
 
 def _safe_default(obj: Any) -> str:

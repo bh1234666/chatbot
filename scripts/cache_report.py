@@ -55,6 +55,11 @@ def _expand_log_paths(values: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = argv or []
+    if "--check" in argv:
+        print("cache_report.py OK")
+        return 0
+
     parser = argparse.ArgumentParser(description="Generate a prompt cache report from debug logs.")
     parser.add_argument("logs", nargs="+", help="Debug log files to parse.")
     parser.add_argument("-o", "--output", default="cache_report.md", help="Markdown output path.")
@@ -181,4 +186,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

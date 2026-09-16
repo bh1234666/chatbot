@@ -441,6 +441,15 @@ def _provider_limiter(provider: Any | None) -> asyncio.Semaphore:
     return sem
 
 
+def _api_error_summary(exc: APIStatusError) -> str:
+    try:
+        text = exc.response.text
+    except Exception:
+        text = ""
+    text = " ".join((text or "").split())
+    return f" body={text[:500]}" if text else ""
+
+
 async def _with_provider_limit(fn, *, provider: Any | None = None, label: str = "llm") -> Any:
     sem = _provider_limiter(provider)
     limit = _provider_limit(provider)
@@ -931,6 +940,7 @@ async def _call_llm_streaming_with_idle(
     progress_log_every_chunks: int = 80,
     chunk_callback=None,  # 2026-05-05: async cb() called per chunk (API stall detection)
     stream_event_cb=None,  # 2026-05-09: cb("open"|"close", reason?) for stall detection at orchestrator level
+    max_output_tokens: int | None = None,
 ) -> tuple[Any, _StreamCollector, str]:
     """真正的 streaming + idle-based timeout 实现。
 
@@ -1003,6 +1013,7 @@ async def _call_llm_streaming_with_idle(
                 stream_options={"include_usage": True},
                 extra_body=extra_body,
                 timeout=first_chunk_timeout,
+                **({"max_tokens": max_output_tokens} if max_output_tokens else {}),
             ),
             label=f"tools loop iter={iter_no} (stream{label_suffix})",
             provider=provider,
@@ -1506,8 +1517,9 @@ async def _retry(
             if e.status_code == 429 or e.status_code >= 500:
                 if attempt < _MAX_RETRIES:
                     delay = _RETRY_BACKOFF_BASE ** attempt
-                    log.warning("llm retry %d/%d %s: HTTP %d", attempt + 1, _MAX_RETRIES, label, e.status_code)
-                    debug.log("llm.retry", f"attempt={attempt + 1} label={label} status={e.status_code} delay={delay:.1f}")
+                    summary = _api_error_summary(e)
+                    log.warning("llm retry %d/%d %s: HTTP %d%s", attempt + 1, _MAX_RETRIES, label, e.status_code, summary)
+                    debug.log("llm.retry", f"attempt={attempt + 1} label={label} status={e.status_code} delay={delay:.1f}{summary}")
                     await asyncio.sleep(delay)
                 else:
                     raise
@@ -1590,6 +1602,33 @@ def _client_for_spec(spec) -> AsyncOpenAI:
 _beta_client: Optional[AsyncOpenAI] = None
 
 
+def _user_message_text_contains_json(messages: list[dict]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and "json" in content.lower():
+            return True
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text") or part.get("content")
+                    if isinstance(text, str) and "json" in text.lower():
+                        return True
+    return False
+
+
+def _ensure_user_json_instruction(messages: list[dict]) -> None:
+    for message in reversed(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = content.rstrip() + "\n\nReturn JSON only."
+            return
+    messages.append({"role": "user", "content": "Return JSON only."})
+
+
 def beta_client() -> AsyncOpenAI:
     """Beta endpoint client for prefix completion API.
 
@@ -1643,7 +1682,19 @@ async def chat_json(
 
     # Prefill: 在对话末尾插入 assistant 的 `{`，强制模型以 JSON 开头续写。
     msgs = [m.copy() if isinstance(m, dict) else m for m in messages]
-    msgs.append({"role": "assistant", "content": "{"})
+    if not _user_message_text_contains_json(msgs):
+        _ensure_user_json_instruction(msgs)
+    if model_spec.provider.name == "deepseek":
+        msgs.append({"role": "assistant", "content": "{"})
+
+    if _estimate_msgs_token_size(msgs) > model_spec.input_budget_tokens:
+        _emergency_compact_msgs(
+            msgs, target_token_budget=max(1, int(model_spec.input_budget_tokens * .70))
+        )
+    if _estimate_msgs_token_size(msgs) > model_spec.input_budget_tokens:
+        raise ValueError(
+            f"model input exceeds configured budget {model_spec.input_budget_tokens} tokens"
+        )
 
     debug.log("llm.json.input", f"model={model} reasoning={reasoning} msgs={len(msgs)}", {"messages": msgs})
     _log_prompt_cache_shape(
@@ -1653,6 +1704,7 @@ async def chat_json(
     )
     create_kwargs: dict[str, Any] = dict(
         model=model, messages=msgs, stream=False,
+        max_tokens=model_spec.max_output_tokens,
         extra_body=_thinking_extra_body(reasoning, model_spec.provider if model_spec else None),
         response_format={"type": "json_object"},
     )
@@ -1810,6 +1862,15 @@ async def chat_stream(
         model = model_spec.model
         reasoning = model_spec.reasoning
         _cli = _client_for_spec(model_spec)
+    messages = [m.copy() if isinstance(m, dict) else m for m in messages]
+    if _estimate_msgs_token_size(messages) > model_spec.input_budget_tokens:
+        _emergency_compact_msgs(
+            messages, target_token_budget=max(1, int(model_spec.input_budget_tokens * .70))
+        )
+    if _estimate_msgs_token_size(messages) > model_spec.input_budget_tokens:
+        raise ValueError(
+            f"model input exceeds configured budget {model_spec.input_budget_tokens} tokens"
+        )
     debug.log(
         "llm.stream.input",
         f"reasoning={reasoning} model={model} msgs={len(messages)}",
@@ -1822,6 +1883,7 @@ async def chat_stream(
     )
     create_kwargs: dict[str, Any] = dict(
         model=model, messages=messages, stream=True,
+        max_tokens=model_spec.max_output_tokens,
         stream_options={"include_usage": True},  # 2026-05-12 P50
         extra_body=_thinking_extra_body(reasoning, model_spec.provider if model_spec else None),
         timeout=float(settings.llm_stream_first_chunk_timeout_sec or 180.0),

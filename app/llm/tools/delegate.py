@@ -2890,7 +2890,7 @@ from app.llm.tools.registry import (
 
     OFFICE_TOOL_SCHEMA,
 
-    OCR_TOOL_SCHEMA, TTS_TOOL_SCHEMA,
+    OCR_TOOL_SCHEMA, IMAGE_GENERATE_TOOL_SCHEMA, TTS_TOOL_SCHEMA,
 
     ASK_USER_QUESTION_SCHEMA,                        # 2026-05-04 Claude Code 移植
 
@@ -2965,6 +2965,8 @@ _HELPER_TOOLS = [
     FETCH_GROUP_FILE_SCHEMA,
 
     OCR_TOOL_SCHEMA,
+
+    IMAGE_GENERATE_TOOL_SCHEMA,
 
     ENV_BACKGROUND_SCHEMA,
 
@@ -5845,7 +5847,7 @@ async def _sanitize_and_validate_tasks(
                 "allowed_kinds": list(MODEL_VISIBLE_HELPER_KINDS),
                 "hint": (
                     "The general helper kind has been removed. Re-issue the same helper request with a concrete "
-                    "kind chosen from code/read/edit/verify/draw/tts/project_map/file_summary/impact_review/inventory. "
+                    "kind chosen from code/read/edit/verify/draw/image_gen/tts/project_map/file_summary/impact_review/inventory, using image_gen only when the current schema exposes it. "
                     "Use code for implementation, scripts, benchmarks, statistics, or technical framework files; "
                     "read for source-material extraction; edit for final documents; project-analysis kinds for "
                     "read-only project understanding. If this is a true continuation, pass resume=true and the "
@@ -6842,7 +6844,7 @@ SPAWN_HELPER_TOOL_SCHEMA = {
 
                     "description": (
 
-                        "Helper kind: code, read, edit, verify, draw, tts, or project-analysis kinds. "
+                        "Helper kind: code, read, edit, verify, draw, image_gen (when exposed), tts, or project-analysis kinds. "
                         "Use mode='hard' for difficult retries while preserving the same base kind; do not use kind='final'.\n\n"
                         "helper 类型表示任务本质，难度升级用 hard。"
 

@@ -1,8 +1,7 @@
-"""DeepSeek-only model pool.
+"""DeepSeek Flash-only model pool.
 
-All named tasks route to DeepSeek models through the shared model-pool facade.
-
-所有具名任务经由 model_pool_common 共享门面路由到 DeepSeek 模型。
+All named tasks route to deepseek-v4-flash through the shared model-pool facade.
+Thinking tasks keep tiered reasoning effort: low / high / max.
 """
 
 from __future__ import annotations
@@ -23,15 +22,15 @@ ACTIVE = ProviderConfig(
 )
 
 THINK: dict[str, str] = {
-    "low": "deepseek-v4-pro",
-    "mid": "deepseek-v4-pro",
-    "high": "deepseek-v4-pro",
+    "low": "deepseek-v4-flash",
+    "mid": "deepseek-v4-flash",
+    "high": "deepseek-v4-flash",
 }
 
 NONTHINK: dict[str, str] = {
     "low": "deepseek-v4-flash",
-    "mid": "deepseek-v4-pro",
-    "high": "deepseek-v4-pro",
+    "mid": "deepseek-v4-flash",
+    "high": "deepseek-v4-flash",
 }
 
 REASONING: dict[str, str] = {
@@ -69,10 +68,18 @@ TASK_TIER: dict[str, tuple[bool, str]] = {
     "auto_continue_check": (False, "low"),
 }
 
+
 def resolve(think: bool, tier: str) -> ModelSpec:
     model = THINK[tier] if think else NONTHINK[tier]
     reasoning = REASONING[tier] if think else "disabled"
-    return ModelSpec(model=model, reasoning=reasoning, provider=ACTIVE)
+    return ModelSpec(
+        model=model,
+        reasoning=reasoning,
+        provider=ACTIVE,
+        context_window_tokens=400_000,
+        context_safety_tokens=4_096,
+        token_estimator="utf8_upper_bound",
+    )
 
 
 def resolve_task(task: str) -> ModelSpec:

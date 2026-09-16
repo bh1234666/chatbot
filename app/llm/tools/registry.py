@@ -300,7 +300,7 @@ def _dispatch_caller_owner_context(caller_kind: str):
 
 
 def _main_thread_resource_delegate_required(name: str) -> str:
-    helper_kind = "tts" if name == "tts" else "read"
+    helper_kind = "tts" if name == "tts" else ("image_gen" if name == "image_generate" else "read")
     return json.dumps(
         {
             "ok": False,
@@ -364,6 +364,7 @@ from app.llm.tools.tool_schemas import (  # noqa: E402,F401
     ASK_USER_QUESTION_SCHEMA,
     INSPECT_FILE_TOOL_SCHEMA,
     OCR_TOOL_SCHEMA,
+    IMAGE_GENERATE_TOOL_SCHEMA,
     TTS_TOOL_SCHEMA,
     MAIN_WORKSPACE_TOOL_SCHEMA,
 )
@@ -550,6 +551,7 @@ MAIN_THREAD_TOOL_METAS: list[ToolMeta] = [
     tool_meta(DELEGATE_TOOL_SCHEMA, read_only=False, side_effect="workspace", requires_permission="generate_file"),
     tool_meta(INSPECT_FILE_TOOL_SCHEMA, read_only=True, side_effect="none", requires_permission="chat"),
     tool_meta(OCR_TOOL_SCHEMA, read_only=False, side_effect="external", requires_permission="chat", main_thread_allowed=False),
+    tool_meta(IMAGE_GENERATE_TOOL_SCHEMA, read_only=False, side_effect="external", requires_permission="chat", main_thread_allowed=False),
     tool_meta(TTS_TOOL_SCHEMA, read_only=False, side_effect="external", requires_permission="chat", main_thread_allowed=False),
     tool_meta(REQUEST_RESOURCE_SCHEMA, read_only=False, side_effect="workspace", requires_permission="chat", main_thread_allowed=False),
     tool_meta(ASK_USER_QUESTION_SCHEMA, read_only=False, side_effect="external", requires_permission="chat"),
@@ -759,9 +761,37 @@ async def dispatch(
     tool 错误循环浪费 token。同时记录到 debug 让用户能 grep 出来观测频率。
     """
     # ── 别名兜底(Bug F): 模型 hallucinate 出来的常见错误工具名 ──
+    if name in {"ocr", "tts", "image_generate"}:
+        disabled = (
+            name == "ocr"
+            and not settings.model_vision_enabled
+            and (settings.gpu_disabled or not settings.vision_enabled)
+        ) or (
+            name == "tts" and (settings.gpu_disabled or not settings.voice_enabled)
+        ) or (
+            name == "image_generate" and not settings.image_generation_enabled
+        )
+        if disabled:
+            return _budget_dispatch_result(name, json.dumps({
+                "ok": False,
+                "error": f"tool '{name}' is disabled in the current runtime mode",
+                "disabled": True,
+            }, ensure_ascii=False), workspace_dir)
+
     aliased_from = None
     caller_kind = str(caller or "main").strip().lower()
-    if caller_kind == "main" and name in {"ocr", "tts"}:
+    if name == "image_generate" and caller_kind != "main":
+        try:
+            from app.core.core_processes import current_helper_kind
+            active_helper_kind = str(current_helper_kind() or "").strip().lower()
+        except Exception:
+            active_helper_kind = ""
+        if active_helper_kind != "image_gen":
+            return _budget_dispatch_result(name, json.dumps({
+                "ok": False,
+                "error": "image_generate is restricted to the image_gen helper",
+            }, ensure_ascii=False), workspace_dir)
+    if caller_kind == "main" and name in {"ocr", "tts", "image_generate"}:
         debug.log(
             "tool.resource.delegate_required",
             f"{name} rejected in main thread; use resource helper",
@@ -990,6 +1020,8 @@ async def dispatch(
                         }, ensure_ascii=False)
             elif name == "ocr":
                 result = await _handle_ocr(workspace_dir, args)
+            elif name == "image_generate":
+                result = await _handle_image_generate(workspace_dir, args)
             elif name == "tts":
                 result = await _handle_tts(workspace_dir, args, archive_id=archive_id)
             elif name == "inspect_file":
@@ -3529,6 +3561,38 @@ async def _handle_ocr(workspace_dir: str, args: dict) -> str:
             ),
         }, ensure_ascii=False)
 
+    if settings.model_vision_enabled:
+        from app.llm.tools.model_vision import describe_image
+
+        target = None
+        if image_path:
+            try:
+                target = ws_tool._safe_resolve(workspace_dir, image_path)
+            except ValueError as exc:
+                return json.dumps({"ok": False, "error": f"Invalid model-vision path: {exc}"}, ensure_ascii=False)
+            if not os.path.isfile(target):
+                return json.dumps({"ok": False, "error": f"image file not found: {image_path}"}, ensure_ascii=False)
+            if os.path.splitext(target)[1].lower() not in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+                return json.dumps({
+                    "ok": False,
+                    "error": "model vision currently accepts image files only; PDF/Office requires local OCR",
+                }, ensure_ascii=False)
+        vision = await describe_image(
+            image_path=target,
+            image_base64=image_base64,
+            purpose=purpose,
+        )
+        if save_to and vision.get("ok"):
+            try:
+                save_path = ws_tool._safe_resolve(workspace_dir, save_to)
+                os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+                with open(save_path, "w", encoding="utf-8") as stream:
+                    stream.write(str(vision.get("text") or ""))
+                vision["saved_to"] = save_to
+            except (OSError, ValueError) as exc:
+                vision["save_to_error"] = f"{type(exc).__name__}: {exc}"
+        return json.dumps(vision, ensure_ascii=False)
+
     if image_path:
         try:
             target = ws_tool._safe_resolve(workspace_dir, image_path)
@@ -3889,6 +3953,53 @@ def _detect_ocr_math_damage(text: str) -> list[dict]:
 
 
 # ── TTS handler ───────────────────────────────────────────────
+async def _handle_image_generate(workspace_dir: str, args: dict) -> str:
+    if not settings.image_generation_enabled:
+        return json.dumps({"ok": False, "error": "AI image generation is disabled"}, ensure_ascii=False)
+    prompt = str(args.get("prompt") or "").strip()
+    output_path = str(args.get("output_path") or "").strip()
+    input_image = str(args.get("input_image") or "").strip()
+    size = str(args.get("size") or "1024x1024").strip()
+    if not prompt or not output_path:
+        return json.dumps({"ok": False, "error": "prompt and output_path are required"}, ensure_ascii=False)
+    if os.path.splitext(output_path)[1].lower() != ".png":
+        return json.dumps({"ok": False, "error": "output_path must end in .png"}, ensure_ascii=False)
+    try:
+        destination = ws_tool._safe_resolve(workspace_dir, output_path)
+        source = ws_tool._safe_resolve(workspace_dir, input_image) if input_image else None
+    except ValueError as exc:
+        return json.dumps({"ok": False, "error": f"invalid image generation path: {exc}"}, ensure_ascii=False)
+    if source and not os.path.isfile(source):
+        return json.dumps({"ok": False, "error": f"reference image not found: {input_image}"}, ensure_ascii=False)
+    from app.llm.tools.image_generation import generate_image
+
+    result = await generate_image(
+        prompt=prompt,
+        output_path=destination,
+        input_image=source,
+        size=size,
+    )
+    payload = {
+        "ok": result.ok,
+        "mode": result.mode,
+        "model": result.model,
+        "prompt": prompt,
+        "output_path": output_path if result.ok else "",
+        "deliverable_candidate": output_path if result.ok else "",
+        "description": result.description,
+        "width": result.width,
+        "height": result.height,
+        "bytes": result.bytes,
+        "sha256": result.sha256,
+        "revised_prompt": result.revised_prompt,
+    }
+    if not result.ok:
+        payload["error"] = result.error
+    elif not result.description:
+        payload["description_warning"] = "image was generated and validated, but model description was unavailable"
+    return json.dumps(payload, ensure_ascii=False)
+
+
 async def _handle_tts(workspace_dir: str, args: dict, *, archive_id: str = "") -> str:
     """离线 TTS 语音合成 handler。
     
@@ -3975,7 +4086,10 @@ async def _handle_tts(workspace_dir: str, args: dict, *, archive_id: str = "") -
             ext = os.path.splitext(requested_output)[1].lower()
             if ext not in {".wav", ".mp3", ".m4a", ".ogg"}:
                 raise ValueError("unsupported extension")
-            output_filename = requested_output
+            # OmniVoice writes PCM through libsndfile and therefore only supports
+            # WAV here.  Keep the requested stem but normalize the container so a
+            # model-selected .mp3/.m4a/.ogg name cannot leave a zero-byte file.
+            output_filename = os.path.splitext(requested_output)[0] + ".wav"
         except Exception:
             return json.dumps({
                 "ok": False,

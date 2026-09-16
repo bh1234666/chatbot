@@ -10,6 +10,9 @@ compatibility.
 
 
 # ── 工具 schemas ────────────────────────────────────────────
+from app.config import settings
+
+
 PYTHON_TOOL_SCHEMA = {
     "type": "function",
     "function": {
@@ -1205,11 +1208,14 @@ DELEGATE_TOOL_SCHEMA = {
                             "kind": {
                                 "type": "string",
                                 # 真相源: app.llm.tools.delegate.VALID_HELPER_KINDS
-                                "enum": ["code", "edit", "verify", "draw", "tts", "read", "project_map", "file_summary", "impact_review", "inventory"],
+                                "enum": [
+                                    "code", "edit", "verify", "draw", "tts", "read",
+                                    "project_map", "file_summary", "impact_review", "inventory",
+                                ] + (["image_gen"] if settings.image_generation_enabled else []),
                                 "default": "code",
                                 "description": (
                                     "Product family: code=implementation/commands/benchmarks/data computation, including browser-automation evidence that requires running Playwright/Puppeteer/Selenium/Chromium-style commands; read=source-material reading/classification/triage/extraction (internal .txt evidence); "
-                                    "edit=final document/text assembly (may read small explicit input_files); draw=charts/images from data; tts=speech/narration/persona voice/TTS-file artifacts; non-speech audio stays code; verify=read-only review; "
+                                    "edit=final document/text assembly (may read small explicit input_files); draw=charts/images from data; image_gen=AI text-to-image or image-to-image generation when available; tts=speech/narration/persona voice/TTS-file artifacts; non-speech audio stays code; verify=read-only review; "
                                     "inventory/project_map/file_summary/impact_review=project analysis. Broad/visual/uncertain extraction goes read-first.\n"
                                     "\u6309\u4ea7\u7269\u548c\u80fd\u529b\u9009 kind\uff1b\u9700\u8fd0\u884c\u6d4f\u89c8\u5668\u81ea\u52a8\u5316\u547d\u4ee4\u7684\u8bc1\u636e\u7528 code\uff0c\u5e7f\u6cdb\u6750\u6599\u5148 read\u3002"
                                 ),
@@ -1936,7 +1942,9 @@ OCR_TOOL_SCHEMA = {
     "function": {
         "name": "ocr",
         "description": (
-            "Offline visual/document text reading for images, PDFs, and Office containers. Use it when the current task needs text evidence from a concrete visual or document file. "
+            "Visual reading for concrete image/document inputs. Runtime configuration selects either local OCR or GPT-5.6 Sol model vision. "
+            "Model-vision mode returns a detailed description of the complete image, including layout, objects, style, colors, relationships, uncertainty, and legible text; local mode performs OCR for images, PDFs, and Office containers. "
+            "Use it when the current task needs visual or text evidence from a concrete file. "
             "Use read_file, search, or code_index for source code, Markdown, CSV, JSON, logs, and other plain text. "
             "For conceptual OCR/tooling questions, answer or troubleshoot directly from context. "
             "tier is an internal evidence-effort setting; decide upgrades from user purpose, result quality, risk, and next_tier. "
@@ -1958,7 +1966,7 @@ OCR_TOOL_SCHEMA = {
             "- text is recognized text; it is empty when no text is recognized.\n"
             "- next_tier means stronger recognition is available; no_stronger_tier means the configured ceiling was reached.\n"
             "- quality_flags and folded_spans indicate repeated abnormal text was folded by the OCR layer.\n"
-            "- OCR text is literal recognized text rather than full visual understanding. Inference should stay grounded in visible text and uncertainty.\n"
+            "- In local OCR mode, text is literal recognized text rather than full visual understanding. In model-vision mode, text contains a detailed visual description grounded in the supplied image.\n"
             "- math_quality_warning means formulas, symbols, or matrices may be incomplete; use context, upgrade when useful, or mark OCR uncertainty.\n\n"
             "OCR 用于具体图片/PDF/Office 的视觉文字证据；大文件保存到文本后分段读；结果按字面证据和不确定性使用，内部档位不面向用户。"
         ),
@@ -2003,6 +2011,42 @@ OCR_TOOL_SCHEMA = {
 
 
 # ── TTS 工具(离线语音合成 + 声音推送) ─────────────────────────
+IMAGE_GENERATE_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "image_generate",
+        "description": (
+            "Generate one raster image with the configured AI image model. This tool is only for the image_gen helper. "
+            "Decide text-to-image versus image-to-image before calling: omit input_image for text-to-image; provide one "
+            "workspace-relative reference image for image-to-image. Write a production prompt covering subject, action, "
+            "composition, environment, style, lighting, colors, viewpoint, detail, required text, and exclusions. "
+            "The result includes the saved image, technical validation, and a model-generated description."
+            "\n\nAI 生图 helper 专用：先判断文生图或图生图，编写完整提示词，再生成、校验并返回图片描述。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Final production prompt; maximum 12000 characters.\n最终生产提示词，最多 12000 字符。"},
+                "input_image": {
+                    "type": "string",
+                    "description": "Optional workspace-relative reference image. Presence selects image-to-image mode.\n可选工作区参考图；提供后使用图生图模式。",
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "Workspace-relative output path ending in .png.\n工作区相对输出路径，必须以 .png 结尾。",
+                },
+                "size": {
+                    "type": "string",
+                    "enum": ["1024x1024", "1536x1024", "1024x1536"],
+                    "description": "Requested image size; default 1024x1024.\n请求的图片尺寸，默认 1024x1024。",
+                },
+            },
+            "required": ["prompt", "output_path"],
+        },
+    },
+}
+
+
 TTS_TOOL_SCHEMA = {
     "type": "function",
     "function": {

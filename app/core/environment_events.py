@@ -33,6 +33,15 @@ class _RegisteredSink:
 
 
 _registered_sinks: dict[int, _RegisteredSink] = {}
+_workflow_consumers: dict[str, list] = {}
+_workflow_receipts: list[dict] = []
+
+def register_workflow_consumer(kind: str, callback) -> None:
+    """Register an in-process workflow event consumer (idempotence is caller-owned)."""
+    _workflow_consumers.setdefault(str(kind), []).append(callback)
+
+def workflow_consumer_receipts() -> list[dict]:
+    return list(_workflow_receipts[-100:])
 
 
 @contextmanager
@@ -140,6 +149,19 @@ def publish_workflow_event(payload: dict) -> None:
     except Exception:
         pass
     publish_environment_event("workflow", payload)
+    kind = str(payload.get("kind") or "")
+    consumers = list(_workflow_consumers.get(kind, ())) + list(_workflow_consumers.get("*", ()))
+    if not consumers:
+        _workflow_receipts.append({"kind": kind, "trace_id": payload.get("trace_id"), "status": "unconsumed"})
+        return
+    for callback in consumers:
+        try:
+            result = callback(payload)
+            if asyncio.iscoroutine(result):
+                asyncio.create_task(result)
+            _workflow_receipts.append({"kind": kind, "trace_id": payload.get("trace_id"), "status": "dispatched"})
+        except Exception as exc:
+            _workflow_receipts.append({"kind": kind, "trace_id": payload.get("trace_id"), "status": "consumer_error", "error": type(exc).__name__})
 
 
 def _put_event(queue: asyncio.Queue, event: str, payload: dict) -> None:

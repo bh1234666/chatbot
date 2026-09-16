@@ -5,15 +5,17 @@ title Chatbot QQ Bot
 color 0B
 
 cd /d "%~dp0"
+set "PYRUN=scripts\repo_python.bat"
 
 if /i "%~1"=="--check" (
     echo start_qqbot.bat OK
+    call "%PYRUN%" -HealthCheck || goto fail
     exit /b 0
 )
 
 REM QQ account for the bot. Override via env or by passing as the first arg.
-if not defined QQ_BOT_NUM set "QQ_BOT_NUM=1042414563"
 if not "%~1"=="" set "QQ_BOT_NUM=%~1"
+if not defined QQ_BOT_NUM set /p "QQ_BOT_NUM=Bot QQ account: "
 
 if not exist ".env" (
     if exist ".env.example" (
@@ -23,11 +25,11 @@ if not exist ".env" (
 
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment...
-    python -m venv .venv || goto fail
+    call "%PYRUN%" -m venv .venv || goto fail
 )
 
 echo Installing QQ bot dependencies...
-".venv\Scripts\python.exe" -m pip install -r requirements.txt --disable-pip-version-check || goto fail
+call "%PYRUN%" -m pip install -r requirements.txt --disable-pip-version-check || goto fail
 
 if not exist "napcat_bridge.py" (
     echo [ERROR] napcat_bridge.py not found.
@@ -51,7 +53,7 @@ if "%NAPCAT_DIR:~-1%"=="\" set "NAPCAT_DIR=%NAPCAT_DIR:~0,-1%"
 
 echo.
 echo Starting NapCat Bridge on port 8090...
-start "NapCat Bridge" /D "%~dp0" cmd /k "chcp 65001 >nul && title NapCat Bridge && .venv\Scripts\python.exe napcat_bridge.py"
+start "NapCat Bridge" /D "%~dp0" cmd /k "chcp 65001 >nul && title NapCat Bridge && call scripts\repo_python.bat napcat_bridge.py"
 
 timeout /t 1 /nobreak >nul
 

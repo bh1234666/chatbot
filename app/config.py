@@ -213,6 +213,13 @@ class Settings(BaseSettings):
     gpu_umiocr_memory_mb: int = Field(default=500, validation_alias="GPU_UMIOCR_MEMORY_MB")
     gpu_tts_memory_mb: int = Field(default=2500, validation_alias="GPU_TTS_MEMORY_MB")
     startup_ocr_warm_enabled: bool = Field(default=True, validation_alias="STARTUP_OCR_WARM_ENABLED")
+    gpu_disabled: bool = Field(default=False, validation_alias="GPU_DISABLED")
+    vision_enabled: bool = Field(default=True, validation_alias="VISION_ENABLED")
+    voice_enabled: bool = Field(default=True, validation_alias="VOICE_ENABLED")
+    model_vision_enabled: bool = Field(default=False, validation_alias="MODEL_VISION_ENABLED")
+    image_generation_enabled: bool = Field(default=False, validation_alias="IMAGE_GENERATION_ENABLED")
+    model_vision_model: str = Field(default="gpt-5.6-sol", validation_alias="MODEL_VISION_MODEL")
+    image_generation_model: str = Field(default="gpt-image-2", validation_alias="IMAGE_GENERATION_MODEL")
 
     # 幂等去重窗口(api/chat.py)
     idempotency_ttl_sec: float = Field(default=30.0, validation_alias="IDEMPOTENCY_TTL_SEC")

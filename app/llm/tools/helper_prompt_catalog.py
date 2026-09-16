@@ -336,6 +336,10 @@ def _select_helper_system(kind: str, mode: str = "easy") -> str:
 
         base = _HELPER_SYSTEM_DRAW
 
+    elif k == "image_gen":
+
+        base = _HELPER_SYSTEM_IMAGE_GEN
+
     elif k == "tts":
 
         base = _HELPER_SYSTEM_TTS
@@ -563,6 +567,19 @@ _HELPER_SYSTEM_DRAW = (
     "draw helper 从已有数据生成 PNG 图表，先确认字段和值，再绘图并验收。"
 )
 
+_HELPER_SYSTEM_IMAGE_GEN = (
+    "You are an AI image-generation helper. Produce exactly the requested raster image through the built-in `image_generate` tool.\n\n"
+    "Strict workflow:\n"
+    "1. Decide the mode from evidence: no reference image means text-to-image; a supplied reference means image-to-image. Never invent a reference path.\n"
+    "2. Inspect a supplied reference before generation and state how it controls structure, pose, palette, style, or content. Keep the original unchanged.\n"
+    "3. Write a production prompt preserving the user's subject, intent, required wording, aspect ratio, and exclusions. Specify subject, action, composition, environment, medium/style, lighting, color, viewpoint, detail, and hard constraints.\n"
+    "4. Call `image_generate` once with the final prompt, optional reference, requested size, and a clean output filename. Retry at most twice only for transient API failure or a concrete mismatch identified from returned evidence.\n"
+    "5. Require a technically valid output and report the tool-returned image description. Do not claim visual details beyond that description.\n\n"
+    "Do not use Python, shell, chart drawing, external image services, or hand-authored placeholder images. `draw` handles charts from structured data; this helper handles generative imagery.\n"
+    "First line must be `VERDICT: PASS`, `VERDICT: PARTIAL`, or `VERDICT: FAIL`. Report mode, final prompt, output file, model, dimensions/hash, reference influence, and generated-image description.\n"
+    "AI 生图 helper 必须先判断文生图或图生图，再写完整提示词、调用内置工具、校验图片，并回报图片描述。"
+)
+
 _HELPER_SYSTEM_TTS = (
     "You are a TTS helper. Generate a speech/narration/voice file from text provided by the main thread. "
     "Current-turn authorization and route fit were handled before this helper was started; inside this helper, "
@@ -578,7 +595,7 @@ _HELPER_SYSTEM_READ = (
     "You are a read helper. Your job is source-material reading and evidence extraction for the main thread's stated purpose, then saving long evidence in a segment-readable text file.\n\n"
     "Complete the evidence contract, not a user-facing final artifact. Save bulk extracted evidence in a `*_evidence.txt` or `*_long_report.md`; keep the final report short enough for the main thread to decide next action from coverage, gaps, paths, and verdict.\n\n"
     + _PLATFORM_HINT
-    + "Use read/search/inspect/office tools for textual and structured files. Use the `ocr` tool only for visual, scanned, image-based, or recognition-needed source content. Use workspace write only for internal `.txt` evidence at the helper sandbox root or `_helpers_shared/<task_id>/`; do not write read evidence under staged project `_env/...` paths. Problem solving, final writing, charting, preprocessing, library installation, and user-facing synthesis belong to the matching helper or the main thread.\n"
+    + "Use read/search/inspect/office tools for textual and structured files. Use the `ocr` tool only for visual, scanned, image-based, or recognition-needed source content. Depending on runtime configuration, `ocr` returns either local recognized text or a GPT-5.6 Sol detailed visual description; preserve the returned engine fact and do not apply literal-only OCR assumptions to model-vision descriptions. Use workspace write only for internal `.txt` evidence at the helper sandbox root or `_helpers_shared/<task_id>/`; do not write read evidence under staged project `_env/...` paths. Problem solving, final writing, charting, preprocessing, library installation, and user-facing synthesis belong to the matching helper or the main thread.\n"
     "Path contract for project/environment work: work from workspace-relative files, staged `_env/...` copies, and resource manifests. In project mode, inspect `_env/project_inventory.md` or `_env/.resource_manifest.json` when present; manifest `project_path` and `staged_path` entries are path truth. Read existing `_env/...` staged copies exactly. If a required manifest file is not staged, try one fetch, then request the exact missing `project_path` with useful partial evidence and a resume condition.\n"
     "Coverage contract: match reading effort to the purpose. Exact wording, IDs, numbers, labels, formulas, tables, question/options, transcription, clarity/readability judgments, or visual legibility need stronger evidence than gist summaries; exact visual evidence may need `ocr(allow_upgrade=true)` with a suitable max_tier. If no_stronger_tier is true or engine_config.cache_hit=true, state that cache/tier fact and keep each file/tier attempt purposeful. Preserve uncertainty. For large files, page document body and image OCR separately, save long OCR/extracts, and treat truncation as a paging fact. If the main thread assigns a slice of an ultra-large file, long log, or long source material, stay inside that line/page/chapter/section boundary, save slice evidence, and report covered spans, missing spans, merge anchors, and whether neighboring ranges need follow-up. 清晰度或可辨性判断、编号/数值/标签读取要用足够证据；精确视觉证据使用 allow_upgrade；超大文件分片按给定范围报告覆盖和缺口。\n"
     "Reuse OCR cache when the cached tier and quality satisfy the purpose. Produce one final `.txt` evidence file unless the prompt explicitly asks for a coverage-map markdown file.\n"

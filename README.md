@@ -6,18 +6,33 @@
 
 ## 快速开始
 
+需要 Python 3.12+。先建立并激活虚拟环境，然后安装依赖：
+
 ```bash
-# 1. 安装依赖
-make install            # 运行时;开发用 make dev-install
+python -m venv .venv
+# Windows PowerShell: .venv\Scripts\Activate.ps1
+# Linux / macOS: source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
 
-# 2. 配置
-cp .env.example .env    # 填入 DEEPSEEK_API_KEY 等
+将 `.env.example` 复制为 `.env`，填入自己的 API 密钥和服务地址，再启动：
 
-# 3. 启动(注意:必须单 worker,见下)
-make run                # uvicorn app.main:app --workers 1
+```bash
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 健康检查 `GET /health`,Prometheus 指标 `GET /metrics`。
+
+Windows 可使用 `start_backend.bat` 和 `start_agent.bat`；`start_no_gpu.bat`
+关闭本地 GPU 功能。QQ 接入需单独安装 NapCat，并设置自己的 `QQ_BOT_NUM`。
+模型看图和图片生成通过 `.env.example` 中的独立开关及 API 配置启用。
+
+## 开源范围与发布
+
+本仓库是根目录 Chatbot 后端及静态前端的 MIT 公开快照。
+发布内容由 [`scripts/export_public_snapshot.py`](./scripts/export_public_snapshot.py)
+按白名单导出；本地数据库、聊天记录、密钥、私人 QQ 标识、部署工作区及第三方运行时不随快照发布。
+导出步骤、文件范围与外部组件说明见 [公开快照说明](./docs/public_snapshot.md)。
 
 ## 目录结构
 
@@ -47,7 +62,7 @@ dream 状态。这些在多 worker / 多进程下**不共享**,会导致:
 - 进程内锁无法跨进程互斥。
 
 因此当前架构**必须以单 worker 运行**(`--workers 1`)。`config.py` 已预留
-`REDIS_URL` 但尚未接线;水平扩展需先把上述状态迁移到 Redis(见 `REFACTORING.md`)。
+`REDIS_URL` 但尚未接线;水平扩展需先把上述状态迁移到 Redis。
 
 ## 数据库
 
@@ -58,18 +73,18 @@ dream 状态。这些在多 worker / 多进程下**不共享**,会导致:
 ## 测试
 
 ```bash
-make test     # pytest;当前覆盖纯逻辑模块(如 SQL 翻译器差分测试)
-make lint     # ruff
-make typecheck
+python -m pip install -r requirements-dev.txt
+python -m pytest
+python -m ruff check app tests
+python -m mypy app
 ```
 
-离线说明:`conftest.py` 为重依赖提供最小桩,使纯逻辑模块的测试无需安装全部
-运行时依赖即可运行(便于 CI lint 阶段)。需要真实行为的集成测试请在装好依赖的
-环境运行。
+Windows 启动脚本测试需要 PowerShell。需要真实模型或外部服务的集成测试，
+应在配置好对应依赖后单独运行；单元测试通过不代表外部服务已经验证。
 
 ## 进一步重构
 
-见 [`REFACTORING.md`](./REFACTORING.md):已完成项、待办优先级、以及巨型函数/文件
+见 [重构清单](./docs/app_refactor_inventory.md):已完成项、待办优先级、以及巨型函数/文件
 的安全拆分方法与路线图。
 
 ## License

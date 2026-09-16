@@ -7,16 +7,9 @@ title Export Public Snapshot
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 
-set "PY=%ROOT%\.venv\Scripts\python.exe"
+set "PY=%ROOT%\scripts\repo_python.bat"
 set "SCRIPT=%ROOT%\scripts\export_public_snapshot.py"
 set "OUT=%ROOT%\..\chatbot-public"
-
-if not exist "%PY%" (
-    echo [ERROR] venv Python not found at "%PY%"
-    echo Run start.bat once to create the venv, then re-run this script.
-    pause
-    exit /b 1
-)
 
 if not exist "%SCRIPT%" (
     echo [ERROR] export script not found at "%SCRIPT%"
@@ -27,6 +20,7 @@ if not exist "%SCRIPT%" (
 set "MODE=%~1"
 if /I "%MODE%"=="--check" (
     echo export_public_snapshot.bat OK
+    call "%PY%" -HealthCheck || exit /b 1
     exit /b 0
 )
 if /I "%MODE%"=="dry" goto :dry
@@ -51,7 +45,7 @@ if errorlevel 2 (
 
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
-"%PY%" "%SCRIPT%" --out "%OUT%" --force
+call "%PY%" "%SCRIPT%" --out "%OUT%" --force
 set "RC=%ERRORLEVEL%"
 
 echo.
@@ -81,7 +75,7 @@ echo   Export Public Snapshot ^(dry-run^)
 echo ==============================================
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
-"%PY%" "%SCRIPT%" --out "%OUT%" --dry-run
+call "%PY%" "%SCRIPT%" --out "%OUT%" --dry-run
 echo.
 pause
 exit /b %ERRORLEVEL%

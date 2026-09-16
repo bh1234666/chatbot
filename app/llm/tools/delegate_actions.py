@@ -1093,6 +1093,27 @@ def _normalize_environment_output_paths_from_manifest(main_workspace: str, tasks
             task["expected_outputs"] = normalized
 
 
+def _normalize_tts_expected_outputs(tasks: list[dict]) -> None:
+    """OmniVoice produces WAV; align helper acceptance paths with that runtime fact."""
+    for task in tasks or []:
+        if not isinstance(task, dict) or str(task.get("kind") or "").strip().lower() != "tts":
+            continue
+        outputs = task.get("expected_outputs")
+        if not isinstance(outputs, list):
+            continue
+        normalized: list[str] = []
+        for raw in outputs:
+            path = str(raw or "").strip()
+            root, ext = os.path.splitext(path)
+            if ext.lower() in {".mp3", ".m4a", ".ogg"}:
+                path = root + ".wav"
+            elif ext.lower() != ".wav":
+                safe_task_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(task.get("task_id") or "tts")).strip("_")
+                path = f"{safe_task_id or 'tts'}.wav"
+            normalized.append(path)
+        task["expected_outputs"] = normalized
+
+
 def _annotate_source_count_hints_from_manifest(main_workspace: str, tasks: list[dict]) -> None:
     """Attach internal source-material counts for preflight read fan-out.
 
@@ -1178,6 +1199,7 @@ async def _spawn_helpers_only(
             _env_fetch_stats,
         )
     _normalize_environment_output_paths_from_manifest(main_workspace, cleaned_tasks)
+    _normalize_tts_expected_outputs(cleaned_tasks)
     _annotate_source_count_hints_from_manifest(main_workspace, cleaned_tasks)
 
     # Prepare workspace for each task
@@ -3477,6 +3499,7 @@ async def handle_delegate(
             _env_fetch_stats,
         )
     _normalize_environment_output_paths_from_manifest(main_workspace, cleaned)
+    _normalize_tts_expected_outputs(cleaned)
     _annotate_source_count_hints_from_manifest(main_workspace, cleaned)
 
     # ── 设置 ContextVar:owner=main, spawn_queue 让 helper 能动态加 task ──

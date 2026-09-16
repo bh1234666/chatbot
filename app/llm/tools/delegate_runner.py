@@ -1956,6 +1956,8 @@ async def _run_one_helper(
                 _h_spec = resolve_task("helper_full_edit_hard")
             elif kind == "draw":
                 _h_spec = resolve_task("helper_full_draw_hard")
+            elif kind == "image_gen":
+                _h_spec = resolve_task("helper_full_draw_hard")
             elif kind in {"project_map", "file_summary", "impact_review", "inventory", "summarize"}:
                 _h_spec = resolve_task("helper_full_project_analysis_hard")
             elif kind == "tts":

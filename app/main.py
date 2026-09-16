@@ -354,8 +354,8 @@ async def lifespan(app: FastAPI):
 
     # 2026-05-18 P167: 启动 MinerU OCR 后台服务（避免每次 OCR 冷启动 ~30s）
     _mineru_bg_proc = None
-    if not settings.startup_ocr_warm_enabled:
-        log.info("startup OCR warm disabled by STARTUP_OCR_WARM_ENABLED=false")
+    if settings.gpu_disabled or not settings.vision_enabled or not settings.startup_ocr_warm_enabled:
+        log.info("startup OCR warm disabled by runtime feature settings")
     else:
         try:
             from app.llm.tools.ocr_bridge import (

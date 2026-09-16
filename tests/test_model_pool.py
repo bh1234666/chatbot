@@ -179,8 +179,10 @@ def test_model_pool_variants_keep_stage_and_helper_keys_consistent():
 
     for module_name in (
         "app.llm.model_pool_variants.model_pool_deepseek",
+        "app.llm.model_pool_variants.model_pool_deepseek_flash",
         "app.llm.model_pool_variants.model_pool_mixed",
         "app.llm.model_pool_variants.model_pool_all_gpt",
+        "app.llm.model_pool_variants.model_pool_custom_gpt56_sol",
     ):
         mp = importlib.import_module(module_name)
         for task, assignment in expected.items():
@@ -215,6 +217,48 @@ def test_mixed_variant_routes_only_requested_stages_to_deepseek():
         assert spec.reasoning == "disabled"
 
     print("[OK] mixed variant routes requested stages to DeepSeek and all others to GPT-5.5")
+
+
+def test_deepseek_flash_variant_routes_all_tasks_to_flash():
+    """DeepSeek Flash pool keeps one provider and maps every slot to v4-flash."""
+    import importlib
+
+    mp = importlib.import_module("app.llm.model_pool_variants.model_pool_deepseek_flash")
+
+    assert mp.ACTIVE.name == "deepseek"
+    assert set(mp.THINK.values()) == {"deepseek-v4-flash"}
+    assert set(mp.NONTHINK.values()) == {"deepseek-v4-flash"}
+    assert mp.REASONING == {"low": "low", "mid": "high", "high": "max"}
+
+    for task in mp.TASK_TIER:
+        spec = mp.resolve_task(task)
+        assert spec.provider.name == "deepseek"
+        assert spec.model == "deepseek-v4-flash"
+
+    print("[OK] DeepSeek Flash variant routes every task to deepseek-v4-flash")
+
+
+def test_custom_gpt56_sol_variant_uses_gpt55_provider():
+    """Custom GPT-5.6 Sol pool uses the same provider config as GPT-5.5."""
+    import importlib
+
+    mp = importlib.import_module("app.llm.model_pool_variants.model_pool_custom_gpt56_sol")
+
+    for think in (False, True):
+        for tier in ("low", "mid", "high"):
+            spec = mp.resolve(think, tier)
+            assert spec.provider.name == "gpt55"
+            assert spec.provider is mp.GPT55
+            assert spec.model == "gpt-5.6-sol"
+            assert spec.reasoning == "disabled"
+
+    for task in mp.TASK_TIER:
+        spec = mp.resolve_task(task)
+        assert spec.provider.name == "gpt55", f"{task} should use GPT-5.5 provider"
+        assert spec.model == "gpt-5.6-sol"
+        assert spec.reasoning == "disabled"
+
+    print("[OK] custom GPT-5.6 Sol variant uses GPT-5.5 provider")
 
 
 def test_think_tier_assignment_rationale():

@@ -6,6 +6,16 @@ title Cleanup Chatbot Generated Files
 cd /d "%~dp0"
 
 if /i "%~1"=="--check" (
+    if not exist "%~dp0stop_all_services.ps1" (
+        echo [ERROR] stop_all_services.ps1 not found.
+        exit /b 1
+    )
+    if not exist "%~dp0scripts\cleanup_generated.ps1" (
+        echo [ERROR] scripts\cleanup_generated.ps1 not found.
+        exit /b 1
+    )
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0stop_all_services.ps1" -Check -NoPause >nul
+    if errorlevel 1 exit /b 1
     echo cleanup_generated.bat OK
     exit /b 0
 )

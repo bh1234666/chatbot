@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Union, Optional
 
+from app.config import settings
+
 log = logging.getLogger(__name__)
 
 # ---- Paths ----
@@ -99,6 +101,8 @@ def _call_headless(
     现在调用方传 cwd=workspace_dir, 即使 OmniVoice 忽略 `output` 参数, 文件也会
     落到 workspace 内 → 主线程能直接交付, 无需 shutil.move 兜底。
     """
+    if settings.gpu_disabled or not settings.voice_enabled:
+        return TtsResult(ok=False, error="Voice/TTS is disabled in the current runtime mode")
     if not _OMNI_RUNTIME.is_file():
         return TtsResult(ok=False, error=f"OmniVoice runtime not found: {_OMNI_RUNTIME}")
     if not _TTS_SCRIPT.is_file():
@@ -312,6 +316,8 @@ def tts_auto(
 
 def is_available() -> bool:
     """Check if OmniVoice runtime and TTS script are both accessible."""
+    if settings.gpu_disabled or not settings.voice_enabled:
+        return False
     return _OMNI_RUNTIME.is_file() and _TTS_SCRIPT.is_file()
 
 

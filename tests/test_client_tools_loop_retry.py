@@ -1008,6 +1008,7 @@ async def test_schema_retry_expansion_clears_after_non_schema_retry_result(monke
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1096,6 +1097,7 @@ async def test_browser_pre_edit_main_edit_executes_with_runtime_fact(monkeypatch
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1189,6 +1191,7 @@ async def test_post_tool_abort_budgets_large_tool_result_before_finalize(monkeyp
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_thinking_extra_body", lambda reasoning, provider=None: {})
@@ -1262,6 +1265,7 @@ async def test_workspace_scanning_verifier_fact_blocks_premature_chat_only_final
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1370,6 +1374,7 @@ async def test_listed_acceptance_script_fact_blocks_premature_chat_only_finalize
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1479,6 +1484,7 @@ async def test_main_project_discovery_injects_source_path_handoff_fact(monkeypat
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1562,6 +1568,7 @@ async def test_main_project_discovery_handoff_fact_is_after_parallel_results(mon
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1651,6 +1658,7 @@ async def test_main_helper_handoff_ready_fact_is_not_injected_immediately(monkey
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1723,6 +1731,7 @@ async def test_main_text_material_handoff_fact_after_compact_listing(monkeypatch
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1802,6 +1811,7 @@ async def test_main_helper_handoff_overwork_fact_after_repeated_direct_work(monk
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -1932,6 +1942,7 @@ async def test_non_timeout_stream_failure_injects_recovery_and_continues(monkeyp
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -3559,6 +3570,7 @@ async def test_retryable_delegate_next_action_blocks_premature_finalize(monkeypa
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_thinking_extra_body", lambda reasoning, provider=None: {})
@@ -3650,6 +3662,7 @@ async def test_retryable_delegate_next_action_gives_multiple_recovery_checkpoint
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_thinking_extra_body", lambda reasoning, provider=None: {})
@@ -3730,6 +3743,7 @@ async def test_retryable_delegate_allows_model_decision_after_checkpoint_limit(m
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_thinking_extra_body", lambda reasoning, provider=None: {})
@@ -3824,6 +3838,7 @@ async def test_retryable_delegate_does_not_block_after_commit_to_main(monkeypatc
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_thinking_extra_body", lambda reasoning, provider=None: {})
@@ -4223,6 +4238,7 @@ async def test_timeout_partial_tool_call_does_not_finalize_without_evidence(monk
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())
@@ -4293,6 +4309,7 @@ async def test_repeated_llm_timeout_raises_instead_of_forced_finalize(monkeypatc
         "_legacy_model_spec",
         lambda lite=False, reasoning="high": SimpleNamespace(
             model="fake", reasoning=reasoning, provider=None,
+            input_budget_tokens=400_000, max_output_tokens=4_096,
         ),
     )
     monkeypatch.setattr(llm_client, "_client_for_spec", lambda spec: SimpleNamespace())

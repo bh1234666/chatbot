@@ -546,6 +546,8 @@ def _start_mineru_api_process(config: MineruOcrConfig, *, port: int = _DEFAULT_M
     process count, and the old bg_service.py -> fast_api chain looked like two
     MinerU instances even when only one API server was doing work.
     """
+    if settings.gpu_disabled or not settings.vision_enabled:
+        raise RuntimeError("OCR is disabled in the current runtime mode")
     cmd = [
         str(_MINERU_RUNTIME),
         "-m",
@@ -652,6 +654,8 @@ def _start_umi_worker_locked(timeout: int = 60) -> subprocess.Popen | None:
 
 
 def warm_umi_worker(timeout: int = 60) -> bool:
+    if settings.gpu_disabled or not settings.vision_enabled:
+        return False
     with _UMI_WORKER_LOCK:
         return _start_umi_worker_locked(timeout=timeout) is not None
 
@@ -1625,6 +1629,8 @@ def _run_tier(path: Path, cfg: OcrTierConfig, timeout: int) -> OcrResult:
 
 
 def ocr_file_tiered(path: Union[str, Path], *, tier: str = "fast", allow_upgrade: bool = False, max_tier: str = "accurate", timeout: int = _DEFAULT_TIMEOUT) -> OcrResult:
+    if settings.gpu_disabled or not settings.vision_enabled:
+        return OcrResult(ok=False, error="OCR/image recognition is disabled in the current runtime mode", tier=tier)
     target = Path(path)
     if not target.is_file():
         return OcrResult(ok=False, error=f"image file not found: {target}", tier=tier)
@@ -2150,6 +2156,8 @@ def ocr_bytes(data: bytes, *, timeout: int = _DEFAULT_TIMEOUT) -> OcrResult:
 
 
 def ocr_base64(b64: str, *, timeout: int = _DEFAULT_TIMEOUT) -> OcrResult:
+    if settings.gpu_disabled or not settings.vision_enabled:
+        return OcrResult(ok=False, error="OCR/image recognition is disabled in the current runtime mode")
     if "," in b64 and "base64" in b64[:50]:
         b64 = b64.split(",", 1)[1]
     try:
@@ -2172,6 +2180,8 @@ def ocr_base64(b64: str, *, timeout: int = _DEFAULT_TIMEOUT) -> OcrResult:
 
 
 def is_available() -> bool:
+    if settings.gpu_disabled or not settings.vision_enabled:
+        return False
     return _mineru_available() or _legacy_available()
 
 

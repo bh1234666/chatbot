@@ -732,7 +732,7 @@ async def test_chat_stream_interrupt_payload_cache_shares_queue(monkeypatch):
     assert chat._interrupt_messages == {}
 
 
-def test_mid_turn_control_interrupt_keeps_original_task():
+def test_mid_turn_interrupt_prompt_preserves_original_task_context():
     from app.core.orchestrator_entry import _message_with_user_interrupts
 
     base = "请检查当前工程里和中断、自动继续、文件上传、记忆回忆有关的几个接口。"
@@ -747,12 +747,12 @@ def test_mid_turn_control_interrupt_keeps_original_task():
     merged = _message_with_user_interrupts(base, payloads)
 
     assert base in merged
-    assert "Mid-turn control interruption" in merged
+    assert "Mid-turn interruption" in merged
+    assert "original request as the task context" in merged
     assert "重新整理" in merged
-    assert "Treat it as the latest instruction" not in merged
 
 
-def test_mid_turn_non_control_interrupt_overrides_original_task():
+def test_mid_turn_interrupt_prompt_allows_explicit_new_objective():
     from app.core.orchestrator_entry import _message_with_user_interrupts
 
     base = "请检查当前工程里和中断、自动继续、文件上传、记忆回忆有关的几个接口。"
@@ -767,9 +767,30 @@ def test_mid_turn_non_control_interrupt_overrides_original_task():
     merged = _message_with_user_interrupts(base, payloads)
 
     assert base in merged
-    assert "Mid-turn user interruption" in merged
-    assert "Treat it as the latest instruction" in merged
-    assert "Mid-turn control interruption" not in merged
+    assert "Mid-turn interruption" in merged
+    assert "explicitly changes the task" in merged
+    assert "test_deliverable_boundaries" in merged
+
+
+def test_mid_turn_interrupt_prompt_handles_mixed_control_and_new_objective():
+    from app.core.orchestrator_entry import _message_with_user_interrupts
+
+    base = "请检查当前工程里和中断、自动继续、文件上传、记忆回忆有关的几个接口。"
+    payloads = [
+        {
+            "message": "请中断当前回答，改为总结 test_deliverable_boundaries 的真实测试结果。",
+            "kind": "user",
+            "source": "chat_interrupt",
+        }
+    ]
+
+    merged = _message_with_user_interrupts(base, payloads)
+
+    assert base in merged
+    assert "Mid-turn interruption" in merged
+    assert "stop or pause request" in merged
+    assert "explicitly changes the task" in merged
+    assert "test_deliverable_boundaries" in merged
 
 
 async def test_chat_interrupt_message_resolves_environment_project(monkeypatch, tmp_path):

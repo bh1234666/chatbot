@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.config import settings
+
 
 @dataclass(frozen=True)
 class CommandRiskDecision:
@@ -352,6 +354,24 @@ def _main_thread_env_project_copy_write_decision(
 
 def analyze_command(command: str, ws_dir: str, *, is_main_thread: bool = True) -> CommandRiskDecision:
     cmd_lower = command.lower()
+    if settings.gpu_disabled:
+        parts = command.split()
+        first_exe = _first_executable(parts).strip('"\'').rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+        gpu_executables = {"nvidia-smi", "nvidia-smi.exe", "nvcc", "nvcc.exe", "rocm-smi", "rocminfo"}
+        python_gpu_request = first_exe in {"python", "python.exe", "python3", "py"} and re.search(
+            r"(?i)(torch\.cuda|cupy|tensorflow.*gpu|--device(?:=|\s+)cuda|device\s*=\s*['\"]cuda)",
+            command,
+        )
+        visibility_override = re.search(
+            r"(?i)(?:cuda_visible_devices|nvidia_visible_devices)\s*=\s*(?!['\"]?(?:-1|none)['\"]?(?:\s|$))",
+            command,
+        )
+        if first_exe in gpu_executables or python_gpu_request or visibility_override:
+            return CommandRiskDecision(
+                False,
+                "GPU process launch is disabled in the current runtime mode.",
+                "gpu_disabled",
+            )
     for keyword in DANGEROUS_KEYWORDS:
         if re.search(r"\b" + re.escape(keyword) + r"\b", cmd_lower):
             return CommandRiskDecision(

@@ -8,8 +8,10 @@ cd /d "%~dp0"
 set "POOL_DIR=app\llm\model_pool_variants"
 set "ACTIVE_POOL=app\llm\model_pool.py"
 set "POOL_DS=%POOL_DIR%\model_pool_deepseek.py"
+set "POOL_DS_FLASH=%POOL_DIR%\model_pool_deepseek_flash.py"
 set "POOL_GPT=%POOL_DIR%\model_pool_all_gpt.py"
 set "POOL_MIXED=%POOL_DIR%\model_pool_mixed.py"
+set "POOL_GPT56_SOL=%POOL_DIR%\model_pool_custom_gpt56_sol.py"
 
 if /i "%~1"=="--check" (
     call :check_files || exit /b 1
@@ -26,8 +28,10 @@ if "%SELECT%"=="" (
     echo   1. DeepSeek only
     echo   2. GPT-5.5 only
     echo   3. Mixed ^(Round1/Round3/lowest Round2 DeepSeek, others GPT-5.5^)
+    echo   4. Custom GPT-5.6 Sol ^(GPT-5.5 provider^)
+    echo   5. DeepSeek Flash only
     echo.
-    choice /c 123 /n /m "Input 1/2/3: "
+    choice /c 12345 /n /m "Input 1/2/3/4/5: "
     set "SELECT=!ERRORLEVEL!"
 )
 
@@ -49,13 +53,29 @@ if "%SELECT%"=="3" (
     goto end
 )
 
+if "%SELECT%"=="4" (
+    copy /y "%POOL_GPT56_SOL%" "%ACTIVE_POOL%" >nul || goto fail
+    echo Switched model pool to: Custom GPT-5.6 Sol
+    goto end
+)
+
+if "%SELECT%"=="5" (
+    copy /y "%POOL_DS_FLASH%" "%ACTIVE_POOL%" >nul || goto fail
+    echo Switched model pool to: DeepSeek Flash only
+    goto end
+)
+
 echo [ERROR] Invalid selection: %SELECT%
-echo Use 1, 2, or 3.
+echo Use 1, 2, 3, 4, or 5.
 goto fail
 
 :check_files
 if not exist "%POOL_DS%" (
     echo [ERROR] Missing %POOL_DS%
+    exit /b 1
+)
+if not exist "%POOL_DS_FLASH%" (
+    echo [ERROR] Missing %POOL_DS_FLASH%
     exit /b 1
 )
 if not exist "%POOL_GPT%" (
@@ -64,6 +84,10 @@ if not exist "%POOL_GPT%" (
 )
 if not exist "%POOL_MIXED%" (
     echo [ERROR] Missing %POOL_MIXED%
+    exit /b 1
+)
+if not exist "%POOL_GPT56_SOL%" (
+    echo [ERROR] Missing %POOL_GPT56_SOL%
     exit /b 1
 )
 exit /b 0

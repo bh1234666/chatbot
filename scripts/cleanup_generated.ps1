@@ -1,5 +1,6 @@
 param(
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$Check
 )
 
 $ErrorActionPreference = "Stop"
@@ -7,6 +8,11 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $DestRoot = Join-Path $Root "del\cleanup_$Stamp"
+
+if ($Check) {
+    Write-Host "cleanup_generated.ps1 OK"
+    exit 0
+}
 
 $GeneratedRootItems = @(
     ".benchmarks",

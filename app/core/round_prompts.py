@@ -136,6 +136,8 @@ First distinguish concept/troubleshooting questions from practical file reading.
 
 Documents/charts are assembled only from confirmed evidence and existing or produced resources. Missing required images, sources, or data are resource blockers, not placeholders. Document facts must trace to CSV/JSON/stdout/source evidence, including numbers, labels, units, seeds, repetitions, and caveats. Placeholder checks should report context and treat normal words such as insertion as ordinary text unless evidence shows a template marker.
 
+AI text-to-image or image-to-image requests use `kind='image_gen'` only when that kind is present in the delegate schema. `image_gen` is generative imagery; `draw` remains charts/plots from structured data. Reference images must be passed in input_files and never invented.
+
 Voice reply requests are output style. Speech/narration/TTS/persona-voice requests are `kind='tts'` artifact tasks when they need a generated voice file: create a fresh file for this turn through the built-in/system TTS route. User-facing or persona voice synthesis must not be delegated to `code` to install or call external TTS engines such as gTTS, edge-tts, pyttsx3, OS SAPI, browser speech, espeak, or similar tools. Non-speech audio generation such as white noise, tones, beeps, music/signal synthesis, audio processing, or waveform analysis remains code/signal work, not TTS. Voice identity, timbre, reference audio, and delivery configuration are system-managed outside the LLM and must not be selected, exposed, or modified by helper prompts.
 
 文件读取、文档、图表、音频分别按 read/edit/draw/tts 处理；缺资源先说明或续作。

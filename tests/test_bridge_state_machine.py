@@ -235,7 +235,7 @@ async def test_chat_and_reply_injects_message_when_abort_marker_arrives():
     assert inject_posts[0]["json"]["message"] == "hi"
 
 
-async def test_send_generated_files_falls_back_when_napcat_returns_failed_body():
+async def test_send_generated_files_reports_failure_without_localhost_link():
     import napcat_bridge
 
     client = FakeClient()
@@ -255,7 +255,32 @@ async def test_send_generated_files_falls_back_when_napcat_returns_failed_body()
     )
 
     assert client.posts[0][0].endswith("/send_group_msg")
-    assert "下载：" in client.posts[0][1]["json"]["message"]
+    message = client.posts[0][1]["json"]["message"]
+    assert "文件推送失败" in message
+    assert "localhost" not in message
+
+
+async def test_send_generated_files_normalizes_internal_path_name(tmp_path):
+    import napcat_bridge
+
+    file_path = tmp_path / "snake.html"
+    file_path.write_bytes(b"html")
+    client = FakeClient()
+
+    await napcat_bridge._send_generated_files(
+        client,
+        "123",
+        [{
+            "name": "_env/snake.html",
+            "url": "/v1/chat/files/a/g/snake.html",
+            "local_path": str(file_path),
+        }],
+    )
+
+    assert client.posts == [(
+        f"{napcat_bridge.NAPCAT_URL}/upload_group_file",
+        {"json": {"group_id": 123, "file": str(file_path), "name": "snake.html"}, "timeout": 60.0},
+    )]
 
 
 async def test_send_generated_files_uses_done_payload_file_not_reply_text(tmp_path):

@@ -65,7 +65,7 @@ async def test_bridge_skips_blocked_generated_files_without_link_fallback(monkey
     async def fake_fallback(*args):
         fallback_calls.append(args)
 
-    monkeypatch.setattr(napcat_bridge, "_send_file_link_fallback", fake_fallback)
+    monkeypatch.setattr(napcat_bridge, "_send_file_delivery_failure", fake_fallback)
 
     voice_sent = await napcat_bridge._send_generated_files(
         client,

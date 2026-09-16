@@ -25,6 +25,24 @@ class ModelSpec:
     model: str
     reasoning: str
     provider: ProviderConfig
+    # Context limits belong to the model-pool entry, not to the tool loop.
+    context_window_tokens: int = 400_000
+    context_safety_tokens: int = 4_096
+    token_estimator: str = "utf8_upper_bound"
+
+    @property
+    def max_output_tokens(self) -> int:
+        """Output reservation is always 5% of this model's context window."""
+        return max(1, self.context_window_tokens * 5 // 100)
+
+    @property
+    def input_budget_tokens(self) -> int:
+        return max(
+            1,
+            self.context_window_tokens
+            - self.max_output_tokens
+            - self.context_safety_tokens,
+        )
 
 
 async def chat_json(

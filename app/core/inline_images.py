@@ -18,6 +18,10 @@ def _image_basename(name: str) -> str:
 
 
 def scan_inline_images(archive_id: str, group_id: str) -> list[dict]:
+    from app.config import settings
+
+    if not settings.model_vision_enabled and (settings.gpu_disabled or not settings.vision_enabled):
+        return []
     if not archive_id or not group_id:
         return []
     try:

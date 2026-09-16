@@ -36,12 +36,13 @@ INCLUDE_DIRS: list[str] = [
     "app",
     "tests",
     "migrations",
-    "scripts",
+    "scripts/ocr_benchmark",
     "config",
     "agent_frontend",
 ]
 
-# Files copied at the repo root.
+# Individual files copied relative to ROOT. Operational scripts are opt-in:
+# the local scripts/ tree also contains private deployment and account data.
 INCLUDE_FILES: list[str] = [
     "README.md",
     "LICENSE",
@@ -62,8 +63,12 @@ INCLUDE_FILES: list[str] = [
     "start.bat",
     "start_backend.bat",
     "start_agent.bat",
+    "start_no_gpu.bat",
     "start_qqbot.bat",
     "startbot.bat",
+    "startbot_nogpu.bat",
+    "startbot_full.bat",
+    "startbot_full_nogpu.bat",
     "stop_all_services.bat",
     "stop_all_services.ps1",
     "switch_model_pool.bat",
@@ -73,6 +78,15 @@ INCLUDE_FILES: list[str] = [
     "export_public_snapshot.bat",
     "auto_publish.bat",
     "monitor.sh",
+    "scripts/cache_report.py",
+    "scripts/clean_generated.py",
+    "scripts/cleanup_generated.ps1",
+    "scripts/create_local_snapshot.py",
+    "scripts/export_public_snapshot.py",
+    "scripts/precheck.ps1",
+    "scripts/qq_project_mode.py",
+    "scripts/repo_python.bat",
+    "scripts/repo_python.ps1",
 ]
 
 # Top-level scripts under stress_tools/, but not stress_tools/runs/.
@@ -84,6 +98,7 @@ INCLUDE_DOCS: list[str] = [
     "environment_mode_plan.md",
     "file_management_legacy_replacement_map.md",
     "file_management_refactor_plan.md",
+    "public_snapshot.md",
 ]
 
 # Personas allowed (only environment).
@@ -130,18 +145,40 @@ EXCLUDE_FILE_GLOBS = [
     ".env",
     ".env.local",
     ".env.*.local",
+    ".env.*",
+    "*.private.json",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.bak*",
+    "*.repair_try*",
+    ".cleanup_state.json",
+    "fontlist-v*.json",
 ]
+
+# These tests target local deployment packages / benchmark evidence, not the
+# root app distributed by this snapshot. Keep them in the private source tree.
+EXCLUDE_PATHS = {
+    "tests/test_j03_wire_id_compat.py",
+    "tests/test_sqlite_composite_benchmark_contract.py",
+}
 
 # ── Secret scanner ─────────────────────────────────────────────────────
 # Matches things that look like real keys/tokens. The placeholder
 # `sk-your-deepseek-key-here` is intentionally not matchable.
 SECRET_PATTERNS = [
-    re.compile(r"sk-[A-Za-z0-9]{32,}"),  # OpenAI/DeepSeek-style
+    re.compile(r"sk-[A-Za-z0-9_-]{32,}"),  # OpenAI/DeepSeek-style
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(r"DEEPSEEK_API_KEY\s*=\s*sk-[A-Za-z0-9]+"),
     re.compile(r"GPT55_API_KEY\s*=\s*sk-[A-Za-z0-9]+"),
     re.compile(r"chat\.ekti\.cc"),  # private proxy
     # private QQ accounts (long pure-digit ids); allow short test fixtures.
     re.compile(r"\bqq[_=]\s*[\"']?\d{8,}\b", re.IGNORECASE),
+    re.compile(r"\bQQ_BOT_NUM\s*=\s*[\"']?\d{8,}\b", re.IGNORECASE),
+    re.compile(r"\b(?:group_id|user_id|owner_id|self_id|admin_id)[\"']?\s*[:=]\s*[\"']?\d{8,}\b", re.IGNORECASE),
 ]
 
 # Files where pattern matches are expected and should be ignored.
@@ -181,18 +218,22 @@ def _is_excluded_dir(name: str) -> bool:
 
 
 def _is_excluded_file(name: str) -> bool:
+    if name == ".env.example":
+        return False
     return any(fnmatch.fnmatch(name, pat) for pat in EXCLUDE_FILE_GLOBS)
 
 
 def _copy_tree(src: Path, dst: Path, plan: list[tuple[Path, Path]]) -> None:
     """Walk src and add (file_src, file_dst) entries to plan, honoring exclusions."""
-    if not src.exists():
+    if not src.exists() or src.is_symlink() or src.is_junction():
         return
     if src.is_file():
         if not _is_excluded_file(src.name):
             plan.append((src, dst))
         return
     for entry in src.iterdir():
+        if entry.is_symlink() or entry.is_junction():
+            continue
         if entry.is_dir():
             if _is_excluded_dir(entry.name):
                 continue
@@ -211,29 +252,29 @@ def build_plan(out_dir: Path) -> list[tuple[Path, Path]]:
 
     for f in INCLUDE_FILES:
         src = ROOT / f
-        if src.exists():
+        if src.is_file() and not src.is_symlink():
             plan.append((src, out_dir / f))
 
     if INCLUDE_STRESS_TOOLS_TOP_LEVEL:
         st_src = ROOT / "stress_tools"
         if st_src.exists():
             for entry in st_src.iterdir():
-                if entry.is_file() and not _is_excluded_file(entry.name):
+                if entry.is_file() and not entry.is_symlink() and not _is_excluded_file(entry.name):
                     plan.append((entry, out_dir / "stress_tools" / entry.name))
 
     docs_src = ROOT / "docs"
     for name in INCLUDE_DOCS:
         src = docs_src / name
-        if src.exists():
+        if src.is_file() and not src.is_symlink():
             plan.append((src, out_dir / "docs" / name))
 
     personas_src = ROOT / "personas"
     for name in INCLUDE_PERSONAS:
         src = personas_src / name
-        if src.exists():
+        if src.is_file() and not src.is_symlink():
             plan.append((src, out_dir / "personas" / name))
 
-    return plan
+    return [(src, dst) for src, dst in plan if src.relative_to(ROOT).as_posix() not in EXCLUDE_PATHS]
 
 
 def perform_copy(plan: list[tuple[Path, Path]]) -> None:
@@ -256,6 +297,15 @@ POST_COPY_REWRITES: list[tuple[str, list[tuple[re.Pattern[str], str]]]] = [
     ),
 ]
 
+for _launcher in ("start.bat", "startbot.bat", "start_qqbot.bat"):
+    POST_COPY_REWRITES.append((
+        _launcher,
+        [(
+            re.compile(r'^if not defined QQ_BOT_NUM set "QQ_BOT_NUM=\d+"$', re.MULTILINE | re.IGNORECASE),
+            'if not defined QQ_BOT_NUM set /p "QQ_BOT_NUM=Bot QQ account: "',
+        )],
+    ))
+
 
 def apply_rewrites(out_dir: Path) -> list[str]:
     """Apply placeholder rewrites and return list of (rel_path) actually changed."""
@@ -264,18 +314,20 @@ def apply_rewrites(out_dir: Path) -> list[str]:
         path = out_dir / rel
         if not path.exists():
             continue
-        text = path.read_text(encoding="utf-8")
+        original_bytes = path.read_bytes()
+        newline = "\r\n" if b"\r\n" in original_bytes else "\n"
+        text = original_bytes.decode("utf-8").replace("\r\n", "\n")
         new_text = text
         for pat, repl in rules:
             new_text = pat.sub(repl, new_text)
         if new_text != text:
-            path.write_text(new_text, encoding="utf-8")
+            path.write_text(new_text, encoding="utf-8", newline=newline)
             changed.append(rel)
     return changed
 
 
 def scan_secrets(out_dir: Path) -> list[tuple[Path, str, str]]:
-    """Return [(path, pattern, sample_line)] for any suspected secret in the snapshot."""
+    """Return paths, patterns and redacted line locations; never print secrets."""
     findings: list[tuple[Path, str, str]] = []
     for path in out_dir.rglob("*"):
         if not path.is_file():
@@ -283,6 +335,8 @@ def scan_secrets(out_dir: Path) -> list[tuple[Path, str, str]]:
         if path.suffix.lower() not in TEXT_EXTS and path.name not in {".gitignore", ".env.example"}:
             continue
         rel = path.relative_to(out_dir).as_posix()
+        if ".git" in path.relative_to(out_dir).parts:
+            continue
         if rel in SECRET_SCAN_ALLOWLIST:
             continue
         try:
@@ -292,11 +346,8 @@ def scan_secrets(out_dir: Path) -> list[tuple[Path, str, str]]:
         for pat in SECRET_PATTERNS:
             m = pat.search(text)
             if m:
-                line_start = text.rfind("\n", 0, m.start()) + 1
-                line_end = text.find("\n", m.end())
-                if line_end == -1:
-                    line_end = len(text)
-                sample = text[line_start:line_end].strip()[:200]
+                line_number = text.count("\n", 0, m.start()) + 1
+                sample = f"line {line_number} (value redacted)"
                 findings.append((path, pat.pattern, sample))
                 break
     return findings
@@ -307,10 +358,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--out",
         type=Path,
-        default=Path(r"F:\chatbot-public"),
-        help="Output directory (default: F:\\chatbot-public).",
+        default=ROOT.parent / f"{ROOT.name}-public",
+        help="Output directory (default: a sibling named <source>-public).",
     )
     p.add_argument("--dry-run", action="store_true", help="List planned copies without writing.")
+    p.add_argument("--check", action="store_true", help="Validate script wiring without exporting.")
     p.add_argument(
         "--force",
         action="store_true",
@@ -321,14 +373,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.check:
+        print("export_public_snapshot.py OK")
+        return 0
     out: Path = args.out.resolve()
 
-    try:
-        out.relative_to(ROOT)
-        print(f"[ERROR] Output dir {out} is inside the repo {ROOT}. Pick a sibling path.", file=sys.stderr)
+    if out == ROOT or ROOT in out.parents or out in ROOT.parents:
+        print(f"[ERROR] Output dir {out} overlaps the repo {ROOT}. Pick a sibling path.", file=sys.stderr)
         return 2
-    except ValueError:
-        pass  # good: outside repo
 
     plan = build_plan(out)
     print(f"Plan: {len(plan)} files. Source: {ROOT}. Target: {out}")
@@ -384,7 +436,7 @@ def main() -> int:
     print("\nNext steps:")
     print(f"  cd {out}")
     print("  git status                              # confirm staged changes")
-    print('  git commit -am "Update <something>"     # if .git/ already exists')
+    print('  git add -A && git commit -m "upd"      # if .git/ already exists')
     print("  git push                                # push the update")
     print("  # First-time only:")
     print("  #   git init && git add -A && git commit -m 'Initial public snapshot'")

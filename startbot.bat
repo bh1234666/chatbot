@@ -2,9 +2,92 @@
 chcp 65001 >nul
 title Chatbot QQ Bot - One Click Start
 color 0A
+set "PYRUN=%~dp0scripts\repo_python.bat"
 
 if /i "%~1"=="--check" (
     echo startbot.bat OK
+    call "%PYRUN%" -HealthCheck || exit /b 1
+    exit /b 0
+)
+
+REM Independent feature switches. User-facing wrapper BAT files only compose these flags.
+:parse_start_flags
+if "%~1"=="" goto start_flags_done
+if /i "%~1"=="--model-vision" (
+    set "MODEL_VISION_ENABLED=true"
+    set "VISION_ENABLED=false"
+    set "STARTUP_OCR_WARM_ENABLED=false"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--local-ocr" (
+    set "MODEL_VISION_ENABLED=false"
+    set "VISION_ENABLED=true"
+    set "STARTUP_OCR_WARM_ENABLED=true"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--no-model-vision" (
+    set "MODEL_VISION_ENABLED=false"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--image-gen" (
+    set "IMAGE_GENERATION_ENABLED=true"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--no-image-gen" (
+    set "IMAGE_GENERATION_ENABLED=false"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--no-gpu" (
+    set "GPU_DISABLED=true"
+    set "VISION_ENABLED=false"
+    set "VOICE_ENABLED=false"
+    set "STARTUP_OCR_WARM_ENABLED=false"
+    set "CUDA_VISIBLE_DEVICES=-1"
+    set "NVIDIA_VISIBLE_DEVICES=none"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--gpu" (
+    set "GPU_DISABLED=false"
+    set "CUDA_VISIBLE_DEVICES="
+    set "NVIDIA_VISIBLE_DEVICES="
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--voice" (
+    set "VOICE_ENABLED=true"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--no-voice" (
+    set "VOICE_ENABLED=false"
+    shift
+    goto parse_start_flags
+)
+if /i "%~1"=="--show-features" (
+    set "SHOW_START_FEATURES=1"
+    shift
+    goto parse_start_flags
+)
+echo [ERROR] Unknown startup flag: %~1
+exit /b 2
+
+:start_flags_done
+call "%PYRUN%" "%~dp0scripts\qq_project_mode.py" legacy
+if errorlevel 1 exit /b 1
+if defined SHOW_START_FEATURES (
+    echo GPU_DISABLED=%GPU_DISABLED%
+    echo VISION_ENABLED=%VISION_ENABLED%
+    echo MODEL_VISION_ENABLED=%MODEL_VISION_ENABLED%
+    echo IMAGE_GENERATION_ENABLED=%IMAGE_GENERATION_ENABLED%
+    echo VOICE_ENABLED=%VOICE_ENABLED%
+    echo CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%
+    echo NVIDIA_VISIBLE_DEVICES=%NVIDIA_VISIBLE_DEVICES%
     exit /b 0
 )
 
@@ -16,7 +99,7 @@ echo.
 
 REM [1/5] Check Python
 echo  [1/5] Checking Python...
-python --version >nul 2>&1
+call "%PYRUN%" -HealthCheck >nul 2>&1
 if errorlevel 1 (
     echo   [ERROR] Python not found. Please install Python 3.11+
     pause
@@ -37,9 +120,9 @@ REM [3/5] Venv + deps
 echo  [3/5] Setting up virtual environment...
 if not exist .venv\Scripts\python.exe (
     echo         Creating venv...
-    python -m venv .venv
+    call "%PYRUN%" -m venv .venv
 )
-.venv\Scripts\python.exe -m pip install -r requirements.txt --disable-pip-version-check
+call "%PYRUN%" -m pip install -r requirements.txt --disable-pip-version-check
 if errorlevel 1 (
     echo   [ERROR] Failed to install Python dependencies.
     pause
@@ -53,19 +136,19 @@ echo.
 echo   Database: SQLite (chatbot.db) - zero config
 echo.
 
-start "Chatbot API" cmd /k "chcp 65001 >nul && cd /d %~dp0 && title Chatbot API && .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "Chatbot API" cmd /k "chcp 65001 >nul && cd /d %~dp0 && title Chatbot API && call scripts\repo_python.bat -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 echo          Chatbot API launched on port 8000 [OK]
 
 timeout /t 2 /nobreak >nul
 
-start "NapCat Bridge" cmd /k "chcp 65001 >nul && cd /d %~dp0 && title NapCat Bridge && .venv\Scripts\python.exe napcat_bridge.py"
+start "NapCat Bridge" cmd /k "chcp 65001 >nul && cd /d %~dp0 && title NapCat Bridge && call scripts\repo_python.bat napcat_bridge.py"
 echo          NapCat Bridge launched on port 8090 [OK]
 
 REM [5/5] Start NapCat QQ
 echo  [5/5] Starting NapCat QQ...
 
 REM QQ account for the bot. Override via environment variable if needed.
-if not defined QQ_BOT_NUM set "QQ_BOT_NUM=1042414563"
+if not defined QQ_BOT_NUM set /p "QQ_BOT_NUM=Bot QQ account: "
 
 set "NAPCAT_BAT="
 for /d %%D in ("%~dp0napcat\NapCat.*.Shell") do (
@@ -120,7 +203,6 @@ echo   ==============================================
 
 :waitloop
 set API=http://localhost:8000/v1
-set PY=.venv\Scripts\python.exe botctl_helper.py
 set CMD=
 set /p CMD="> "
 if "%CMD%"=="" goto waitloop
@@ -136,41 +218,41 @@ if /i "%ACT%"=="quit" goto quit
 if /i "%ACT%"=="exit" goto quit
 
 if /i "%ACT%"=="quick" (
-    %PY% quick %ARGS%
+    call "%PYRUN%" botctl_helper.py quick %ARGS%
     goto waitloop
 )
 if /i "%ACT%"=="join" (
-    %PY% join %ARGS%
+    call "%PYRUN%" botctl_helper.py join %ARGS%
     goto waitloop
 )
 if /i "%ACT%"=="leave" (
-    %PY% leave %ARGS%
+    call "%PYRUN%" botctl_helper.py leave %ARGS%
     goto waitloop
 )
 if /i "%ACT%"=="list" (
-    %PY% list-groups
+    call "%PYRUN%" botctl_helper.py list-groups
     goto waitloop
 )
 if /i "%ACT%"=="info" (
-    curl -s "%API%/bot/groups/%ARGS%" | .venv\Scripts\python.exe -m json.tool 2>nul
+    curl -s "%API%/bot/groups/%ARGS%" | "%PYRUN%" -m json.tool 2>nul
     if errorlevel 1 curl -s "%API%/bot/groups/%ARGS%"
     echo.
     goto waitloop
 )
 if /i "%ACT%"=="sw" (
-    %PY% switch %ARGS%
+    call "%PYRUN%" botctl_helper.py switch %ARGS%
     goto waitloop
 )
 if /i "%ACT%"=="recent" (
-    %PY% recent %ARGS%
+    call "%PYRUN%" botctl_helper.py recent %ARGS%
     goto waitloop
 )
 if /i "%ACT%"=="admin" (
-    %PY% admin %ARGS%
+    call "%PYRUN%" botctl_helper.py admin %ARGS%
     goto waitloop
 )
 if /i "%ACT%"=="del" (
-    %PY% del %ARGS%
+    call "%PYRUN%" botctl_helper.py del %ARGS%
     goto waitloop
 )
 if /i "%ACT%"=="stop" (
@@ -182,7 +264,7 @@ if /i "%ACT%"=="cleanup" (
     goto waitloop
 )
 if /i "%ACT%"=="help" (
-    %PY% help
+    call "%PYRUN%" botctl_helper.py help
     goto waitloop
 )
 echo   Unknown: %CMD%  (type quit to stop all services)

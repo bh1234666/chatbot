@@ -6,13 +6,13 @@ title Auto Publish Public Snapshot
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+set "PY=%ROOT%\scripts\repo_python.bat"
 
 if /I "%~1"=="--check" (
     echo auto_publish.bat OK
+    call "%PY%" -HealthCheck || exit /b 1
     exit /b 0
 )
-
-set "PY=%ROOT%\.venv\Scripts\python.exe"
 set "EXPORT=%ROOT%\scripts\export_public_snapshot.py"
 set "OUT=%ROOT%\..\chatbot-public"
 
@@ -30,11 +30,6 @@ if not defined GIT (
     exit /b 1
 )
 
-if not exist "%PY%" (
-    echo [ERROR] venv Python not found at "%PY%"
-    pause
-    exit /b 1
-)
 if not exist "%EXPORT%" (
     echo [ERROR] export script missing: %EXPORT%
     pause
@@ -54,7 +49,7 @@ REM -- 1. export sanitized snapshot (preserves .git/) --
 echo [1/5] Exporting sanitized snapshot ...
 set "PYTHONIOENCODING=utf-8"
 set "PYTHONUTF8=1"
-"%PY%" "%EXPORT%" --out "%OUT%" --force
+call "%PY%" "%EXPORT%" --out "%OUT%" --force
 if errorlevel 1 (
     echo.
     echo [FAIL] Export aborted. Fix the source and re-run.

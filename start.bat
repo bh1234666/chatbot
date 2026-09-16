@@ -2,9 +2,11 @@
 chcp 65001 >nul
 title Chatbot - One Click Start
 color 0E
+set "PYRUN=%~dp0scripts\repo_python.bat"
 
 if /i "%~1"=="--check" (
     echo start.bat OK
+    call "%PYRUN%" -HealthCheck || exit /b 1
     exit /b 0
 )
 
@@ -17,7 +19,7 @@ echo.
 
 REM [1/4] Check Python
 echo  [1/4] Checking Python...
-python --version >nul 2>&1
+call "%PYRUN%" -HealthCheck >nul 2>&1
 if errorlevel 1 (
     echo   [ERROR] Python not found. Please install Python 3.11+
     pause
@@ -38,9 +40,9 @@ REM [3/4] Venv + deps
 echo  [3/4] Setting up virtual environment...
 if not exist .venv\Scripts\python.exe (
     echo         Creating venv...
-    python -m venv .venv
+    call "%PYRUN%" -m venv .venv
 )
-.venv\Scripts\python.exe -m pip install -r requirements.txt --disable-pip-version-check
+call "%PYRUN%" -m pip install -r requirements.txt --disable-pip-version-check
 if errorlevel 1 (
     echo   [ERROR] Failed to install Python dependencies.
     pause
@@ -49,15 +51,17 @@ if errorlevel 1 (
 echo          Environment ready [OK]
 
 REM [4/4] Start services
+call "%PYRUN%" "%~dp0scripts\qq_project_mode.py" legacy
+if errorlevel 1 exit /b 1
 echo  [4/4] Starting services...
 echo.
 echo   Database: SQLite (chatbot.db) - zero config
 echo.
 
-start "Chatbot API" cmd /c "chcp 65001 >nul && cd /d %~dp0 && title Chatbot API && .venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+start "Chatbot API" cmd /c "chcp 65001 >nul && cd /d %~dp0 && title Chatbot API && call scripts\repo_python.bat -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 echo          Chatbot API launched on port 8000 [OK]
 
-start "NapCat Bridge" cmd /c "chcp 65001 >nul && cd /d %~dp0 && title NapCat Bridge && .venv\Scripts\python.exe napcat_bridge.py"
+start "NapCat Bridge" cmd /c "chcp 65001 >nul && cd /d %~dp0 && title NapCat Bridge && call scripts\repo_python.bat napcat_bridge.py"
 echo          NapCat Bridge launched on port 8090 [OK]
 
 echo.
@@ -68,9 +72,7 @@ echo       Chatbot API : http://localhost:8000/docs
 echo       Bridge      : http://localhost:8090/health
 echo       Database    : chatbot.db (SQLite)
 echo.
-echo   Next: Configure NapCat WebUI callback URL
-echo       http://localhost:6099/webui
-echo       Set HTTP callback to:
+echo   NapCat HTTP callback configured automatically:
 echo       http://localhost:8090/napcat/callback
 echo.
 echo   Then start NapCat QQ separately:
